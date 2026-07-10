@@ -19,6 +19,7 @@ export interface TuiHandle {
     beginTask(): AbortSignal; // fresh AbortController per task; skip-confirm aborts it
   };
   waitResume(): Promise<void>; // resolves now if !paused, else on next unpause
+  waitStalled(): Promise<"retry" | "quit">;
   unmount(): void;
 }
 
@@ -78,6 +79,17 @@ export function mount(
           }
         });
       }),
+    waitStalled: () => {
+      store.dispatch({ type: "setStalled" });
+      return new Promise<"retry" | "quit">((res) => {
+        const un = store.subscribe(() => {
+          if (state.stalledAction) {
+            un();
+            res(state.stalledAction);
+          }
+        });
+      });
+    },
     unmount: () => {
       unsubBus();
       instance.unmount();

@@ -26,6 +26,7 @@ beforeEach(() => {
   setLocale("en"); // module-global locale — the import-time peek may have set it
   vi.spyOn(console, "clear").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(process, "exit").mockImplementation((() => {
     throw new Error("exit");
   }) as never);
@@ -50,17 +51,25 @@ describe("root action", () => {
     );
   });
 
-  it("launches the wizard and runs with the picked prd", async () => {
+  it("wizard run:true → runs the loop with the picked prd", async () => {
     vi.mocked(existsSync).mockReturnValue(false);
-    vi.mocked(initWizard).mockResolvedValue("picked.json");
+    vi.mocked(initWizard).mockResolvedValue({ prdPath: "/repo/picked.json", run: true });
     await run([]);
-    expect(initWizard).toHaveBeenCalled();
-    expect(runLoop).toHaveBeenCalledWith(expect.objectContaining({ prd: "picked.json" }));
+    expect(initWizard).toHaveBeenCalledWith(expect.objectContaining({ fromRootFallback: true }));
+    expect(runLoop).toHaveBeenCalledWith(expect.objectContaining({ prd: "/repo/picked.json" }));
+  });
+
+  it("wizard run:false → prints the saved hint, no loop", async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    vi.mocked(initWizard).mockResolvedValue({ prdPath: "/repo/picked.json", run: false });
+    await run([]);
+    expect(console.log).toHaveBeenCalledWith("saved — run with: ralphrun --prd /repo/picked.json");
+    expect(runLoop).not.toHaveBeenCalled();
   });
 
   it("exits when the wizard is cancelled", async () => {
     vi.mocked(existsSync).mockReturnValue(false);
-    vi.mocked(initWizard).mockResolvedValue(undefined as never);
+    vi.mocked(initWizard).mockResolvedValue(null);
     await expect(run([])).rejects.toThrow("exit");
     expect(process.exit).toHaveBeenCalledWith(0);
     expect(runLoop).not.toHaveBeenCalled();
@@ -68,9 +77,25 @@ describe("root action", () => {
 });
 
 describe("init command", () => {
-  it("clears and runs the wizard", async () => {
+  it("runs the wizard; quit → no loop, no hint", async () => {
+    vi.mocked(initWizard).mockResolvedValue(null);
     await run(["init", "--force"]);
     expect(initWizard).toHaveBeenCalledWith(expect.objectContaining({ force: true }));
+    expect(runLoop).not.toHaveBeenCalled();
+    expect(console.log).not.toHaveBeenCalled();
+  });
+
+  it("run:true (CONSTRUIR) → hands the prd to the loop", async () => {
+    vi.mocked(initWizard).mockResolvedValue({ prdPath: "/repo/prd.json", run: true });
+    await run(["init"]);
+    expect(runLoop).toHaveBeenCalledWith({ prd: "/repo/prd.json" });
+  });
+
+  it("run:false → prints the saved hint, no loop", async () => {
+    vi.mocked(initWizard).mockResolvedValue({ prdPath: "/repo/prd.json", run: false });
+    await run(["init"]);
+    expect(console.log).toHaveBeenCalledWith("saved — run with: ralphrun --prd /repo/prd.json");
+    expect(runLoop).not.toHaveBeenCalled();
   });
 });
 

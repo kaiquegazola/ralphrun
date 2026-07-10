@@ -71,6 +71,22 @@ describe("loadConfig", () => {
     expect(vi.mocked(existsSync).mock.calls[0][0]).toContain("/proj/ralph.config.json");
   });
 
+  it("malformed config file throws a clean one-line error (no raw stack)", () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue("{oops" as unknown as string);
+    expect(() => loadConfig("/x/prd.json", "/custom/ralph.config.json", {})).toThrow(
+      /invalid JSON in .*\/custom\/ralph\.config\.json/,
+    );
+  });
+
+  it("non-Error read failure is stringified into the same message", () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockImplementation(() => {
+      throw "raw-failure";
+    });
+    expect(() => loadConfig("/x/prd.json", undefined, {})).toThrow("raw-failure");
+  });
+
   it("overrides win over file and defaults", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ review_after: true }) as unknown as string);

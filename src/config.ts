@@ -2,6 +2,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { t } from "./i18n.js";
 import { loadUserConfig } from "./userconfig.js";
 
 export const BINARIES: Record<string, string> = {
@@ -94,7 +95,13 @@ export function loadConfig(
     ? resolve(configFlag)
     : resolve(dirname(prdPath), "ralph.config.json");
   if (existsSync(cfgFile)) {
-    const file = JSON.parse(readFileSync(cfgFile, "utf8"));
+    let file: unknown;
+    try {
+      file = JSON.parse(readFileSync(cfgFile, "utf8"));
+    } catch (e) {
+      // loop.ts catches this and exits(1) with the one-line message — no raw stack
+      throw new Error(t("loop.err.badConfig", { path: cfgFile, msg: e instanceof Error ? e.message : String(e) }));
+    }
     Object.assign(cfg, file); // JSON.parse never yields undefined values
   }
   mergeDefined(cfg, overrides);

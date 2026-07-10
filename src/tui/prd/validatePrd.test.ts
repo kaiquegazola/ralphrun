@@ -90,6 +90,18 @@ it("rejects bad per-task field types in one shot", () => {
   );
 });
 
+it("rejects non-string acceptance items", () => {
+  const r = validatePrd(prd({ tasks: [task({ acceptance: [1, 2] })] }));
+  expect(r.errors).toContain("task[0].acceptance items must be strings");
+});
+
+it("rejects a non-string verify (undefined stays allowed)", () => {
+  const r = validatePrd(prd({ tasks: [task({ verify: 42 })] }));
+  expect(r.errors).toContain("task[0].verify must be a string");
+  expect(validatePrd(prd({ tasks: [task({ verify: "npm test" })] })).ok).toBe(true);
+  expect(validatePrd(prd()).ok).toBe(true); // verify omitted
+});
+
 it("rejects a dep referencing an unknown id", () => {
   const r = validatePrd(prd({ tasks: [task({ id: "A", deps: ["ghost"] })] }));
   expect(r.errors).toContain("task[0] dep references unknown id: ghost");

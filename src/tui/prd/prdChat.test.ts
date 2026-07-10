@@ -121,6 +121,18 @@ it("coerces invented statuses/missing defaults instead of rejecting the draft", 
   expect(res.prd!.tasks[2].status).toBe("todo");
 });
 
+it("keeps an in-flight 'doing' status (planner path matches the old normalizeDraft)", async () => {
+  const doing = JSON.stringify({
+    project: "p",
+    stack: "s",
+    architecture_notes: "a",
+    tasks: [{ id: "A", title: "A", status: "doing", deps: [], retries: 0, description: "d", acceptance: [] }],
+  });
+  const { res } = await run(["s", "", "```json", doing, "```"]);
+  expect(res.errors).toEqual([]);
+  expect(res.prd!.tasks[0].status).toBe("doing");
+});
+
 it("normalize tolerates junk shapes (non-object task, non-array tasks) and validation still rejects", async () => {
   const { res: r1 } = await run(["s", "", "```json", '{"project":"p","stack":"s","architecture_notes":"a","tasks":[42]}', "```"]);
   expect(r1.prd).toBeNull(); // task[0] must be an object

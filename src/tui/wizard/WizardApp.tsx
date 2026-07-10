@@ -1,12 +1,14 @@
 // WizardApp.tsx — fullscreen app shell for `ralphrun init`: header bar, screen
-// router (preflight → … → studio), statusbar with contextual keybinds. All
-// state lives in wizardController (pure reducer); this file only renders and
-// maps keys → actions via useInput. Hand-rolled select list + text input — no
-// new deps. Studio screen embeds PrdApp with the lazily-created prd store.
-// Excluded from coverage (Ink can't mount under the test runner).
+// router (preflight → settings → action → studio), statusbar with contextual
+// keybinds. All state lives in wizardController (pure reducer); this file only
+// renders and maps keys → actions via useInput. Hand-rolled select list + text
+// input — no new deps. Studio screen embeds PrdApp with the lazily-created prd
+// store. Excluded from coverage (Ink can't mount under the test runner).
 
 import React, { useEffect, useSyncExternalStore } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
+import { existsSync } from "node:fs";
+import { resolve, relative } from "node:path";
 import type { AgentDiagnostic } from "../../diagnostics.js";
 import { t } from "../../i18n.js";
 import { searchFiles } from "../../picker.js";
@@ -29,12 +31,12 @@ export interface WizardStore {
 
 export interface WizardAppProps {
   store: WizardStore;
-  prdStore(): PrdStore | null; // lazy — created by mount on the proceed transition
+  prdStore(): PrdStore | null; // lazy — created by mount on the studio transition
   cwd: string;
   checkAgents(): AgentDiagnostic[];
-  cfgExistsFor(prdPath: string): boolean;
   onSend(text: string): void;
-  onFinalize(): void;
+  onSave(): void; // savedPath set → silent re-save; else opens the save-as screen
+  onBuild(): void; // save (or save-as) then resolve { prdPath, run:true }
   onQuitStudio(): void;
   onResize?(): void; // mount wires instance.clear() to avoid stale cells on shrink
 }
@@ -45,29 +47,23 @@ const TITLES: Partial<Record<Screen, () => string>> = {
   language: () => t("wizard.title.language"),
   preflight: () => t("wizard.title.preflight"),
   filepick: () => t("wizard.title.filepick"),
-  plannerCli: () => t("wizard.title.plannerCli"),
-  executorCli: () => t("wizard.title.executorCli"),
-  advisorCli: () => t("wizard.title.advisorCli"),
-  commit: () => t("wizard.title.commit"),
+  settings: () => t("wizard.title.settings"),
 };
 
-const REFRESH_SCREENS: ReadonlySet<Screen> = new Set(["preflight", "plannerCli", "executorCli", "advisorCli"]);
+const REFRESH_SCREENS: ReadonlySet<Screen> = new Set(["preflight", "settings", "agentPick"]);
 
 function title(s: WizardState): string {
   switch (s.screen) {
     case "action":
       return s.ctx.fromRootFallback ? t("wizard.title.actionNoPrd") : t("wizard.title.action");
-    case "plannerModel":
-      return t("wizard.title.plannerModel", { cli: s.plannerSpec!.cli });
-    case "executorModel":
-      return t("wizard.title.executorModel", { cli: s.executorSpec!.cli });
-    case "advisorModel":
-      return t("wizard.title.advisorModel", { cli: s.advisorSpec!.cli });
-    case "overwrite": {
-      const o = s.needsOverwrite!;
-      const names = [o.prd && "prd.json", o.cfg && "ralph.config.json"].filter(Boolean).join(t("common.and"));
-      return t("wizard.title.overwrite", { names });
-    }
+    case "agentPick":
+      return t("wizard.title.agentPick", { role: t(`wizard.settings.${s.agentRole!}`) });
+    case "refineOrRun":
+      return s.prdErrors
+        ? t("wizard.title.refineInvalid", { path: relative(s.ctx.cwd, s.prdPath!) })
+        : t("wizard.title.refineOrRun", { path: relative(s.ctx.cwd, s.prdPath!) });
+    case "saveAs":
+      return t("wizard.title.saveAs", { cwd: s.ctx.cwd });
     default:
       return TITLES[s.screen]?.() ?? "";
   }
@@ -158,13 +154,6 @@ function statusHints(screen: Screen): [string, string][] {
       ["esc", t("hint.back")],
     ];
   }
-  if (screen === "overwrite") {
-    return [
-      ["y", t("hint.overwrite")],
-      ["n", t("hint.cancel")],
-      ["esc", t("hint.back")],
-    ];
-  }
   const base: [string, string][] = [
     ["↑↓", t("hint.move")],
     ["⏎", t("hint.select")],
@@ -192,23 +181,33 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
       : [];
   const fileCursor = Math.min(s.cursor, Math.max(0, results.length - 1));
 
-  // always-active ctrl+c → quit, even on studio / while the planner is drafting
-  // (PrdApp's own useInput is inactive then; exitOnCtrlC is false in mount).
+  // always-active ctrl+c → quit on the setup screens (exitOnCtrlC is false in
+  // mount). The studio owns its own ctrl+c: PrdApp routes it through the y/n
+  // quit gate so a dirty PRD warns instead of being dropped.
   useInput((input, key) => {
-    if (key.ctrl && input === "c") dispatch({ type: "quit" });
+    if (key.ctrl && input === "c" && s.screen !== "studio") dispatch({ type: "quit" });
   });
 
   // setup-screen keys; studio input is owned entirely by PrdApp
   useInput(
     (input, key) => {
+      if (s.screen === "saveAs") {
+        // path text input — q is typeable here; ctrl+c handled by the hook above
+        if (key.ctrl || key.meta) return;
+        if (key.escape) return void dispatch({ type: "saveAsCancel" });
+        if (key.return) return void dispatch({ type: "saveAsConfirm" });
+        if (key.backspace || key.delete) {
+          return void dispatch({ type: "saveAsInput", value: s.saveAsInput.slice(0, -1) });
+        }
+        if (input) dispatch({ type: "saveAsInput", value: s.saveAsInput + input });
+        return;
+      }
       if (key.ctrl || key.meta) return; // ctrl+c handled by the hook above
       if (s.screen === "filepick") {
         if (key.escape) return void dispatch({ type: "back" });
         if (key.return) {
           const chosen = results[fileCursor];
-          if (chosen) {
-            dispatch({ type: "pickFile", path: chosen.absolute, cfgExists: props.cfgExistsFor(chosen.absolute) });
-          }
+          if (chosen) dispatch({ type: "pickFile", path: chosen.absolute });
           return;
         }
         if (key.upArrow) return void dispatch({ type: "up" });
@@ -227,10 +226,6 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
       if (key.return) return void dispatch({ type: "select" });
       if (key.escape) return void dispatch({ type: "back" });
       if (input === "q") return void dispatch({ type: "quit" });
-      if (s.screen === "overwrite") {
-        if (input === "y") return void dispatch({ type: "confirm" });
-        if (input === "n") return void dispatch({ type: "deny" });
-      }
       if (input === "r" && REFRESH_SCREENS.has(s.screen)) {
         dispatch({ type: "refresh", diagnostics: props.checkAgents() });
       }
@@ -245,6 +240,10 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
   // title (1) + its blank margin (1); SelectList's ellipsis rows are already
   // inside its own budget, and the no-CLIs warning row is subtracted at use.
   const listMax = Math.max(1, contentRows - 2);
+
+  // save-as: warn inline when the resolved path already exists (no overwrite screen)
+  const saveAsTarget = s.screen === "saveAs" ? s.saveAsInput.trim() : "";
+  const saveAsExists = saveAsTarget !== "" && existsSync(resolve(s.ctx.cwd, saveAsTarget));
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -261,8 +260,10 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
           height={contentRows}
           width={columns}
           active
+          savedPath={s.savedPath}
           onSend={props.onSend}
-          onFinalize={props.onFinalize}
+          onSave={props.onSave}
+          onBuild={props.onBuild}
           onQuit={props.onQuitStudio}
         />
       ) : (
@@ -278,8 +279,28 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
 
             {s.screen === "preflight" && <Preflight diagnostics={s.diagnostics} />}
 
+            {s.screen === "saveAs" && (
+              <Box flexDirection="column">
+                <Text wrap="truncate-end">
+                  <Text color="cyan">❯ </Text>
+                  {s.saveAsInput}
+                  <Text dimColor>▌</Text>
+                </Text>
+                {saveAsExists && (
+                  <Text color="yellow" wrap="truncate-end">
+                    {t("wizard.saveAs.exists")}
+                  </Text>
+                )}
+              </Box>
+            )}
+
             {s.screen === "filepick" && (
               <Box flexDirection="column">
+                {s.prdErrors?.map((e, i) => (
+                  <Text key={i} color="red" wrap="truncate-end">
+                    {e}
+                  </Text>
+                ))}
                 <Text wrap="truncate-end">
                   <Text color="cyan">❯ </Text>
                   {s.filepickQuery}
@@ -297,8 +318,20 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
               </Box>
             )}
 
-            {s.screen !== "preflight" && s.screen !== "filepick" && (
+            {s.screen !== "preflight" && s.screen !== "filepick" && s.screen !== "saveAs" && (
               <Box flexDirection="column">
+                {s.screen === "refineOrRun" && s.prdErrors && (
+                  <Box flexDirection="column" marginBottom={1}>
+                    {s.prdErrors.map((e, i) => (
+                      <Text key={i} color="red" wrap="truncate-end">
+                        {e}
+                      </Text>
+                    ))}
+                    <Text dimColor wrap="truncate-end">
+                      {t("wizard.refine.invalidHint")}
+                    </Text>
+                  </Box>
+                )}
                 {!canProceed(s) && (
                   <Text color="yellow" wrap="truncate-end">
                     {t("wizard.noClis")}
@@ -308,7 +341,13 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
               </Box>
             )}
           </Box>
-          <Hints items={statusHints(s.screen)} />
+          {s.screen === "saveAs" ? (
+            <Text dimColor wrap="truncate-end">
+              {t("wizard.saveAs.hint")}
+            </Text>
+          ) : (
+            <Hints items={statusHints(s.screen)} />
+          )}
         </>
       )}
     </Box>

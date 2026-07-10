@@ -81,6 +81,7 @@ function makeHandle(over: {
       beginTask: vi.fn(() => SIG),
     },
     waitResume: vi.fn(async () => {}),
+    waitStalled: vi.fn(async () => "quit"),
     unmount: vi.fn(),
   } as unknown as Handle;
 }

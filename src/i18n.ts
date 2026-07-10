@@ -36,6 +36,9 @@ const en = {
   "loop.err.notLoggedIn": "❌ CLI '{cli}' is installed but NOT logged in. Please run '{cmd}' first.",
   "loop.err.noPrd": "no PRD at {path}",
   "loop.err.noTask": "no task {id}",
+  "loop.err.invalidPrd": "invalid PRD at {path}:",
+  "loop.err.invalidPrdHint": "fix it in the studio: ralphrun init --prd {path}",
+  "loop.err.badConfig": "invalid JSON in {path}: {msg}",
 
   // loop.ts — --dry-run report
   "loop.dry.next": "next: {id} — {title}",
@@ -48,8 +51,11 @@ const en = {
   // loop.ts / run.ts / verify.ts / executor.ts / advisor.ts — run log lines
   // (rendered live in the TUI pane; also appended to progress.md)
   "loop.log.recovered": "recovered/normalized prd.json (reset stuck tasks, filled defaults)",
+  "loop.log.midrunCorrupt": "prd.json unreadable mid-run — stopping: {msg}",
+  "loop.log.taskVanished": "task {id} disappeared from prd.json mid-run — stopping",
   "loop.log.quit": "quit by user",
   "loop.log.allDone": "all tasks done — stopping",
+  "loop.log.stalled": "no runnable tasks ({n} blocked or waiting) — stopping",
   "loop.log.start": "START {id} — {title} (attempt {n})",
   "loop.log.crashed": "  {id}: crashed — {msg}",
   "loop.log.skipped": "SKIPPED {id} ({s}s)",
@@ -86,10 +92,28 @@ const en = {
   // wizardController.ts — option labels (built per-call so locale applies)
   "wizard.action.createNew": "Create a new PRD (chat with the planner)",
   "wizard.action.selectExisting": "Select an existing PRD (*.json)",
-  "wizard.advisor.none": "none (skip)",
   "wizard.model.recommended": "(recommended)",
   "wizard.header.studio": "studio",
-  "wizard.header.setup": "setup {n}/7",
+  "wizard.header.setup": "setup {n}/3",
+
+  // wizardController.ts / WizardApp.tsx — settings + agentPick + refineOrRun + saveAs
+  "wizard.title.settings": "Agents & settings — ⏎ to change a row",
+  "wizard.settings.planner": "Planner",
+  "wizard.settings.executor": "Executor",
+  "wizard.settings.advisor": "Advisor",
+  "wizard.settings.commit": "Commit per task: {v}",
+  "wizard.settings.continue": "Continue",
+  "wizard.settings.disabled": "disabled",
+  "wizard.title.agentPick": "Agent for {role} (cli:model):",
+  "wizard.agent.disable": "disable (no advisor)",
+  "wizard.title.refineOrRun": "{path} — what now?",
+  "wizard.title.refineInvalid": "{path} — invalid PRD",
+  "wizard.refine.studio": "Refine in the studio",
+  "wizard.refine.run": "Run it now",
+  "wizard.refine.invalidHint": "fix these in the studio, or esc to go back",
+  "wizard.title.saveAs": "Save PRD as (path relative to {cwd}):",
+  "wizard.saveAs.hint": "⏎ save · esc cancel",
+  "wizard.saveAs.exists": "file exists — ⏎ overwrites",
 
   // WizardApp.tsx — titles
   "wizard.title.preflight": "Agents preflight",
@@ -129,8 +153,6 @@ const en = {
 
   // shared
   "common.noMatch": "no match",
-  "common.yesOverwrite": "Yes, overwrite",
-  "common.noCancel": "No, cancel",
   "common.yes": "Yes",
   "common.no": "No",
   "common.and": " and ",
@@ -164,6 +186,13 @@ const en = {
   "studio.hint.finalize": "finalize",
   "studio.hint.tasks": "tasks",
   "studio.hint.scroll": "scroll",
+  "studio.hint.save": "save PRD",
+  "studio.hint.build": "build",
+  "studio.savedFlash": "saved ✓",
+  "studio.quit.confirmUnsaved": "quit studio? unsaved changes will be lost",
+  "studio.err.cantSave": "cannot save: {errors}",
+  "studio.err.draftingSave": "cannot save while the planner is thinking — wait for the turn to finish",
+  "cli.savedRunHint": "saved — run with: ralphrun --prd {path}",
   // PrdApp.tsx — chat role prefixes (≤7 chars: padded into PREFIX_W)
   "studio.role.you": "you",
   "studio.role.planner": "planner",
@@ -172,7 +201,8 @@ const en = {
   "studio.err.noJson": "no valid PRD json found in planner output",
   "studio.err.spawnFailed": "failed to spawn planner",
 
-  // validatePrd.ts — structural errors (studio chat pane + finalize gate)
+  // prdload.ts — structural errors (studio chat pane, finalize gate, loop preflight)
+  "prd.err.json": "invalid JSON: {msg}",
   "prd.err.notObject": "prd must be an object",
   "prd.err.project": "project must be a string",
   "prd.err.stack": "stack must be a string",
@@ -187,8 +217,10 @@ const en = {
   "prd.err.retries": "task[{i}].retries must be a number",
   "prd.err.description": "task[{i}].description must be a string",
   "prd.err.acceptance": "task[{i}].acceptance must be an array",
+  "prd.err.acceptanceItem": "task[{i}].acceptance items must be strings",
   "prd.err.deps": "task[{i}].deps must be an array",
   "prd.err.depUnknown": "task[{i}] dep references unknown id: {d}",
+  "prd.err.verify": "task[{i}].verify must be a string",
 
   // run-loop TUI (App.tsx + controller.ts)
   "run.tasks": "Tasks",
@@ -201,6 +233,7 @@ const en = {
   "run.confirmSkip": "confirm skip? y/n",
   "run.confirmQuit": "confirm quit? y/n",
   "run.footerHint": "[p]ause [s]kip [q]uit",
+  "run.footerStalled": "Stalled. Check leftovers and intervene. [r]etry blocked [q]uit",
 
   // configcmd.ts — global config
   "config.resetDone": "Global config reset ({path}).",
@@ -251,6 +284,9 @@ const ptBr: Record<MsgKey, string> = {
   "loop.err.notLoggedIn": "❌ A CLI '{cli}' está instalada mas NÃO está logada. Rode '{cmd}' primeiro.",
   "loop.err.noPrd": "nenhum PRD em {path}",
   "loop.err.noTask": "task {id} não existe",
+  "loop.err.invalidPrd": "PRD inválido em {path}:",
+  "loop.err.invalidPrdHint": "corrija no studio: ralphrun init --prd {path}",
+  "loop.err.badConfig": "JSON inválido em {path}: {msg}",
 
   "loop.dry.next": "próxima: {id} — {title}",
   "loop.dry.mode": "modo: {mode} | executor {executor} | advisor {advisor}",
@@ -260,8 +296,11 @@ const ptBr: Record<MsgKey, string> = {
   "loop.dry.reviewNative": "nativo",
 
   "loop.log.recovered": "prd.json recuperado/normalizado (tasks travadas resetadas, padrões preenchidos)",
+  "loop.log.midrunCorrupt": "prd.json ilegível durante a execução — parando: {msg}",
+  "loop.log.taskVanished": "a task {id} sumiu do prd.json durante a execução — parando",
   "loop.log.quit": "encerrado pelo usuário",
   "loop.log.allDone": "todas as tasks concluídas — parando",
+  "loop.log.stalled": "nenhuma task executável ({n} bloqueadas ou aguardando) — parando",
   "loop.log.start": "START {id} — {title} (tentativa {n})",
   "loop.log.crashed": "  {id}: quebrou — {msg}",
   "loop.log.skipped": "PULADA {id} ({s}s)",
@@ -296,10 +335,27 @@ const ptBr: Record<MsgKey, string> = {
 
   "wizard.action.createNew": "Criar um novo PRD (conversar com o planner)",
   "wizard.action.selectExisting": "Selecionar um PRD existente (*.json)",
-  "wizard.advisor.none": "nenhum (pular)",
   "wizard.model.recommended": "(recomendado)",
   "wizard.header.studio": "studio",
-  "wizard.header.setup": "setup {n}/7",
+  "wizard.header.setup": "setup {n}/3",
+
+  "wizard.title.settings": "Agentes e configurações — ⏎ para alterar uma linha",
+  "wizard.settings.planner": "Planner",
+  "wizard.settings.executor": "Executor",
+  "wizard.settings.advisor": "Advisor",
+  "wizard.settings.commit": "Commit por task: {v}",
+  "wizard.settings.continue": "Continuar",
+  "wizard.settings.disabled": "desativado",
+  "wizard.title.agentPick": "Agente para {role} (cli:modelo):",
+  "wizard.agent.disable": "desativar (sem advisor)",
+  "wizard.title.refineOrRun": "{path} — e agora?",
+  "wizard.title.refineInvalid": "{path} — PRD inválido",
+  "wizard.refine.studio": "Refinar no studio",
+  "wizard.refine.run": "Rodar agora",
+  "wizard.refine.invalidHint": "corrija no studio, ou esc para voltar",
+  "wizard.title.saveAs": "Salvar PRD como (caminho relativo a {cwd}):",
+  "wizard.saveAs.hint": "⏎ salvar · esc cancelar",
+  "wizard.saveAs.exists": "arquivo já existe — ⏎ sobrescreve",
 
   "wizard.title.preflight": "Verificação dos agentes",
   "wizard.title.filepick": "Selecione um PRD existente (*.json)",
@@ -334,8 +390,6 @@ const ptBr: Record<MsgKey, string> = {
   "hint.type": "digite",
 
   "common.noMatch": "nada encontrado",
-  "common.yesOverwrite": "Sim, sobrescrever",
-  "common.noCancel": "Não, cancelar",
   "common.yes": "Sim",
   "common.no": "Não",
   "common.and": " e ",
@@ -368,12 +422,20 @@ const ptBr: Record<MsgKey, string> = {
   "studio.hint.finalize": "finalizar",
   "studio.hint.tasks": "tarefas",
   "studio.hint.scroll": "rolar",
+  "studio.hint.save": "salvar PRD",
+  "studio.hint.build": "construir",
+  "studio.savedFlash": "salvo ✓",
+  "studio.quit.confirmUnsaved": "sair do studio? alterações não salvas serão perdidas",
+  "studio.err.cantSave": "não é possível salvar: {errors}",
+  "studio.err.draftingSave": "não dá para salvar enquanto o planner está pensando — aguarde a rodada terminar",
+  "cli.savedRunHint": "salvo — rode com: ralphrun --prd {path}",
   "studio.role.you": "você",
   "studio.role.planner": "planner",
   "studio.role.error": "erro",
   "studio.err.noJson": "nenhum json de PRD válido encontrado na saída do planner",
   "studio.err.spawnFailed": "falha ao iniciar o planner",
 
+  "prd.err.json": "JSON inválido: {msg}",
   "prd.err.notObject": "prd precisa ser um objeto",
   "prd.err.project": "project precisa ser uma string",
   "prd.err.stack": "stack precisa ser uma string",
@@ -388,8 +450,10 @@ const ptBr: Record<MsgKey, string> = {
   "prd.err.retries": "task[{i}].retries precisa ser um número",
   "prd.err.description": "task[{i}].description precisa ser uma string",
   "prd.err.acceptance": "task[{i}].acceptance precisa ser um array",
+  "prd.err.acceptanceItem": "task[{i}].acceptance precisa conter apenas strings",
   "prd.err.deps": "task[{i}].deps precisa ser um array",
   "prd.err.depUnknown": "task[{i}] dep referencia id desconhecido: {d}",
+  "prd.err.verify": "task[{i}].verify precisa ser uma string",
 
   "run.tasks": "Tarefas",
   "run.phase": "fase",
@@ -401,6 +465,7 @@ const ptBr: Record<MsgKey, string> = {
   "run.confirmSkip": "confirmar pular? y/n",
   "run.confirmQuit": "confirmar sair? y/n",
   "run.footerHint": "[p] pausar [s] pular [q] sair",
+  "run.footerStalled": "Fila travada! Corrija os leftovers. [r] tentar bloqueadas [q] sair",
 
   "config.resetDone": "Configuração global resetada ({path}).",
   "config.globalPath": "configuração global: {path}",

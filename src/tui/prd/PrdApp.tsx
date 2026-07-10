@@ -4,8 +4,9 @@
 // '@'-picker flags, the q → quit? y/n gate, and the spinner frame are ephemeral
 // local useState. Accepts height/width from the fullscreen shell (flexible
 // row budget replaces the old fixed MAX_ROWS/CHAT_TAIL). useInput drives send /
-// f / u / q and the inline '@' fuzzy file picker; `active` folds into isActive
-// so the wizard shell owns keys on non-studio screens. Excluded from coverage.
+// s (save) / c (build) / u / q and the inline '@' fuzzy file picker; `active`
+// folds into isActive so the wizard shell owns keys on non-studio screens.
+// Excluded from coverage.
 
 import React, { useEffect, useState, useSyncExternalStore } from "react";
 import { Box, Text, useInput } from "ink";
@@ -13,7 +14,7 @@ import { t } from "../../i18n.js";
 import type { TaskStatus } from "../../prd.js";
 import { searchFiles } from "../../picker.js";
 import { validatePrd } from "./validatePrd.js";
-import { canFinalize, taskCount, depsOk, type PrdAction, type PrdState, type Role } from "./prdController.js";
+import { canSave, taskCount, depsOk, type PrdAction, type PrdState, type Role } from "./prdController.js";
 import { mdToLines, type Span, type SpanStyle } from "./markdown.js";
 
 export interface PrdStore {
@@ -26,8 +27,10 @@ export interface PrdAppProps {
   store: PrdStore;
   cwd: string;
   onSend(text: string): void;
-  onFinalize(): void;
+  onSave(): void; // [s]/ctrl+s — mount decides save-as vs silent re-save
+  onBuild(): void; // [c] CONSTRUIR — save then resolve run:true
   onQuit(): void;
+  savedPath?: string | null; // wizard's remembered save path (statusbar "saved ✓")
   height?: number; // content rows available (fullscreen shell); default fits inline use
   width?: number;
   active?: boolean; // false = another screen owns the keys
@@ -56,12 +59,13 @@ const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 // can't blow the budget.
 const oneLine = (t: string): string => t.replace(/\s*\n\s*/g, " ");
 
-export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, active }: PrdAppProps): React.ReactElement {
+export function PrdApp({ store, cwd, onSend, onSave, onBuild, onQuit, savedPath, height, width, active }: PrdAppProps): React.ReactElement {
   const s = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [buffer, setBuffer] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerIndex, setPickerIndex] = useState(0);
   const [pendingQuit, setPendingQuit] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null); // s/c pressed with an invalid PRD
   const [frame, setFrame] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0); // rows scrolled up from the chat tail
   const [focus, setFocus] = useState<"input" | "table">("input"); // Tab alterna
@@ -71,7 +75,7 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
   // new message (or a streaming chunk) snaps the chat back to the tail
   useEffect(() => setScrollOffset(0), [s.messages.length]);
   // keep the task cursor valid when the planner rewrites the task list
-  const nTasks = s.prd?.tasks.length ?? 0;
+  const nTasks = s.prd?.tasks?.length ?? 0;
   useEffect(() => setTaskCursor((c) => Math.min(c, Math.max(0, nTasks - 1))), [nTasks]);
 
   const drafting = s.status === "drafting";
@@ -87,12 +91,32 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
   // window; ↑↓ scrolls through everything like Claude Code's '@'.
   const results = pickerOpen ? searchFiles(fragment, cwd) : [];
 
+  // [s]/[c]/ctrl+s with an invalid PRD: flash WHY in the statusbar (no dispatch)
+  const gated = (fn: () => void): void => {
+    if (canSave(s)) return void fn();
+    const errors = s.prd ? validatePrd(s.prd).errors.join("; ") : t("studio.header.empty");
+    setSaveErr(t("studio.err.cantSave", { errors }));
+  };
+
   useInput(
     (input, key) => {
+      if (saveErr) setSaveErr(null); // flash clears on the next keypress
+      // ctrl+c routes through the same y/n gate as [q], so a dirty PRD always
+      // warns before quitting — including mid-draft (the shell skips studio).
+      if (key.ctrl && input === "c") return void setPendingQuit(true);
       if (pendingQuit) {
         if (input === "y") return void onQuit();
         if (input === "n" || key.escape) return void setPendingQuit(false);
         return; // swallow everything else while confirming
+      }
+      if (drafting) {
+        // planner turn owns the terminal — but say WHY save is blocked, and
+        // keep quit reachable (the y/n gate above still warns when dirty).
+        if (input === "s" || input === "c" || (key.ctrl && input === "s")) {
+          return void setSaveErr(t("studio.err.draftingSave"));
+        }
+        if (input === "q") return void setPendingQuit(true);
+        return; // swallow the rest while drafting
       }
       if (pickerOpen) {
         if (key.escape) return void setPickerOpen(false);
@@ -127,6 +151,10 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
         return;
       }
 
+      // ctrl+s saves in BOTH focus modes (best-effort: many terminals eat it as
+      // XOFF flow control — [s] on an empty buffer is the primary binding).
+      if (key.ctrl && input === "s") return void gated(onSave);
+
       // Tab alterna foco input <-> tabela de tasks (o "clique" é teclado)
       if (key.tab) {
         setDetailOpen(false);
@@ -139,12 +167,14 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
           if (key.escape || key.return || input === "q") return void setDetailOpen(false);
           return;
         }
-        const tasksNow = s.prd?.tasks ?? [];
+        const tasksNow = Array.isArray(s.prd?.tasks) ? s.prd.tasks : [];
         if (key.upArrow) return void setTaskCursor((c) => Math.max(0, c - 1));
         if (key.downArrow) return void setTaskCursor((c) => Math.min(Math.max(0, tasksNow.length - 1), c + 1));
         if (key.return) return void setDetailOpen(tasksNow.length > 0);
         if (key.escape) return void setFocus("input");
         if (input === "u") return void store.dispatch({ type: "undo" });
+        if (input === "s") return void gated(onSave);
+        if (input === "c") return void gated(onBuild);
         if (input === "q") return void setPendingQuit(true);
         return; // table focus swallows the rest
       }
@@ -171,27 +201,34 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
         setPickerIndex(0);
         return;
       }
-      // f/u/q are typeable letters — fire the command ONLY on an empty buffer.
+      // s/c/u/q are typeable letters — fire the command ONLY on an empty buffer.
       if (buffer === "") {
-        if (input === "f") return void (canFinalize(s) && onFinalize());
+        if (input === "s") return void gated(onSave);
+        if (input === "c") return void gated(onBuild);
         if (input === "u") return void store.dispatch({ type: "undo" });
         if (input === "q") return void setPendingQuit(true);
       }
       if (input && !key.ctrl && !key.meta) setBuffer((b) => b + input);
     },
-    // planner turn owns the terminal; the shell's always-active ctrl+c still quits
-    { isActive: active !== false && !drafting },
+    // stays active while drafting: the drafting branch above surfaces WHY
+    // save is blocked and keeps q/ctrl+c on the y/n quit gate.
+    { isActive: active !== false },
   );
 
   const prd = s.prd;
   const project = prd?.project ?? t("studio.header.newProject");
-  const ok = canFinalize(s);
+  const ok = canSave(s);
+  // derived, no timers: shows after any save, clears when the next edit sets
+  // dirty again. ponytail: persistent while clean, not a timed flash.
+  const savedFlash = savedPath != null && !s.dirty;
   const dep = prd
     ? depsOk(s)
       ? t("studio.header.depsOk")
       : t("studio.header.issues", { n: validatePrd(prd).errors.length })
     : t("studio.header.empty");
-  const tasks = prd?.tasks ?? [];
+  // Array.isArray: a seeded invalid PRD is sanitized upstream, but a non-array
+  // `tasks` must never crash the render (tasks.slice below).
+  const tasks = Array.isArray(prd?.tasks) ? prd.tasks : [];
 
   // row budget: header + separator + input + statusbar are fixed; picker and
   // attachments lines appear as needed; the rest splits table/chat. NO floors:
@@ -200,7 +237,7 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
   const totalRows = height ?? 24;
   const cols = width ?? 80;
   const pickerRows = pickerOpen ? Math.max(1, Math.min(results.length, PICKER_MAX)) : 0;
-  const selTask = focus === "table" ? (s.prd?.tasks[taskCursor] ?? null) : null;
+  const selTask = focus === "table" ? (tasks[taskCursor] ?? null) : null;
   const detail = detailOpen && selTask ? selTask : null; // modal replaces the body, no row budget needed
   const fixed = 4 + (s.attachments.length > 0 ? 1 : 0) + pickerRows;
   const body = Math.max(0, totalRows - fixed);
@@ -374,21 +411,28 @@ export function PrdApp({ store, cwd, onSend, onFinalize, onQuit, height, width, 
 
       {pendingQuit ? (
         <Text color="yellow">
-          {t("studio.quit.confirm")} <Text color="cyan">y</Text> {t("studio.quit.yes")} ·{" "}
-          <Text color="cyan">n</Text> {t("studio.quit.stay")}
+          {t(s.dirty ? "studio.quit.confirmUnsaved" : "studio.quit.confirm")} <Text color="cyan">y</Text>{" "}
+          {t("studio.quit.yes")} · <Text color="cyan">n</Text> {t("studio.quit.stay")}
+        </Text>
+      ) : saveErr !== null ? (
+        <Text color="yellow" wrap="truncate-end">
+          {saveErr}
         </Text>
       ) : focus === "table" ? (
         <Text dimColor wrap="truncate-end">
           <Text color="cyan">↑↓</Text> {t("studio.hint.task")} · <Text color="cyan">⏎</Text> {t("studio.hint.details")} ·{" "}
           <Text color="cyan">u</Text> {t("studio.hint.undo")} · <Text color="cyan">tab</Text> {t("studio.hint.chat")} ·{" "}
           <Text color="cyan">q</Text> {t("studio.hint.quit")}
+          {savedFlash && <Text color="green"> · {t("studio.savedFlash")}</Text>}
         </Text>
       ) : (
         <Text dimColor wrap="truncate-end">
           <Text color="cyan">⏎</Text> {t("studio.hint.send")} · <Text color="cyan">@</Text> {t("studio.hint.attach")} ·{" "}
-          <Text color={ok ? "cyan" : undefined}>f</Text> {t("studio.hint.finalize")} · <Text color="cyan">u</Text>{" "}
+          <Text color={ok ? "cyan" : undefined}>s</Text> {t("studio.hint.save")} ·{" "}
+          <Text color={ok ? "cyan" : undefined}>c</Text> {t("studio.hint.build")} · <Text color="cyan">u</Text>{" "}
           {t("studio.hint.undo")} · <Text color="cyan">tab</Text> {t("studio.hint.tasks")} ·{" "}
           <Text color="cyan">⇞⇟</Text> {t("studio.hint.scroll")} · <Text color="cyan">q</Text> {t("studio.hint.quit")}
+          {savedFlash && <Text color="green"> · {t("studio.savedFlash")}</Text>}
         </Text>
       )}
     </Box>

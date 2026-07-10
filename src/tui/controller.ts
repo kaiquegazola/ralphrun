@@ -27,6 +27,8 @@ export interface UiState {
   pendingConfirm: null | "skip" | "quit";
   skipRequested: boolean; // consume-once flag polled by loop via handle.control.takeSkip()
   quit: boolean;
+  stalled: boolean;
+  stalledAction: "retry" | "quit" | null;
 }
 
 export type Action =
@@ -37,7 +39,9 @@ export type Action =
   | { type: "requestQuit" }
   | { type: "confirm" }
   | { type: "cancelConfirm" }
-  | { type: "consumeSkip" };
+  | { type: "consumeSkip" }
+  | { type: "setStalled" }
+  | { type: "stalledPick"; pick: "retry" | "quit" };
 
 export const initialState: UiState = {
   tasks: [],
@@ -48,6 +52,8 @@ export const initialState: UiState = {
   pendingConfirm: null,
   skipRequested: false,
   quit: false,
+  stalled: false,
+  stalledAction: null,
 };
 
 function countOf(tasks: UiState["tasks"]): UiState["counts"] {
@@ -119,6 +125,10 @@ export function reducer(state: UiState, action: Action): UiState {
       return { ...state, pendingConfirm: null };
     case "consumeSkip":
       return { ...state, skipRequested: false };
+    case "setStalled":
+      return { ...state, stalled: true, stalledAction: null };
+    case "stalledPick":
+      return { ...state, stalled: false, stalledAction: action.pick };
   }
 }
 
@@ -132,6 +142,7 @@ export function selectCurrentTask(s: UiState): UiState["tasks"][number] | null {
 }
 
 export function selectFooterHint(s: UiState): string {
+  if (s.stalled) return t("run.footerStalled");
   if (s.pendingConfirm === "skip") return t("run.confirmSkip");
   if (s.pendingConfirm === "quit") return t("run.confirmQuit");
   return t("run.footerHint");

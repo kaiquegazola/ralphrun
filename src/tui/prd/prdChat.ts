@@ -10,6 +10,7 @@ import { PassThrough } from "node:stream";
 import { buildCmd } from "../../adapters.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
+import { normalizePrd } from "../../prdload.js";
 import type { ChatMessage, PlannerResult } from "./prdController.js";
 import { validatePrd } from "./validatePrd.js";
 
@@ -75,25 +76,6 @@ function buildPrompt(args: PlannerTurnArgs): string {
   return parts.join("\n\n");
 }
 
-// planners love inventing statuses ("pending", "TODO") — coerce to the enum before
-// validating, same philosophy as prd.ts recoverAndNormalize for hand-written backlogs.
-// Only harmless fields are coerced; a wrong deps/acceptance SHAPE still fails validation.
-const STATUSES = new Set(["todo", "doing", "done", "blocked"]);
-function normalizeDraft(obj: unknown): void {
-  // caller guarantees obj came from JSON.parse of a "{...}" slice — always a non-null object
-  const tasks = (obj as { tasks?: unknown }).tasks;
-  if (!Array.isArray(tasks)) return;
-  for (const t of tasks) {
-    if (typeof t !== "object" || t === null) continue;
-    const task = t as Record<string, unknown>;
-    const low = typeof task.status === "string" ? task.status.toLowerCase() : "";
-    task.status = STATUSES.has(low) ? low : "todo";
-    if (typeof task.retries !== "number") task.retries = 0;
-    if (task.deps === undefined) task.deps = [];
-    if (task.acceptance === undefined) task.acceptance = [];
-  }
-}
-
 function parseReply(text: string): PlannerResult {
   const fence = text.indexOf("```json");
   if (fence === -1) return { summary: "", prd: null, errors: [NO_JSON()] };
@@ -115,7 +97,11 @@ function parseReply(text: string): PlannerResult {
   } catch {
     return { summary, prd: null, errors: [NO_JSON()] };
   }
-  normalizeDraft(parsed);
+  // planners love inventing statuses ("pending", "TODO") — the shared pipeline
+  // coercions run before validating; the changed-flag is irrelevant here.
+  // keepDoing: a planner echoing an in-flight "doing" task must not have it
+  // silently reset (matches the old normalizeDraft behavior).
+  void normalizePrd(parsed, { keepDoing: true });
   const v = validatePrd(parsed);
   if (!v.ok) return { summary, prd: null, errors: v.errors };
   return { summary, prd: parsed as PRD, errors: [] };

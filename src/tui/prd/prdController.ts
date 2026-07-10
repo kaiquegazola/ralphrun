@@ -23,6 +23,7 @@ export interface PrdState {
   undoStack: (PRD | null)[];
   status: PrdStatus;
   errors: string[];
+  dirty: boolean;
 }
 
 export interface PlannerResult {
@@ -39,6 +40,8 @@ export type PrdAction =
   | { type: "undo" }
   | { type: "addAttachment"; path: string }
   | { type: "clearAttachments" }
+  | { type: "markSaved" }
+  | { type: "saveError"; message: string }
   | { type: "reset" };
 
 export const initialPrdState: PrdState = {
@@ -48,6 +51,7 @@ export const initialPrdState: PrdState = {
   undoStack: [],
   status: "idle",
   errors: [],
+  dirty: false,
 };
 
 // diffTasks — compact "+A -R ~C" (added / removed / changed by id) for the
@@ -98,6 +102,7 @@ export function reducer(state: PrdState, action: PrdAction): PrdState {
           attachments: [],
           status: "idle",
           errors: [],
+          dirty: true,
         };
       }
       return {
@@ -112,24 +117,33 @@ export function reducer(state: PrdState, action: PrdAction): PrdState {
       if (state.undoStack.length === 0) return state;
       const undoStack = state.undoStack.slice();
       const prd = undoStack.pop()!;
-      return { ...state, prd, undoStack, status: "idle" };
+      return { ...state, prd, undoStack, status: "idle", dirty: true };
     }
     case "addAttachment":
       return { ...state, attachments: [...state.attachments, { path: action.path }] };
     case "clearAttachments":
       return { ...state, attachments: [] };
+    case "markSaved":
+      // clears only the dirty bit; the saved path lives in the mount/view layer.
+      return { ...state, dirty: false };
+    case "saveError":
+      // a failed write surfaces in the chat; the drafted PRD stays intact.
+      return { ...state, messages: [...state.messages, { role: "error", text: action.message }] };
     case "reset":
       return initialPrdState;
   }
 }
 
 // selectors
-export function canFinalize(s: PrdState): boolean {
+export function canSave(s: PrdState): boolean {
   return s.prd !== null && validatePrd(s.prd).ok && s.status !== "drafting";
 }
+export const canFinalize = canSave; // alias for existing view/mount imports
 
 export function taskCount(s: PrdState): number {
-  return s.prd?.tasks.length ?? 0;
+  // tasks?.: a seeded parseable-but-invalid PRD is made render-safe upstream
+  // (seedSafe), but never trust the shape from the view layer.
+  return s.prd?.tasks?.length ?? 0;
 }
 
 export function depsOk(s: PrdState): boolean {

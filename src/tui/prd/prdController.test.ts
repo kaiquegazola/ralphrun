@@ -5,6 +5,7 @@ import {
   initialPrdState,
   diffTasks,
   canFinalize,
+  canSave,
   taskCount,
   depsOk,
   type PrdState,
@@ -46,6 +47,7 @@ it("applyPlannerResult (valid) replaces prd, pushes undo, writes summary+diff, c
   expect(s.attachments).toEqual([]);
   expect(s.status).toBe("idle");
   expect(s.errors).toEqual([]);
+  expect(s.dirty).toBe(true);
   expect(s.messages[s.messages.length - 1]).toEqual({ role: "planner", text: "drafted +2 -0 ~0" });
 });
 
@@ -56,6 +58,7 @@ it("applyPlannerResult (invalid) keeps old prd, pushes error bubble, clears atta
   expect(s.status).toBe("error");
   expect(s.errors).toEqual(["bad", "worse"]);
   expect(s.attachments).toEqual([]);
+  expect(s.dirty).toBe(false);
   expect(s.messages[s.messages.length - 1]).toEqual({ role: "error", text: "bad; worse" });
 });
 
@@ -66,6 +69,22 @@ it("undo pops the stack, or no-ops when empty", () => {
   expect(s.prd).toBeNull();
   expect(s.undoStack).toEqual([]);
   expect(s.status).toBe("idle");
+  expect(s.dirty).toBe(true);
+});
+
+it("markSaved clears only the dirty bit", () => {
+  const dirty: PrdState = { ...initialPrdState, prd: VALID, dirty: true };
+  const s = reducer(dirty, { type: "markSaved" });
+  expect(s.dirty).toBe(false);
+  expect(s.prd).toBe(VALID);
+});
+
+it("saveError appends an error bubble, keeps the PRD and the dirty bit", () => {
+  const dirty: PrdState = { ...initialPrdState, prd: VALID, dirty: true };
+  const s = reducer(dirty, { type: "saveError", message: "ENOENT: no such dir" });
+  expect(s.messages).toEqual([{ role: "error", text: "ENOENT: no such dir" }]);
+  expect(s.prd).toBe(VALID);
+  expect(s.dirty).toBe(true);
 });
 
 it("addAttachment and clearAttachments", () => {
@@ -87,16 +106,19 @@ it("diffTasks reports added / removed / changed", () => {
   expect(diffTasks(null, next)).toBe("+3 -0 ~0");
 });
 
-it("canFinalize is true only for a valid, non-drafting PRD", () => {
-  expect(canFinalize(initialPrdState)).toBe(false); // prd null
-  expect(canFinalize({ ...initialPrdState, prd: mkPrd([mkTask("A", { deps: ["ghost"] })]) })).toBe(false); // invalid
-  expect(canFinalize({ ...initialPrdState, prd: VALID, status: "drafting" })).toBe(false); // drafting
-  expect(canFinalize({ ...initialPrdState, prd: VALID })).toBe(true);
+it("canSave is true only for a valid, non-drafting PRD", () => {
+  expect(canSave(initialPrdState)).toBe(false); // prd null
+  expect(canSave({ ...initialPrdState, prd: mkPrd([mkTask("A", { deps: ["ghost"] })]) })).toBe(false); // invalid
+  expect(canSave({ ...initialPrdState, prd: VALID, status: "drafting" })).toBe(false); // drafting
+  expect(canSave({ ...initialPrdState, prd: VALID })).toBe(true);
+  expect(canFinalize).toBe(canSave); // alias
 });
 
 it("taskCount and depsOk read the current PRD", () => {
   expect(taskCount(initialPrdState)).toBe(0);
   expect(taskCount({ ...initialPrdState, prd: VALID })).toBe(2);
+  // a malformed prd (no tasks array) must not crash the header render
+  expect(taskCount({ ...initialPrdState, prd: { project: "x" } as never })).toBe(0);
   expect(depsOk(initialPrdState)).toBe(false);
   expect(depsOk({ ...initialPrdState, prd: VALID })).toBe(true);
 });

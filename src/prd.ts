@@ -1,4 +1,4 @@
-// prd.ts — backlog types, recovery/normalize, next task picker
+// prd.ts — backlog types, next task picker (recovery/normalize live in prdload.ts)
 
 export type TaskStatus = "todo" | "doing" | "done" | "blocked";
 
@@ -18,30 +18,6 @@ export interface PRD {
   stack: string;
   architecture_notes: string;
   tasks: Task[];
-}
-
-export function recoverAndNormalize(prd: PRD): boolean {
-  let changed = false;
-  for (const t of prd.tasks) {
-    const defaults: Array<[keyof Task, unknown]> = [
-      ["status", "todo"],
-      ["retries", 0],
-      ["deps", []],
-      ["acceptance", []],
-    ];
-    for (const [key, def] of defaults) {
-      if (t[key] === undefined) {
-        // @ts-expect-error generic default fill
-        t[key] = def;
-        changed = true;
-      }
-    }
-    if (t.status === "doing") {
-      t.status = "todo";
-      changed = true;
-    }
-  }
-  return changed;
 }
 
 export function nextTask(prd: PRD): Task | null {

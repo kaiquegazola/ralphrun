@@ -43,6 +43,11 @@ export function App({ store, header }: AppProps): React.ReactElement {
   const s = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   useInput((input, key) => {
+    if (s.stalled) {
+      if (input === "r") store.dispatch({ type: "stalledPick", pick: "retry" });
+      else if (input === "q") store.dispatch({ type: "stalledPick", pick: "quit" });
+      return;
+    }
     if (s.pendingConfirm) {
       if (input === "y") store.dispatch({ type: "confirm" });
       else if (input === "n" || key.escape) store.dispatch({ type: "cancelConfirm" });
@@ -119,7 +124,7 @@ export function App({ store, header }: AppProps): React.ReactElement {
           </Box>
         </Box>
       </Box>
-      <Text color={s.pendingConfirm ? "yellow" : undefined}>{selectFooterHint(s)}</Text>
+      <Text color={s.pendingConfirm || s.stalled ? "yellow" : undefined}>{selectFooterHint(s)}</Text>
     </Box>
   );
 }

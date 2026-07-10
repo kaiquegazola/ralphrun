@@ -159,13 +159,33 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     }
 
     if (!task) {
-      done();
       const remain = prd.tasks.filter((t) => t.status !== "done").length;
       if (remain === 0) {
+        done();
         log(progress, t("loop.log.allDone"));
-      } else {
-        log(progress, t("loop.log.stalled", { n: remain }));
+        return;
       }
+      log(progress, t("loop.log.stalled", { n: remain }));
+      if (tui) {
+        const action = await tui.waitStalled();
+        if (action === "quit") {
+          done();
+          log(progress, t("loop.log.quit"));
+          return;
+        } else if (action === "retry") {
+          let changed = false;
+          for (const t of prd.tasks) {
+            if (t.status === "blocked") {
+              t.status = "todo";
+              t.retries = 0;
+              changed = true;
+            }
+          }
+          if (changed) savePRD(prdPath, prd);
+          continue;
+        }
+      }
+      done();
       return;
     }
 

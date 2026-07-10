@@ -173,12 +173,14 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           log(progress, t("loop.log.quit"));
           return;
         } else if (action === "retry") {
+          log(progress, t("loop.log.manualRetry"));
           let changed = false;
           for (const t of prd.tasks) {
             if (t.status === "blocked") {
               t.status = "todo";
               t.retries = 0;
               changed = true;
+              emit({ taskId: t.id, status: "todo" });
             }
           }
           if (changed) savePRD(prdPath, prd);

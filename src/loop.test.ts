@@ -13,7 +13,9 @@ vi.mock("./config.js", () => ({ loadConfig: vi.fn(), parseAgent: vi.fn() }));
 // mock above would not satisfy — stub the module instead.
 vi.mock("./userconfig.js", () => ({ loadUserConfig: vi.fn(() => ({ version: 1 })) }));
 vi.mock("./diagnostics.js", () => ({ checkAgent: vi.fn() }));
-vi.mock("./prd.js", () => ({ findTask: vi.fn(), nextTask: vi.fn(), recoverAndNormalize: vi.fn() }));
+// prdload is NOT mocked: the intake pipeline runs REAL against the fs mock,
+// so every test's mRead must return a parseable+valid PRD for the preflight.
+vi.mock("./prd.js", () => ({ findTask: vi.fn(), nextTask: vi.fn() }));
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
 vi.mock("./git.js", () => ({ git: vi.fn() }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
@@ -23,7 +25,7 @@ import { runLoop } from "./loop.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { loadConfig, parseAgent } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
-import { findTask, nextTask, recoverAndNormalize } from "./prd.js";
+import { findTask, nextTask } from "./prd.js";
 import { log, setReporter } from "./log.js";
 import { git } from "./git.js";
 import { runTask } from "./run.js";
@@ -38,7 +40,6 @@ const mParseAgent = vi.mocked(parseAgent);
 const mCheckAgent = vi.mocked(checkAgent);
 const mFindTask = vi.mocked(findTask);
 const mNextTask = vi.mocked(nextTask);
-const mRecover = vi.mocked(recoverAndNormalize);
 const mLog = vi.mocked(log);
 const mSetReporter = vi.mocked(setReporter);
 const mGit = vi.mocked(git);
@@ -116,7 +117,6 @@ beforeEach(() => {
     return prdExists;
   });
   mRead.mockReturnValue(PRD_JSON);
-  mRecover.mockReturnValue(false);
   mLoadConfig.mockReturnValue(cfg());
   mParseAgent.mockReturnValue({ cli: "claude", model: "sonnet" });
   mCheckAgent.mockReturnValue({ cli: "claude", installed: true, loggedIn: true, loginCommand: "claude auth login" });
@@ -157,13 +157,52 @@ describe("runLoop preflight", () => {
     await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("NOT logged in"));
   });
+
+  it("invalid-shape PRD → exit 1 with header, error lines and the init hint", async () => {
+    mRead.mockReturnValue(JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks: {} }));
+    await expect(runLoop({ prd: "prd.json", dryRun: true })).rejects.toThrow("exit:1");
+    const lines = errSpy.mock.calls.map((c) => String(c[0]));
+    expect(lines[0]).toContain("invalid PRD at");
+    expect(lines.some((l) => l.startsWith("  "))).toBe(true); // indented validatePrd lines
+    expect(lines.at(-1)).toContain("ralphrun init");
+    expect(mWrite).not.toHaveBeenCalled(); // never persists a broken file
+  });
+
+  it("malformed prd.json → clean exit 1 with invalid JSON, no stack", async () => {
+    mRead.mockReturnValue("{oops");
+    await expect(runLoop({ prd: "prd.json", task: "T1" })).rejects.toThrow("exit:1");
+    const lines = errSpy.mock.calls.map((c) => String(c[0]));
+    expect(lines.join("\n")).toContain("invalid JSON");
+    expect(lines.join("\n")).not.toContain("    at "); // no stack frames
+  });
+
+  it("malformed ralph.config.json → one-line exit 1", async () => {
+    mLoadConfig.mockImplementation(() => {
+      throw new Error("invalid JSON in /x/ralph.config.json: boom");
+    });
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith("invalid JSON in /x/ralph.config.json: boom");
+  });
+
+  it("non-Error config failure is stringified", async () => {
+    mLoadConfig.mockImplementation(() => {
+      throw "cfg-string";
+    });
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith("cfg-string");
+  });
 });
 
 describe("runLoop dry-run", () => {
   it("NATIVE + recovery", async () => {
-    mRecover.mockReturnValue(true); // exercise savePRD + recovery log
+    // a task missing retries drives normalized:true through the real pipeline
+    // (JSON.stringify drops undefined-valued keys)
+    const bare = { ...TASK, retries: undefined };
+    mRead.mockReturnValue(JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks: [bare] }));
     await runLoop({ prd: "prd.json", dryRun: true });
-    expect(mWrite).toHaveBeenCalled(); // savePRD after recovery
+    expect(mWrite).toHaveBeenCalled(); // savePRD after normalize
+    const written = JSON.parse(String(mWrite.mock.calls[0][1]));
+    expect(written.tasks[0].retries).toBe(0); // the cleanup is persisted
     const out = logSpy.mock.calls.map((c) => c[0]).join("\n");
     expect(out).toContain("mode: NATIVE");
     expect(out).toContain("review-after: native");
@@ -262,7 +301,7 @@ describe("runLoop TTY dashboard", () => {
     await runLoop({ prd: "prd.json" });
     expect(mMount).toHaveBeenCalledWith(
       [{ id: "T1", title: "Task one", status: "todo" }],
-      "P",
+      "P — exec: claude:sonnet | adv: claude:fable",
     );
     // reporter routed into the TUI as an event carrying the current task id
     expect(handle.update).toHaveBeenCalledWith({ taskId: "T1", line: "mid" });
@@ -305,6 +344,63 @@ describe("runLoop TTY dashboard", () => {
     const logs = mLog.mock.calls.map((c) => c[1]).join("\n");
     expect(logs).toContain("quit by user");
     expect(logs).not.toContain("DONE T1"); // interrupted task not marked done
+    expect(handle.unmount).toHaveBeenCalled();
+  });
+
+  it("prd.json corrupted before the loop-top reload → graceful stop, no task run", async () => {
+    setTTY(true);
+    const handle = makeHandle();
+    mMount.mockReturnValue(handle);
+    // preflight read is valid; the per-iteration reload throws (non-Error branch)
+    mRead.mockReturnValueOnce(PRD_JSON).mockImplementation(() => {
+      throw "io-error";
+    });
+    await runLoop({ prd: "prd.json" });
+    expect(mRunTask).not.toHaveBeenCalled();
+    const logs = mLog.mock.calls.map((c) => c[1]).join("\n");
+    expect(logs).toContain("unreadable mid-run");
+    expect(handle.unmount).toHaveBeenCalled();
+  });
+
+  it("prd.json corrupted after the task ran → graceful stop, status write skipped", async () => {
+    setTTY(true);
+    const handle = makeHandle();
+    mMount.mockReturnValue(handle);
+    // preflight + loop-top reads valid; the post-task fresh reload gets garbage
+    mRead.mockReturnValueOnce(PRD_JSON).mockReturnValueOnce(PRD_JSON).mockReturnValue("{garbage");
+    await runLoop({ prd: "prd.json" });
+    expect(mRunTask).toHaveBeenCalled();
+    const logs = mLog.mock.calls.map((c) => c[1]).join("\n");
+    expect(logs).toContain("unreadable mid-run");
+    expect(logs).not.toContain("DONE T1"); // iteration failed before the status write
+    expect(handle.unmount).toHaveBeenCalled();
+  });
+
+  it("shape-invalid prd.json mid-run (valid JSON) → graceful stop, never reaches runTask", async () => {
+    setTTY(true);
+    const handle = makeHandle();
+    mMount.mockReturnValue(handle);
+    // preflight read is valid; the per-iteration reload gets a tasks-less object
+    mRead.mockReturnValueOnce(PRD_JSON).mockReturnValue(JSON.stringify({ project: "P" }));
+    await runLoop({ prd: "prd.json" });
+    expect(mRunTask).not.toHaveBeenCalled();
+    const logs = mLog.mock.calls.map((c) => c[1]).join("\n");
+    expect(logs).toContain("unreadable mid-run");
+    expect(handle.unmount).toHaveBeenCalled();
+  });
+
+  it("task removed from prd.json mid-run → graceful stop instead of a raw throw", async () => {
+    setTTY(true);
+    const handle = makeHandle();
+    mMount.mockReturnValue(handle);
+    const without = JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks: [{ ...TASK, id: "T2" }] });
+    // preflight + loop-top valid with T1; the post-task fresh reload lost T1
+    mRead.mockReturnValueOnce(PRD_JSON).mockReturnValueOnce(PRD_JSON).mockReturnValue(without);
+    await runLoop({ prd: "prd.json" });
+    expect(mRunTask).toHaveBeenCalled();
+    const logs = mLog.mock.calls.map((c) => c[1]).join("\n");
+    expect(logs).toContain("disappeared");
+    expect(logs).not.toContain("DONE T1"); // no status write for a vanished task
     expect(handle.unmount).toHaveBeenCalled();
   });
 

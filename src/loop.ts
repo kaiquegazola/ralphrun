@@ -1,12 +1,13 @@
 // loop.ts — the main run loop: load prd, recover, preflight, route, run tasks,
 // update status, retry/block, commit per task.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { loadConfig, parseAgent, type AgentSpec } from "./config.js";
+import { loadConfig, parseAgent, type AgentSpec, type Config } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
 import { t } from "./i18n.js";
-import { findTask, nextTask, recoverAndNormalize, type PRD } from "./prd.js";
+import { findTask, nextTask, type PRD } from "./prd.js";
+import { loadPrdFile } from "./prdload.js";
 import { log, setReporter } from "./log.js";
 import { git } from "./git.js";
 import { runTask } from "./run.js";
@@ -22,10 +23,6 @@ export interface RunOptions {
   dryRun?: boolean;
   task?: string;
   noReviewAfter?: boolean;
-}
-
-function loadPRD(path: string): PRD {
-  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 function savePRD(path: string, prd: PRD): void {
@@ -50,15 +47,43 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   }
   if (opts.advisor !== undefined) overrides.advisor = parseAgent(opts.advisor);
   if (opts.noReviewAfter) overrides.review_after = false;
-  const cfg = loadConfig(prdPath, opts.config, overrides);
+  let cfg: Config;
+  try {
+    cfg = loadConfig(prdPath, opts.config, overrides);
+  } catch (e) {
+    // malformed ralph.config.json: one clean line (path + parse msg), no stack
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
 
-  // crash recovery + normalize hand-written backlogs — must run before ANY task
-  // read (nextTask/dry-run inspect t.deps), so do it for dry-run too.
-  const prd0 = loadPRD(prdPath);
-  if (recoverAndNormalize(prd0)) {
+  // canonical intake pipeline: parse + normalize (crash recovery, hand-written
+  // backlogs) + strict shape validation — must run before ANY task read
+  // (nextTask/dry-run inspect t.deps), so it gates dry-run and --task too.
+  const loaded = loadPrdFile(prdPath);
+  if (!loaded.ok) {
+    console.error(t("loop.err.invalidPrd", { path: prdPath }));
+    for (const e of loaded.errors) console.error("  " + e);
+    console.error(t("loop.err.invalidPrdHint", { path: prdPath }));
+    process.exit(1);
+  }
+  const prd0 = loaded.prd;
+  if (loaded.normalized) {
     savePRD(prdPath, prd0);
     log(progress, t("loop.log.recovered"));
   }
+
+  // mid-run reloads run the SAME parse→normalize→validate pipeline as the
+  // preflight: a file corrupted or shape-broken MID-RUN (the executor agent can
+  // write to the workspace) fails gracefully (log + unmount + stop) instead of
+  // feeding runTask an invalid task or throwing a raw stack.
+  const reload = (): PRD | null => {
+    const r = loadPrdFile(prdPath);
+    if (!r.ok) {
+      log(progress, t("loop.log.midrunCorrupt", { msg: r.errors.join("; ") }));
+      return null;
+    }
+    return r.prd;
+  };
 
   if (!opts.dryRun) {
     // preflight: strict gate for installed & logged in CLIs
@@ -86,11 +111,21 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   // RunEvents already emitted by run/executor into it; control (pause/skip/quit)
   // is driven off the returned handle. Non-TTY (pipe/CI) falls back to plain
   // log() line output. Real run only (progress.md always gets the raw log).
+  const mode = cfg.advisor && cfg.executor.cli === "claude" && cfg.advisor.cli === "claude" ? "NATIVE" : "CROSS";
+  const adv = cfg.advisor ? `${cfg.advisor.cli}:${cfg.advisor.model}` : "none";
+  const exe = `${cfg.executor.cli}:${cfg.executor.model}`;
+
+  if (!opts.dryRun) {
+    log(progress, `\n---`);
+    log(progress, t("loop.dry.mode", { mode, executor: exe, advisor: adv }));
+  }
+
   let tui: TuiHandle | null = null;
   let curTaskId = "";
   if (!opts.dryRun && process.stdout.isTTY) {
     const seed = prd0.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }));
-    tui = mount(seed, prd0.project);
+    const header = `${prd0.project} — exec: ${exe} | adv: ${adv}`;
+    tui = mount(seed, header);
     setReporter((line) => tui!.update({ taskId: curTaskId, line }));
   }
   const done = (): void => {
@@ -106,7 +141,11 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       return;
     }
 
-    const prd = loadPRD(prdPath);
+    const prd = reload();
+    if (!prd) {
+      done();
+      return;
+    }
     let task;
     if (opts.task) {
       task = findTask(prd, opts.task) ?? undefined;
@@ -121,13 +160,16 @@ export async function runLoop(opts: RunOptions): Promise<void> {
 
     if (!task) {
       done();
-      log(progress, t("loop.log.allDone"));
+      const remain = prd.tasks.filter((t) => t.status !== "done").length;
+      if (remain === 0) {
+        log(progress, t("loop.log.allDone"));
+      } else {
+        log(progress, t("loop.log.stalled", { n: remain }));
+      }
       return;
     }
 
     if (opts.dryRun) {
-      const mode = cfg.advisor && cfg.executor.cli === "claude" && cfg.advisor.cli === "claude" ? "NATIVE" : "CROSS";
-      const adv = cfg.advisor ? `${cfg.advisor.cli}:${cfg.advisor.model}` : "none";
       const review =
         mode === "NATIVE"
           ? t("loop.dry.reviewNative")
@@ -135,9 +177,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             ? t("loop.dry.reviewOn", { n: cfg.max_review_rounds })
             : t("loop.dry.reviewOff");
       console.log(t("loop.dry.next", { id: task.id, title: task.title }));
-      console.log(
-        t("loop.dry.mode", { mode, executor: `${cfg.executor.cli}:${cfg.executor.model}`, advisor: adv }),
-      );
+      console.log(t("loop.dry.mode", { mode, executor: exe, advisor: adv }));
       console.log(t("loop.dry.review", { review }));
       return;
     }
@@ -171,8 +211,19 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     }
     const skipped = tui?.control.takeSkip() ?? false;
 
-    const fresh = loadPRD(prdPath);
-    const freshTask = fresh.tasks.find((t) => t.id === task!.id)!;
+    const fresh = reload();
+    if (!fresh) {
+      done();
+      return;
+    }
+    // the just-run task can vanish if prd.json was rewritten mid-run — stop
+    // gracefully instead of throwing on the status write.
+    const freshTask = fresh.tasks.find((t) => t.id === task!.id);
+    if (!freshTask) {
+      done();
+      log(progress, t("loop.log.taskVanished", { id: task.id }));
+      return;
+    }
     if (skipped) {
       freshTask.status = "blocked";
       const reason = t("loop.reason.skipped");

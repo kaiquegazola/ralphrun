@@ -31,7 +31,7 @@ export function checkAgent(cli: string): AgentDiagnostic {
     } else if (cli === "cursor") {
       loginCommand = "cursor agent login";
       // returns 0 but prints "Not logged in" if not logged in
-      const out = execSync(`${bin} agent status`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const out = execSync(`${bin} status`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
       if (out.includes("Not logged in")) {
         loggedIn = false;
       } else {

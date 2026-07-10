@@ -21,12 +21,12 @@ describe("buildCmd", () => {
   });
   it("cursor with model + autoApprove uses cursor-agent binary", () => {
     expect(buildCmd("cursor", "P", "gpt", "/w", true)).toEqual([
-      "cursor-agent", "agent", "-p", "P", "--model", "gpt", "--force",
+      "cursor-agent", "agent", "--trust", "-p", "P", "--model", "gpt", "--force",
     ]);
   });
   it("cursor without model, no autoApprove", () => {
     expect(buildCmd("cursor", "P", "", "/w", false)).toEqual([
-      "cursor-agent", "agent", "-p", "P",
+      "cursor-agent", "agent", "--trust", "-p", "P",
     ]);
   });
   it("unknown cli throws", () => {

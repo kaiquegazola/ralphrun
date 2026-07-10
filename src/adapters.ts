@@ -23,7 +23,7 @@ export function buildCmd(
     return cmd;
   }
   if (cli === "cursor") {
-    const cmd: string[] = [bin, "agent", "-p", prompt];
+    const cmd: string[] = [bin, "agent", "--trust", "-p", prompt];
     if (model) cmd.push("--model", model);
     if (autoApprove) cmd.push("--force");
     return cmd;

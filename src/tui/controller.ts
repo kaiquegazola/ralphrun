@@ -29,6 +29,11 @@ export interface UiState {
   quit: boolean;
   stalled: boolean;
   stalledAction: "retry" | "quit" | null;
+  reviewBlocked: boolean;
+  reviewBlockedReason: string;
+  reviewCanApprove: boolean;
+  reviewAction: "retry" | "approve" | "block" | "quit" | null;
+  configRequested: boolean;
 }
 
 export type Action =
@@ -41,7 +46,10 @@ export type Action =
   | { type: "cancelConfirm" }
   | { type: "consumeSkip" }
   | { type: "setStalled" }
-  | { type: "stalledPick"; pick: "retry" | "quit" };
+  | { type: "stalledPick"; pick: "retry" | "quit" }
+  | { type: "setReviewBlocked"; reason: string; canApprove: boolean }
+  | { type: "reviewPick"; pick: "retry" | "approve" | "block" | "quit" }
+  | { type: "requestConfig" };
 
 export const initialState: UiState = {
   tasks: [],
@@ -54,6 +62,11 @@ export const initialState: UiState = {
   quit: false,
   stalled: false,
   stalledAction: null,
+  reviewBlocked: false,
+  reviewBlockedReason: "",
+  reviewCanApprove: false,
+  reviewAction: null,
+  configRequested: false,
 };
 
 function countOf(tasks: UiState["tasks"]): UiState["counts"] {
@@ -81,7 +94,7 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   if (e.round !== undefined) current.round = e.round;
   if (e.attempt !== undefined) current.attempt = e.attempt;
   if (e.gates !== undefined) current.gates = { ...current.gates, ...e.gates };
-  if (e.line !== undefined) current.lines = [...current.lines, e.line].slice(-LINE_CAP);
+  if (e.line !== undefined) current.lines = [...current.lines, formatLine(e.line, e.lineSource)].slice(-LINE_CAP);
   if (e.elapsedMs !== undefined) current.elapsedMs = e.elapsedMs;
   if (e.timeoutMs !== undefined) current.timeoutMs = e.timeoutMs;
 
@@ -96,6 +109,11 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   }
 
   return { ...state, current, tasks, blocked, counts: countOf(tasks) };
+}
+
+function formatLine(line: string, source?: RunEvent["lineSource"]): string {
+  if (!source) return line;
+  return `[${source}] ${line}`;
 }
 
 export function reducer(state: UiState, action: Action): UiState {
@@ -129,6 +147,18 @@ export function reducer(state: UiState, action: Action): UiState {
       return { ...state, stalled: true, stalledAction: null };
     case "stalledPick":
       return { ...state, stalled: false, stalledAction: action.pick };
+    case "setReviewBlocked":
+      return {
+        ...state,
+        reviewBlocked: true,
+        reviewBlockedReason: action.reason,
+        reviewCanApprove: action.canApprove,
+        reviewAction: null,
+      };
+    case "reviewPick":
+      return { ...state, reviewBlocked: false, reviewAction: action.pick };
+    case "requestConfig":
+      return { ...state, configRequested: true };
   }
 }
 
@@ -142,8 +172,14 @@ export function selectCurrentTask(s: UiState): UiState["tasks"][number] | null {
 }
 
 export function selectFooterHint(s: UiState): string {
+  if (s.reviewBlocked) {
+    return t(s.reviewCanApprove ? "run.footerReviewBlocked" : "run.footerReviewBlockedNoApprove", {
+      reason: s.reviewBlockedReason,
+    });
+  }
   if (s.stalled) return t("run.footerStalled");
   if (s.pendingConfirm === "skip") return t("run.confirmSkip");
   if (s.pendingConfirm === "quit") return t("run.confirmQuit");
+  if (s.paused) return t("run.footerPaused");
   return t("run.footerHint");
 }

@@ -29,6 +29,17 @@ describe("buildCmd", () => {
       "cursor-agent", "agent", "--trust", "-p", "P",
     ]);
   });
+  it("agy passes the prompt and model", () => {
+    expect(buildCmd("agy", "P", "gemini-2.5-pro", "/w", true)).toEqual([
+      "agy", "-p", "P", "--model", "gemini-2.5-pro", "--dangerously-skip-permissions",
+    ]);
+  });
+  it("codex uses exec with the configured model and automation flags", () => {
+    expect(buildCmd("codex", "P", "gpt-5.6-sol", "/w", true)).toEqual([
+      "codex", "exec", "-m", "gpt-5.6-sol", "--dangerously-bypass-approvals-and-sandbox",
+      "--dangerously-bypass-hook-trust", "P",
+    ]);
+  });
   it("unknown cli throws", () => {
     expect(() => buildCmd("nope", "P", "", "/w", false)).toThrow("unknown cli: nope");
   });

@@ -46,6 +46,12 @@ const PREAMBLE = [
   "for new tasks. retries starts at 0. deps: [] when none.",
   "Every dep must reference an existing task id, and verify must be a REAL runnable",
   "command that checks the task.",
+  "Choose verify commands as context-aware quality gates, not narrow smoke tests.",
+  "For typed/tested stacks, include the relevant static check plus focused tests",
+  '(examples: "npm run typecheck && npm run test -- tests/foo.test.ts",',
+  '"cargo test", "go test ./...", "pytest tests/foo_test.py").',
+  "When a task adds or changes integration surface, include build or integration tests too.",
+  "Do not mark a task done if typecheck/lint/build is known to fail, even when unit tests pass.",
 ].join("\n");
 
 const REQUIRED_OUTPUT =

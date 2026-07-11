@@ -115,6 +115,7 @@ describe("loadConfig global-user-config layering", () => {
     user({
       review_after: false,
       max_review_rounds: 9,
+      max_stalled_review_rounds: 4,
       max_retries_per_task: 7,
       commit_per_task: false,
       default_executor: { cli: "grok", model: "grok-4.5" },
@@ -123,6 +124,7 @@ describe("loadConfig global-user-config layering", () => {
     const cfg = loadConfig("/x/prd.json", undefined, {});
     expect(cfg.review_after).toBe(false);
     expect(cfg.max_review_rounds).toBe(9);
+    expect(cfg.max_stalled_review_rounds).toBe(4);
     expect(cfg.max_retries_per_task).toBe(7);
     expect(cfg.commit_per_task).toBe(false);
     expect(cfg.executor).toEqual({ cli: "grok", model: "grok-4.5" });

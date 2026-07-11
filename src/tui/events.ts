@@ -12,8 +12,9 @@ export interface RunEvent {
   round?: { n: number; max: number };
   attempt?: { n: number; max: number };
   gates?: { exec?: boolean; tests?: boolean; review?: boolean };
-  line?: string; // one executor output line (for the live pane)
-  status?: "doing" | "done" | "blocked" | "retry";
+  line?: string; // one output/log line (for the live pane)
+  lineSource?: "executor" | "advisor" | "review" | "system";
+  status?: "todo" | "doing" | "done" | "blocked" | "retry";
   reason?: string; // when status==="blocked" (e.g. "skipped by user" / "max retries")
   elapsedMs?: number;
   timeoutMs?: number;

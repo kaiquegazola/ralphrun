@@ -11,13 +11,16 @@ vi.mock("./prompts.js", () => ({
 }));
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
+vi.mock("./git.js", () => ({ captureReviewBase: vi.fn(() => "base-tree") }));
 
 import { runTask } from "./run.js";
 import { runExecutor } from "./executor.js";
 import { getAdvice, advisorReview } from "./advisor.js";
 import { runVerify, assembleFeedback } from "./verify.js";
 import { injectAdvice } from "./prompts.js";
+import { log } from "./log.js";
 import { emit } from "./tui/events.js";
+import { captureReviewBase } from "./git.js";
 import type { Config } from "./config.js";
 import type { PRD, Task } from "./prd.js";
 
@@ -27,7 +30,9 @@ const mReview = vi.mocked(advisorReview);
 const mVerify = vi.mocked(runVerify);
 const mFeedback = vi.mocked(assembleFeedback);
 const mInject = vi.mocked(injectAdvice);
+const mLog = vi.mocked(log);
 const mEmit = vi.mocked(emit);
+const mCaptureReviewBase = vi.mocked(captureReviewBase);
 
 const task: Task = { id: "T1", title: "t", status: "todo", deps: [], retries: 0, description: "d", acceptance: ["a"] };
 const prd: PRD = { project: "P", stack: "S", architecture_notes: "A", tasks: [task] };
@@ -41,6 +46,7 @@ function cfg(over: Partial<Config> = {}): Config {
     max_retries_per_task: 3,
     review_after: true,
     max_review_rounds: 3,
+    max_stalled_review_rounds: 2,
     heartbeat_secs: 30,
     commit_per_task: true,
     stop_on_blocked: false,
@@ -54,92 +60,137 @@ beforeEach(() => {
   mExec.mockResolvedValue(true);
   mVerify.mockReturnValue({ passed: true, output: "out" });
   mAdvice.mockReturnValue("advice");
-  mReview.mockReturnValue({ approved: true, changes: "" });
+  mReview.mockReturnValue({ approved: true, changes: "", diff: "" });
   mFeedback.mockReturnValue("FEEDBACK");
+  mCaptureReviewBase.mockReturnValue("base-tree");
 });
 
 describe("runTask NATIVE", () => {
   it("passes when executor ok and verify passes, passing --advisor", async () => {
     const c = cfg();
-    const ok = await runTask(task, prd, c, "/ws", "/prog");
-    expect(ok).toBe(true);
+    const result = await runTask(task, prd, c, "/ws", "/prog");
+    expect(result.ok).toBe(true);
     expect(mExec).toHaveBeenCalledWith(c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined);
   });
 
   it("fails when verify fails even if executor ok", async () => {
     mVerify.mockReturnValue({ passed: false, output: "x" });
-    const ok = await runTask(task, prd, cfg(), "/ws", "/prog");
-    expect(ok).toBe(false);
+    const result = await runTask(task, prd, cfg(), "/ws", "/prog");
+    expect(result.ok).toBe(false);
   });
 });
 
 describe("runTask CROSS", () => {
   it("round 1 PASS with advice injected", async () => {
     // not native: advisor cli grok
-    const ok = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
-    expect(ok).toBe(true);
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result.ok).toBe(true);
     expect(mInject).toHaveBeenCalled();
+  });
+
+  it("reviews against the baseline captured by the loop", async () => {
+    const c = cfg({ advisor: { cli: "grok", model: "g" } });
+    await runTask(task, prd, c, "/ws", "/prog", undefined, undefined, "task-start");
+    expect(mReview).toHaveBeenCalledWith(
+      task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start",
+    );
   });
 
   it("skips injectAdvice when getAdvice returns null", async () => {
     mAdvice.mockReturnValue(null);
-    const ok = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
-    expect(ok).toBe(true);
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result.ok).toBe(true);
     expect(mInject).not.toHaveBeenCalled();
   });
 
   it("no advisor: review off, passes on tests only", async () => {
-    const ok = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
-    expect(ok).toBe(true);
+    const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
+    expect(result.ok).toBe(true);
     expect(mAdvice).not.toHaveBeenCalled();
     expect(mReview).not.toHaveBeenCalled();
   });
 
   it("review_after off but advisor present → passes without review", async () => {
-    const ok = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, review_after: false }), "/ws", "/prog");
-    expect(ok).toBe(true);
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, review_after: false }), "/ws", "/prog");
+    expect(result.ok).toBe(true);
     expect(mAdvice).toHaveBeenCalled();
     expect(mReview).not.toHaveBeenCalled();
   });
 
-  it("BUG-3: reviewer never approves → returns false even though tests pass", async () => {
+  it("reviewer requests changes while tests pass → automatically runs one focused fix", async () => {
     mVerify.mockReturnValue({ passed: true, output: "" }); // tests always pass
-    mReview.mockReturnValue({ approved: false, changes: "do X" }); // never approves
+    mReview
+      .mockReturnValueOnce({ approved: false, changes: "do X", diff: "D" })
+      .mockReturnValueOnce({ approved: true, changes: "", diff: "D2" });
     const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 3 });
-    const ok = await runTask(task, prd, c, "/ws", "/prog");
-    expect(ok).toBe(false);
-    // sanity: tests DID pass, so the false is purely the approval gate
+    const result = await runTask(task, prd, c, "/ws", "/prog");
+    expect(result).toEqual({ ok: true });
+    expect(mLog).toHaveBeenCalledWith("/prog", expect.stringContaining("do X"));
+    expect(mFeedback).toHaveBeenCalledWith(true, true, "", false, "do X");
+    // The review feedback, not a user decision, drove the second executor run.
     expect(mVerify.mock.results.every((r) => (r.value as { passed: boolean }).passed)).toBe(true);
-    // exhausted all rounds (initial exec + one fix per round)
-    expect(mReview).toHaveBeenCalledTimes(3);
+    expect(mReview).toHaveBeenCalledTimes(2);
+    expect(mExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("injects reviewer feedback into a human-requested retry prompt", async () => {
+    const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
+    expect(result.ok).toBe(true);
+    const prompt = mExec.mock.calls[0][1];
+    expect(prompt).toContain("Human-requested review retry");
+    expect(prompt).toContain("fix the missing gate");
+    expect(prompt).toContain("Do not answer by arguing that no changes are needed");
+  });
+
+  it("stops the fix loop early when failing verify/review/diff repeats", async () => {
+    mVerify.mockReturnValue({ passed: false, output: "same failure" });
+    mReview.mockReturnValue({ approved: false, changes: "same issue", diff: "same diff" });
+    const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 8, max_stalled_review_rounds: 1 });
+    const result = await runTask(task, prd, c, "/ws", "/prog");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("review_stalled");
+    expect(result.reviewChanges).toBe("same issue");
+    expect(result.verificationPassed).toBe(false);
+    expect(mReview).toHaveBeenCalledTimes(2);
+    expect(mExec).toHaveBeenCalledTimes(2); // initial exec + one fix, then stop before another identical fix
+  });
+
+  it("uses default stalled-rounds and compacts oversized review feedback", async () => {
+    mVerify.mockReturnValue({ passed: true, output: "" });
+    mReview.mockReturnValue({ approved: false, changes: "x".repeat(1_200), diff: "d" });
+    const c = cfg({ advisor: { cli: "grok", model: "g" } });
+    delete (c as Partial<Config>).max_stalled_review_rounds;
+    const result = await runTask(task, prd, c, "/ws", "/prog");
+    expect(result.reason).toBe("review_stalled");
+    expect(mLog).toHaveBeenCalledWith("/prog", expect.stringMatching(/x{999}…/));
   });
 
   it("feedback empty → break, then not approved → false", async () => {
-    mReview.mockReturnValue({ approved: false, changes: "" });
+    mReview.mockReturnValue({ approved: false, changes: "", diff: "" });
     mFeedback.mockReturnValue(""); // nothing actionable
-    const ok = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
-    expect(ok).toBe(false);
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result.ok).toBe(false);
     // broke on round 1: only the initial executor ran, no fix round
     expect(mExec).toHaveBeenCalledTimes(1);
   });
 
   it("exhaust with approved but tests fail: final ok=false short-circuits verify", async () => {
     mExec.mockResolvedValue(false); // exec keeps failing
-    mReview.mockReturnValue({ approved: true, changes: "" });
-    const ok = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
-    expect(ok).toBe(false);
+    mReview.mockReturnValue({ approved: true, changes: "", diff: "" });
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result.ok).toBe(false);
   });
 
   it("exhaust with approved, final exec ok and final verify passes → true", async () => {
-    mReview.mockReturnValue({ approved: true, changes: "" });
+    mReview.mockReturnValue({ approved: true, changes: "", diff: "" });
     // 3 in-loop verifies fail (never PASS), final verify passes
     mVerify
       .mockReturnValueOnce({ passed: false, output: "f" })
       .mockReturnValueOnce({ passed: false, output: "f" })
       .mockReturnValueOnce({ passed: false, output: "f" })
       .mockReturnValue({ passed: true, output: "" });
-    const ok = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
-    expect(ok).toBe(true);
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result.ok).toBe(true);
   });
 });
 
@@ -165,7 +216,8 @@ describe("runTask RunEvents (spy the bus)", () => {
   });
 
   it("CROSS emits fixing before the fix executor re-runs", async () => {
-    mReview.mockReturnValue({ approved: false, changes: "do X" }); // never approves -> loops + fixes
+    mVerify.mockReturnValue({ passed: false, output: "fail" });
+    mReview.mockReturnValue({ approved: false, changes: "do X", diff: "D" }); // never approves -> loops + fixes
     await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
     expect(mEmit).toHaveBeenCalledWith({ taskId: "T1", subphase: "fixing" });
   });

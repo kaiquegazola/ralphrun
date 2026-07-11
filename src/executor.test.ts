@@ -58,11 +58,11 @@ it("resolves true on exit 0 and echoes non-blank lines (heartbeat_secs undefined
   await tick();
   proc.emit("close", 0);
   expect(await p).toBe(true);
-  expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("hello world"));
+  expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("hello world"), false);
   expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("exit=0"));
   // structured event: every output line goes to the bus (blank included, unlike log)
-  expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "hello world" });
-  expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "   " });
+  expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "hello world", lineSource: "executor" });
+  expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "   ", lineSource: "executor" });
 });
 
 it("emits a structured elapsed/timeout heartbeat event each interval tick", async () => {

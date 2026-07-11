@@ -43,19 +43,28 @@ export function App({ store, header }: AppProps): React.ReactElement {
   const s = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   useInput((input, key) => {
+    const low = input.toLowerCase();
+    if (s.reviewBlocked) {
+      if (low === "r") store.dispatch({ type: "reviewPick", pick: "retry" });
+      else if (low === "a" && s.reviewCanApprove) store.dispatch({ type: "reviewPick", pick: "approve" });
+      else if (low === "b" || low === "s") store.dispatch({ type: "reviewPick", pick: "block" });
+      else if (low === "q") store.dispatch({ type: "reviewPick", pick: "quit" });
+      return;
+    }
     if (s.stalled) {
-      if (input === "r") store.dispatch({ type: "stalledPick", pick: "retry" });
-      else if (input === "q") store.dispatch({ type: "stalledPick", pick: "quit" });
+      if (low === "r") store.dispatch({ type: "stalledPick", pick: "retry" });
+      else if (low === "q") store.dispatch({ type: "stalledPick", pick: "quit" });
       return;
     }
     if (s.pendingConfirm) {
-      if (input === "y") store.dispatch({ type: "confirm" });
-      else if (input === "n" || key.escape) store.dispatch({ type: "cancelConfirm" });
+      if (low === "y" || key.return) store.dispatch({ type: "confirm" });
+      else if (low === "n" || key.escape) store.dispatch({ type: "cancelConfirm" });
       return; // swallow everything else while confirming
     }
-    if (input === "p") store.dispatch({ type: "pauseToggle" });
-    else if (input === "s") store.dispatch({ type: "requestSkip" });
-    else if (input === "q") store.dispatch({ type: "requestQuit" });
+    if (low === "p") store.dispatch({ type: "pauseToggle" });
+    else if (low === "c" && s.paused) store.dispatch({ type: "requestConfig" });
+    else if (low === "s") store.dispatch({ type: "requestSkip" });
+    else if (low === "q") store.dispatch({ type: "requestQuit" });
   });
 
   const { current, counts } = s;
@@ -124,7 +133,7 @@ export function App({ store, header }: AppProps): React.ReactElement {
           </Box>
         </Box>
       </Box>
-      <Text color={s.pendingConfirm || s.stalled ? "yellow" : undefined}>{selectFooterHint(s)}</Text>
+      <Text color={s.pendingConfirm || s.stalled || s.reviewBlocked || s.paused ? "yellow" : undefined}>{selectFooterHint(s)}</Text>
     </Box>
   );
 }

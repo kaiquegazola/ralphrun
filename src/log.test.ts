@@ -38,4 +38,15 @@ describe("log", () => {
     expect(rep).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
+
+  it("can persist a line without forwarding it to the live reporter", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const rep = vi.fn();
+    setReporter(rep);
+    log("p.md", "raw executor output", false);
+    expect(mockAppend).toHaveBeenCalledOnce();
+    expect(rep).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });

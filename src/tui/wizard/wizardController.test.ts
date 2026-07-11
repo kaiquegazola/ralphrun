@@ -75,12 +75,18 @@ const studioNew = (over: Partial<WizardInit> = {}): WizardState =>
   reducer(action(over), { type: "select" });
 
 describe("tables", () => {
-  it("CLI_OPTIONS lists claude/grok/cursor", () => {
-    expect(CLI_OPTIONS.map((o) => o.value)).toEqual(["claude", "grok", "cursor"]);
+  it("CLI_OPTIONS lists every supported CLI in picker order", () => {
+    expect(CLI_OPTIONS.map((o) => o.value)).toEqual(["agy", "claude", "grok", "cursor", "codex"]);
   });
 
   it("MODELS covers every CLI in CLI_OPTIONS", () => {
     for (const o of CLI_OPTIONS) expect(MODELS[o.value].length).toBeGreaterThan(0);
+  });
+
+  it("recommends role-specific Antigravity and Codex models", () => {
+    expect(getModelOptions("advisor", "agy")[0].value).toBe("gemini-2.0-pro-exp");
+    expect(getModelOptions("executor", "agy")[0].value).toBe("gemini-2.5-pro");
+    expect(getModelOptions("planner", "codex")[0].value).toBe("gpt-5.6-sol");
   });
 
   it("getModelOptions puts the recommended model first with a hint", () => {

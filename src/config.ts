@@ -29,6 +29,7 @@ export interface Config {
   max_retries_per_task: number;
   review_after: boolean;
   max_review_rounds: number;
+  max_stalled_review_rounds: number;
   heartbeat_secs: number;
   commit_per_task: boolean;
   stop_on_blocked: boolean;
@@ -43,6 +44,7 @@ export const DEFAULTS: Config = {
   max_retries_per_task: 3,
   review_after: true,
   max_review_rounds: 3,
+  max_stalled_review_rounds: 2,
   heartbeat_secs: 30,
   commit_per_task: true,
   stop_on_blocked: false,
@@ -86,6 +88,7 @@ export function loadConfig(
   mergeDefined(cfg, {
     review_after: u.review_after,
     max_review_rounds: u.max_review_rounds,
+    max_stalled_review_rounds: u.max_stalled_review_rounds,
     max_retries_per_task: u.max_retries_per_task,
     commit_per_task: u.commit_per_task,
     executor: u.default_executor ?? undefined, // null = "no preference", NOT a null executor

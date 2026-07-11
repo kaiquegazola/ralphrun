@@ -69,6 +69,11 @@ describe("foldEvent fields", () => {
     expect(s.current.lines[11]).toBe("L14");
   });
 
+  it("lines can include their source label", () => {
+    const s = reducer(seeded(), { type: "event", event: { taskId: "T1", line: "fix x", lineSource: "review" } });
+    expect(s.current.lines).toEqual(["[review] fix x"]);
+  });
+
   it("empty event leaves state unchanged in fields", () => {
     const s = reducer(seeded(), { type: "event", event: { taskId: "T1" } });
     expect(s.current.subphase).toBe("idle");
@@ -145,6 +150,24 @@ describe("control actions", () => {
     expect(s.pendingConfirm).toBe(null);
     expect(s.skipRequested).toBe(false);
   });
+
+  it("review blocked dialog records the user pick", () => {
+    let s = reducer(seeded(), { type: "setReviewBlocked", reason: "review not approved", canApprove: true });
+    expect(s.reviewBlocked).toBe(true);
+    expect(s.reviewBlockedReason).toBe("review not approved");
+    s = reducer(s, { type: "reviewPick", pick: "approve" });
+    expect(s.reviewBlocked).toBe(false);
+    expect(s.reviewAction).toBe("approve");
+  });
+
+  it("tracks stalled and configuration control actions", () => {
+    let s = reducer(seeded(), { type: "setStalled" });
+    expect(s.stalled).toBe(true);
+    s = reducer(s, { type: "stalledPick", pick: "retry" });
+    expect(s.stalledAction).toBe("retry");
+    s = reducer(s, { type: "requestConfig" });
+    expect(s.configRequested).toBe(true);
+  });
 });
 
 describe("selectors", () => {
@@ -165,5 +188,13 @@ describe("selectors", () => {
     expect(selectFooterHint(seeded())).toBe(t("run.footerHint"));
     expect(selectFooterHint(reducer(seeded(), { type: "requestSkip" }))).toBe(t("run.confirmSkip"));
     expect(selectFooterHint(reducer(seeded(), { type: "requestQuit" }))).toBe(t("run.confirmQuit"));
+    expect(selectFooterHint(reducer(seeded(), { type: "setReviewBlocked", reason: "x", canApprove: true }))).toBe(
+      t("run.footerReviewBlocked", { reason: "x" }),
+    );
+    expect(selectFooterHint(reducer(seeded(), { type: "setReviewBlocked", reason: "x", canApprove: false }))).toBe(
+      t("run.footerReviewBlockedNoApprove", { reason: "x" }),
+    );
+    expect(selectFooterHint(reducer(seeded(), { type: "setStalled" }))).toBe(t("run.footerStalled"));
+    expect(selectFooterHint(reducer(seeded(), { type: "pauseToggle" }))).toBe(t("run.footerPaused"));
   });
 });

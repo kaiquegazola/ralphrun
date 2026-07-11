@@ -18,16 +18,16 @@ export interface TuiHandle {
     takeSkip(): boolean; // consume-once: returns then clears skipRequested
     beginTask(): AbortSignal; // fresh AbortController per task; skip-confirm aborts it
   };
-  waitResume(): Promise<void>; // resolves now if !paused, else on next unpause
+  waitConfigOrResume(): Promise<"resume" | "config" | "quit">;
   waitStalled(): Promise<"retry" | "quit">;
+  waitReviewBlocked(reason: string, canApprove: boolean): Promise<"retry" | "approve" | "block" | "quit">;
   unmount(): void;
 }
 
-export function mount(
-  seedTasks: { id: string; title: string; status: TaskStatus }[],
-  header: string,
-): TuiHandle {
-  let state: UiState = reducer(initialState, { type: "seedTasks", tasks: seedTasks });
+export function mount(seedTasks: UiState["tasks"], header: string, startPaused = false): TuiHandle {
+  const initialStateWithTasks = { ...initialState, tasks: seedTasks };
+  if (startPaused) initialStateWithTasks.paused = true;
+  let state: UiState = reducer(initialStateWithTasks, { type: "seedTasks", tasks: seedTasks });
   const subs = new Set<() => void>();
   let ac: AbortController | null = null;
 
@@ -68,14 +68,20 @@ export function mount(
         return ac.signal;
       },
     },
-    waitResume: () =>
-      // resolves on unpause OR quit — so a quit pressed while paused can't deadlock the loop.
-      new Promise<void>((res) => {
-        if (!state.paused || state.quit) return res();
+    waitConfigOrResume: () =>
+      new Promise<"resume" | "config" | "quit">((res) => {
+        if (!state.paused || state.quit) return res(state.quit ? "quit" : "resume");
+        if (state.configRequested) return res("config");
         const un = store.subscribe(() => {
-          if (!state.paused || state.quit) {
+          if (state.quit) {
             un();
-            res();
+            res("quit");
+          } else if (state.configRequested) {
+            un();
+            res("config");
+          } else if (!state.paused) {
+            un();
+            res("resume");
           }
         });
       }),
@@ -86,6 +92,17 @@ export function mount(
           if (state.stalledAction) {
             un();
             res(state.stalledAction);
+          }
+        });
+      });
+    },
+    waitReviewBlocked: (reason, canApprove) => {
+      store.dispatch({ type: "setReviewBlocked", reason, canApprove });
+      return new Promise<"retry" | "approve" | "block" | "quit">((res) => {
+        const un = store.subscribe(() => {
+          if (state.reviewAction) {
+            un();
+            res(state.reviewAction);
           }
         });
       });

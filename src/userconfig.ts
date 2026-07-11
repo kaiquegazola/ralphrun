@@ -13,6 +13,7 @@ export interface UserConfig {
   default_advisor?: AgentSpec | null; // null = explicitly "none"
   review_after?: boolean;
   max_review_rounds?: number;
+  max_stalled_review_rounds?: number;
   max_retries_per_task?: number;
   commit_per_task?: boolean;
 }
@@ -61,7 +62,7 @@ function sanitize(raw: unknown): UserConfig {
   for (const k of ["review_after", "commit_per_task"] as const) {
     if (typeof r[k] === "boolean") cfg[k] = r[k] as boolean;
   }
-  for (const k of ["max_review_rounds", "max_retries_per_task"] as const) {
+  for (const k of ["max_review_rounds", "max_stalled_review_rounds", "max_retries_per_task"] as const) {
     if (typeof r[k] === "number") cfg[k] = r[k] as number;
   }
   return cfg;

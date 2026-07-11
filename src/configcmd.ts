@@ -10,6 +10,39 @@ import { DEFAULTS, parseAgent, type Config } from "./config.js";
 import { t } from "./i18n.js";
 import { configPath, loadUserConfig, resetUserConfig, userConfigExists } from "./userconfig.js";
 
+export async function pickModel(role: "executor" | "advisor", current: string): Promise<string | symbol> {
+  const { select, text, isCancel } = await import("@clack/prompts");
+  const { MODELS } = await import("./tui/wizard/wizardController.js");
+
+  const options = [];
+  if (role === "advisor") {
+    options.push({ value: "none", label: t("wizard.agent.disable") });
+  }
+  for (const [cli, models] of Object.entries(MODELS)) {
+    for (const m of models) {
+      options.push({ value: `${cli}:${m.value}`, label: `${cli}:${m.label}` });
+    }
+  }
+  options.push({ value: "custom", label: t("config.edit.customModel") });
+
+  let choice = await select({
+    message: role === "executor" ? t("config.edit.executor") : t("config.edit.advisor"),
+    options,
+    initialValue: options.some((o) => o.value === current) ? current : "custom",
+  });
+
+  if (isCancel(choice)) return choice;
+
+  if (choice === "custom") {
+    choice = await text({
+      message: t("config.edit.customModelPrompt"),
+      initialValue: current === "none" ? "" : current,
+    });
+  }
+
+  return choice;
+}
+
 interface ConfigOpts {
   config: string;
 }
@@ -51,25 +84,23 @@ export async function editConfig(opts: ConfigOpts): Promise<void> {
   }
 
   // executor
-  const executor = await p.text({
-    message: t("config.edit.executor"),
-    initialValue: `${cfg.executor.cli}:${cfg.executor.model}`,
-  });
+  const executor = await pickModel("executor", `${cfg.executor.cli}:${cfg.executor.model}`);
   if (p.isCancel(executor)) return cancel();
   const espec = parseAgent(executor as string);
   cfg.executor = espec ?? cfg.executor;
 
   // advisor
-  const advisor = await p.text({
-    message: t("config.edit.advisor"),
-    initialValue: cfg.advisor ? `${cfg.advisor.cli}:${cfg.advisor.model}` : "none",
-  });
+  const advisor = await pickModel("advisor", cfg.advisor ? `${cfg.advisor.cli}:${cfg.advisor.model}` : "none");
   if (p.isCancel(advisor)) return cancel();
   cfg.advisor = parseAgent(advisor as string);
 
   cfg.task_timeout = await numOrKeep(t("config.edit.taskTimeout"), cfg.task_timeout);
   cfg.max_retries_per_task = await numOrKeep(t("config.edit.maxRetries"), cfg.max_retries_per_task);
   cfg.max_review_rounds = await numOrKeep(t("config.edit.maxReviewRounds"), cfg.max_review_rounds);
+  cfg.max_stalled_review_rounds = await numOrKeep(
+    t("config.edit.maxStalledReviewRounds"),
+    cfg.max_stalled_review_rounds,
+  );
 
   const review = await p.confirm({
     message: t("config.edit.reviewAfter"),

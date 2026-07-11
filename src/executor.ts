@@ -48,8 +48,10 @@ export function runExecutor(
     const rl = createInterface({ input: merged });
     rl.on("line", (line) => {
       last = Date.now();
-      emit({ taskId: task.id, line });
-      if (line.trim()) log(progress, `  ${tag}› ${line}`);
+      emit({ taskId: task.id, line, lineSource: "executor" });
+      // The raw line is already emitted to the TUI above; keep it in progress.md
+      // without routing a duplicate system line back into the live pane.
+      if (line.trim()) log(progress, `  ${tag}› ${line}`, false);
     });
 
     const hbTimer = setInterval(() => {

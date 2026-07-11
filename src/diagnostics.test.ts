@@ -86,10 +86,10 @@ describe("checkAgent", () => {
 });
 
 describe("checkAllAgents", () => {
-  it("maps over claude, grok, cursor", () => {
+  it("maps over every supported CLI in preflight order", () => {
     whichSync.mockReturnValue("/bin/x" as any);
     exec.mockReturnValue("" as any);
     const all = checkAllAgents();
-    expect(all.map((a) => a.cli)).toEqual(["claude", "grok", "cursor"]);
+    expect(all.map((a) => a.cli)).toEqual(["agy", "claude", "grok", "cursor", "codex"]);
   });
 });

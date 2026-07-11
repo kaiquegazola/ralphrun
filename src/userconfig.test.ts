@@ -139,6 +139,7 @@ describe("loadUserConfig", () => {
         review_after: "yes", // wrong type — dropped
         commit_per_task: false, // kept
         max_review_rounds: "3", // wrong type — dropped
+        max_stalled_review_rounds: 2, // kept
         max_retries_per_task: 5, // kept
         unknown_key: true, // never copied
       }) as unknown as string,
@@ -147,6 +148,7 @@ describe("loadUserConfig", () => {
       version: 1,
       default_advisor: null,
       commit_per_task: false,
+      max_stalled_review_rounds: 2,
       max_retries_per_task: 5,
     });
   });
@@ -157,6 +159,7 @@ describe("loadUserConfig", () => {
         default_executor: { cli: "grok", model: "grok-4.5", extra: 1 },
         review_after: true,
         max_review_rounds: 2,
+        max_stalled_review_rounds: 1,
       }) as unknown as string,
     );
     expect(loadUserConfig()).toEqual({
@@ -164,6 +167,7 @@ describe("loadUserConfig", () => {
       default_executor: { cli: "grok", model: "grok-4.5" },
       review_after: true,
       max_review_rounds: 2,
+      max_stalled_review_rounds: 1,
     });
   });
 

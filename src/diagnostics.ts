@@ -37,8 +37,8 @@ export function checkAgent(cli: string): AgentDiagnostic {
       } else {
         loggedIn = true;
       }
-    } else if (cli === "grok") {
-      // Grok doesn't have a reliable headless auth status check yet.
+    } else if (cli === "grok" || cli === "agy" || cli === "codex") {
+      // Grok, agy, and codex don't have a reliable headless auth status check yet.
       loggedIn = "unknown";
     }
   } catch (err) {
@@ -50,5 +50,5 @@ export function checkAgent(cli: string): AgentDiagnostic {
 }
 
 export function checkAllAgents(): AgentDiagnostic[] {
-  return ["claude", "grok", "cursor"].map(checkAgent);
+  return ["agy", "claude", "grok", "cursor", "codex"].map(checkAgent);
 }

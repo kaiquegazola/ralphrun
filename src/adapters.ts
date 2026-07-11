@@ -28,5 +28,18 @@ export function buildCmd(
     if (autoApprove) cmd.push("--force");
     return cmd;
   }
+  if (cli === "agy") {
+    const cmd: string[] = [bin, "-p", prompt];
+    if (model) cmd.push("--model", model);
+    if (autoApprove) cmd.push("--dangerously-skip-permissions");
+    return cmd;
+  }
+  if (cli === "codex") {
+    const cmd: string[] = [bin, "exec"];
+    if (model) cmd.push("-m", model);
+    if (autoApprove) cmd.push("--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust");
+    cmd.push(prompt);
+    return cmd;
+  }
   throw new Error(`unknown cli: ${cli}`);
 }

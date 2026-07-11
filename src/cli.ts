@@ -36,6 +36,7 @@ program
   .option("--dry-run", t("cli.opt.dryRun"))
   .option("--task <id>", t("cli.opt.task"))
   .option("--lang <en|pt-br>", t("cli.opt.lang"))
+  .option("-y, --yes", t("cli.opt.yes"))
   .action(async (opts) => {
     setLocale(resolveLocale(opts.lang)); // idempotent after the import-time peek; never saved
     console.clear();
@@ -64,6 +65,7 @@ program
       noReviewAfter: opts.reviewAfter === false,
       dryRun: opts.dryRun,
       task: opts.task,
+      skipConfirm: opts.yes,
     });
   });
 

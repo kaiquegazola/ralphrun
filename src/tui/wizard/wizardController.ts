@@ -90,12 +90,24 @@ export type WizardAction =
   | { type: "quit" };
 
 export const CLI_OPTIONS: Option[] = [
+  { value: "agy", label: "Antigravity CLI" },
   { value: "claude", label: "Claude Code CLI" },
   { value: "grok", label: "Grok CLI" },
   { value: "cursor", label: "Cursor CLI" },
+  { value: "codex", label: "Codex CLI" },
 ];
 
 export const MODELS: Record<string, Option[]> = {
+  codex: [
+    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+    { value: "gpt-5.6-lua", label: "GPT-5.6 Lua" },
+    { value: "gpt-4.5-preview", label: "GPT-4.5 Preview" },
+  ],
+  agy: [
+    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { value: "gemini-2.0-pro-exp", label: "Gemini 2.0 Pro Exp" },
+  ],
   claude: [
     { value: "sonnet", label: "sonnet" },
     { value: "opus", label: "opus" },
@@ -108,6 +120,7 @@ export const MODELS: Record<string, Option[]> = {
     { value: "composer-2.5", label: "Composer 2.5" },
     { value: "opus-4.8", label: "Opus 4.8" },
     { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+    { value: "gpt-5.6-lua", label: "GPT-5.6 Lua" },
     { value: "gpt-5.5", label: "GPT-5.5" },
     { value: "fable-5", label: "Fable 5" },
     { value: "sonnet-5", label: "Sonnet 5" },
@@ -128,6 +141,10 @@ export function getModelOptions(role: AgentRole, cli: string): Option[] {
     recommended = role === "executor" ? "sonnet-5" : "opus-4.8";
   } else if (cli === "grok") {
     recommended = "grok-4.5";
+  } else if (cli === "agy") {
+    recommended = role === "advisor" ? "gemini-2.0-pro-exp" : "gemini-2.5-pro";
+  } else if (cli === "codex") {
+    recommended = "gpt-5.6-sol";
   }
 
   return models

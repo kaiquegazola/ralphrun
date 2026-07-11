@@ -91,6 +91,14 @@ it("injects current PRD json, chat history, and attachment contents into the pro
   expect(prompt).toContain("SECRET-CONTENT");
 });
 
+it("instructs the planner to use context-aware verify quality gates", async () => {
+  await run(["sum", "", "```json", VALID_JSON, "```"]);
+  const prompt = buildCmdMock.mock.calls[0][1] as string;
+  expect(prompt).toContain("Choose verify commands as context-aware quality gates");
+  expect(prompt).toContain("npm run typecheck && npm run test -- tests/foo.test.ts");
+  expect(prompt).toContain("Do not mark a task done if typecheck/lint/build is known to fail");
+});
+
 it("notes truncated attachments and flags unreadable ones in the prompt", async () => {
   await run(["sum", "", "```json", VALID_JSON, "```"], {
     attachments: [

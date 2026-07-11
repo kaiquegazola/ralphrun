@@ -13,6 +13,7 @@ vi.mock("@clack/prompts", () => ({
   note: vi.fn(),
   outro: vi.fn(),
   cancel: vi.fn(),
+  select: vi.fn(async () => "custom"),
   text: vi.fn(),
   confirm: vi.fn(),
   isCancel: vi.fn((v: unknown) => v === CANCEL),
@@ -30,13 +31,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as p from "@clack/prompts";
 import { t } from "./i18n.js";
 import { loadUserConfig, resetUserConfig, userConfigExists } from "./userconfig.js";
-import { showConfig, showGlobal, resetGlobal, editConfig } from "./configcmd.js";
+import { showConfig, showGlobal, resetGlobal, editConfig, pickModel } from "./configcmd.js";
 
 const mExists = vi.mocked(existsSync);
 const mRead = vi.mocked(readFileSync);
 const mWrite = vi.mocked(writeFileSync);
 const mText = vi.mocked(p.text);
 const mConfirm = vi.mocked(p.confirm);
+const mSelect = vi.mocked(p.select);
 
 let textQ: any[] = [];
 let confirmQ: any[] = [];
@@ -56,6 +58,25 @@ beforeEach(() => {
     return textQ.shift();
   });
   mConfirm.mockImplementation(async () => confirmQ.shift());
+  mSelect.mockResolvedValue("custom" as never);
+});
+
+describe("pickModel", () => {
+  it("returns a selected catalog model and offers advisor disable", async () => {
+    mSelect.mockResolvedValueOnce("codex:gpt-5.6-sol" as never);
+    await expect(pickModel("advisor", "claude:sonnet")).resolves.toBe("codex:gpt-5.6-sol");
+    expect(mSelect.mock.calls[0][0].options).toEqual(expect.arrayContaining([expect.objectContaining({ value: "none" })]));
+  });
+
+  it("returns cancel and supports a custom typed model", async () => {
+    mSelect.mockResolvedValueOnce(CANCEL as never);
+    await expect(pickModel("executor", "claude:sonnet")).resolves.toBe(CANCEL);
+
+    mSelect.mockResolvedValueOnce("custom" as never);
+    mText.mockResolvedValueOnce("local:model" as never);
+    await expect(pickModel("executor", "none")).resolves.toBe("local:model");
+    expect(mText).toHaveBeenCalledWith(expect.objectContaining({ initialValue: "" }));
+  });
 });
 
 describe("showConfig", () => {
@@ -113,7 +134,7 @@ describe("editConfig", () => {
   it("happy path: writes edited config", async () => {
     mExists.mockReturnValue(true);
     mRead.mockReturnValue("{}" as any);
-    textQ = ["claude:opus", "grok:grok-4.5", "120", "4", "2"];
+    textQ = ["claude:opus", "grok:grok-4.5", "120", "4", "2", "1"];
     confirmQ = [true, false];
 
     await editConfig({ config: "ralph.config.json" });
@@ -125,6 +146,7 @@ describe("editConfig", () => {
     expect(written.task_timeout).toBe(120);
     expect(written.max_retries_per_task).toBe(4);
     expect(written.max_review_rounds).toBe(2);
+    expect(written.max_stalled_review_rounds).toBe(1);
     expect(written.review_after).toBe(true);
     expect(written.commit_per_task).toBe(false);
   });
@@ -132,7 +154,7 @@ describe("editConfig", () => {
   it("keep-branches: parseAgent null executor, cancelled numbers/confirms", async () => {
     mExists.mockReturnValue(true);
     mRead.mockReturnValue('{"advisor":null}' as any); // advisor initialValue -> "none"
-    textQ = ["none", "none", CANCEL, "abc", "5"];
+    textQ = ["none", "none", CANCEL, "abc", "5", CANCEL];
     confirmQ = [CANCEL, CANCEL];
 
     await editConfig({ config: "ralph.config.json" });
@@ -143,6 +165,7 @@ describe("editConfig", () => {
     expect(written.task_timeout).toBe(1800); // numOrKeep isCancel -> current
     expect(written.max_retries_per_task).toBe(3); // NaN -> current
     expect(written.max_review_rounds).toBe(5);
+    expect(written.max_stalled_review_rounds).toBe(2); // cancel -> current
     expect(written.review_after).toBe(true); // confirm cancelled -> kept default
     expect(written.commit_per_task).toBe(true);
   });

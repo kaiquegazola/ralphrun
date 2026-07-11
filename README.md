@@ -101,6 +101,7 @@ tail -f ralph.out
   "max_retries_per_task": 3,
   "review_after": true,
   "max_review_rounds": 3,
+  "max_stalled_review_rounds": 2,
   "heartbeat_secs": 30,
   "commit_per_task": true,
   "stop_on_blocked": false,
@@ -199,7 +200,9 @@ there gets reinvented next task. Keep those notes short and load-bearing.
 
 Each task needs `id`, `deps`, `description`, `acceptance`, and `verify` — a
 shell command that exits 0 only when the task is truly done (the objective gate
-that stops the loop from lying).
+that stops the loop from lying). `verify` should be a stack-aware quality gate:
+for typed/tested projects, include the relevant static check plus focused tests,
+and add build or integration tests when the task changes integration surface.
 
 ```json
 {
@@ -209,7 +212,7 @@ that stops the loop from lying).
   "retries": 0,
   "description": "Define the core entities and schema.",
   "acceptance": ["schema/migration files present", "migration runs clean"],
-  "verify": "npm run migrate && npm run typecheck"
+  "verify": "npm run typecheck && npm run test -- tests/data-model.test.ts && npm run migrate"
 }
 ```
 

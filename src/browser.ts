@@ -8,7 +8,7 @@
 //
 // The "dev-browser" string and its install/update commands live ONLY here.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import which from "which";
 import type { Task } from "./prd.js";
 
@@ -71,6 +71,19 @@ export function browserStatus(): BrowserStatus {
   // "broken"). Command + args are compile-time constants, so no injection risk.
   const p = spawnSync(BROWSER_TOOL, ["--help"], { stdio: "ignore", timeout: 15_000, shell: true });
   return p.status === 0 ? "ok" : "broken";
+}
+
+// Async twin of browserStatus for the live init wizard: the sync spawn above
+// would block the Ink render (and freeze a blank alt-screen for the full 15s if
+// the binary hangs). Same classification, non-blocking; any spawn error maps to
+// "broken", so a probe failure can never crash the wizard mount.
+export function browserStatusAsync(): Promise<BrowserStatus> {
+  if (!which.sync(BROWSER_TOOL, { nothrow: true })) return Promise.resolve("missing");
+  return new Promise((resolve) => {
+    const p = spawn(BROWSER_TOOL, ["--help"], { stdio: "ignore", timeout: 15_000, shell: true });
+    p.on("error", () => resolve("broken")); // spawn failed
+    p.on("close", (code) => resolve(code === 0 ? "ok" : "broken")); // non-zero / killed-by-timeout → broken
+  });
 }
 
 // Injected into the executor prompt for browser-validated tasks. Points to the

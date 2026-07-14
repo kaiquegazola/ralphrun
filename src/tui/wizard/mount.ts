@@ -14,6 +14,7 @@
 import React from "react";
 import { render } from "ink";
 import { resolve } from "node:path";
+import type { BrowserStatus } from "../../browser.js";
 import type { AgentDiagnostic } from "../../diagnostics.js";
 import { setLocale } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
@@ -47,6 +48,7 @@ export interface WizardResult {
 export interface MountWizardArgs {
   init: WizardInit;
   checkAgents(): AgentDiagnostic[];
+  checkBrowser(): Promise<BrowserStatus>; // optional dev-browser tool status (async; shown, never gated)
   loadSeed(prdPath: string): PrdLoadResult; // pipeline: parse + normalize + validate (never throws)
   loadForRun(prdPath: string): PrdLoadResult; // pipeline + write-back of the normalized file when ok (write may throw)
   savePrd(state: WizardState, prd: PRD, absPrdPath: string): void; // writes prd + ralph.config.json (may throw)
@@ -269,6 +271,7 @@ export async function mountWizard(args: MountWizardArgs): Promise<WizardResult |
         prdStore: () => prdStore,
         cwd: args.init.cwd,
         checkAgents: args.checkAgents,
+      checkBrowser: args.checkBrowser,
         onSend,
         onSave,
         onBuild,

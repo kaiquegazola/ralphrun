@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+import { browserStatusAsync } from "./browser.js";
 import { checkAllAgents } from "./diagnostics.js";
 import { DEFAULTS } from "./config.js";
 import { resolveLocale, t } from "./i18n.js";
@@ -170,6 +171,7 @@ export async function initWizard(opts: InitOptions): Promise<WizardResult | null
       cwdConfig: readCwdConfig(cfgPathNew), // honors --config; defaults to ./ralph.config.json
     },
     checkAgents: checkAllAgents,
+    checkBrowser: browserStatusAsync, // optional UI-validation tool — shown, never gated (async: never blocks the render)
     loadSeed,
     loadForRun,
     savePrd,

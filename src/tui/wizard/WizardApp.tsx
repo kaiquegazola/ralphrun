@@ -5,10 +5,11 @@
 // input — no new deps. Studio screen embeds PrdApp with the lazily-created prd
 // store. Excluded from coverage (Ink can't mount under the test runner).
 
-import React, { useEffect, useSyncExternalStore } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import { existsSync } from "node:fs";
 import { resolve, relative } from "node:path";
+import { BROWSER_INSTALL_HINT, BROWSER_TOOL, type BrowserStatus } from "../../browser.js";
 import type { AgentDiagnostic } from "../../diagnostics.js";
 import { t } from "../../i18n.js";
 import { searchFiles } from "../../picker.js";
@@ -34,6 +35,7 @@ export interface WizardAppProps {
   prdStore(): PrdStore | null; // lazy — created by mount on the studio transition
   cwd: string;
   checkAgents(): AgentDiagnostic[];
+  checkBrowser(): Promise<BrowserStatus>;
   onSend(text: string): void;
   onSave(): void; // savedPath set → silent re-save; else opens the save-as screen
   onBuild(): void; // save (or save-as) then resolve { prdPath, run:true }
@@ -116,7 +118,25 @@ function SelectList({ options, cursor, maxRows }: { options: Option[]; cursor: n
   );
 }
 
-function Preflight({ diagnostics }: { diagnostics: AgentDiagnostic[] }): React.ReactElement {
+function Preflight({
+  diagnostics,
+  browser,
+}: {
+  diagnostics: AgentDiagnostic[];
+  browser: BrowserStatus | "checking";
+}): React.ReactElement {
+  let bStatus = t("wizard.preflight.browserOk");
+  let bColor = "green";
+  if (browser === "checking") {
+    bStatus = t("wizard.preflight.browserChecking");
+    bColor = "gray";
+  } else if (browser === "missing") {
+    bStatus = t("wizard.preflight.browserMissing", { cmd: BROWSER_INSTALL_HINT });
+    bColor = "yellow"; // optional → a warning, not an error
+  } else if (browser === "broken") {
+    bStatus = t("wizard.preflight.browserBroken", { cmd: BROWSER_INSTALL_HINT });
+    bColor = "red";
+  }
   return (
     <Box flexDirection="column">
       {diagnostics.map((a) => {
@@ -138,6 +158,14 @@ function Preflight({ diagnostics }: { diagnostics: AgentDiagnostic[] }): React.R
           </Text>
         );
       })}
+      {/* optional UI-validation tool — informational, never blocks proceeding */}
+      <Box marginTop={1} flexDirection="column">
+        <Text dimColor>{t("wizard.preflight.optionalTools")}</Text>
+        <Text wrap="truncate-end">
+          {"  "}
+          {BROWSER_TOOL.padEnd(11)} <Text color={bColor}>{bStatus}</Text>
+        </Text>
+      </Box>
       <Box marginTop={1}>
         <Text dimColor>{t("wizard.preflight.continue")}</Text>
       </Box>
@@ -167,6 +195,15 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
   const s = useSyncExternalStore(props.store.subscribe, props.store.getSnapshot);
   const { columns, rows } = useWindowSize();
   const { dispatch } = props.store;
+  // view-local (not reducer state): the optional dev-browser tool status. Probed
+  // ASYNC (never blocks the render) at mount and on 'r' so installing it and
+  // refreshing flips it. "checking" until the first probe resolves.
+  const [browser, setBrowser] = useState<BrowserStatus | "checking">("checking");
+  const probeBrowser = React.useCallback(() => {
+    setBrowser("checking");
+    void props.checkBrowser().then(setBrowser);
+  }, [props]);
+  useEffect(probeBrowser, [probeBrowser]);
 
   // clear stale cells when the terminal is resized inside the alt buffer
   useEffect(() => {
@@ -228,6 +265,7 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
       if (input === "q") return void dispatch({ type: "quit" });
       if (input === "r" && REFRESH_SCREENS.has(s.screen)) {
         dispatch({ type: "refresh", diagnostics: props.checkAgents() });
+        probeBrowser();
       }
     },
     { isActive: s.screen !== "studio" },
@@ -277,7 +315,7 @@ export function WizardApp(props: WizardAppProps): React.ReactElement {
               </Box>
             )}
 
-            {s.screen === "preflight" && <Preflight diagnostics={s.diagnostics} />}
+            {s.screen === "preflight" && <Preflight diagnostics={s.diagnostics} browser={browser} />}
 
             {s.screen === "saveAs" && (
               <Box flexDirection="column">

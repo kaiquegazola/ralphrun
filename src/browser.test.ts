@@ -1,21 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { EventEmitter } from "node:events";
 
 vi.mock("which", () => ({ default: { sync: vi.fn() } }));
-vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
+vi.mock("node:child_process", () => ({ spawnSync: vi.fn(), spawn: vi.fn() }));
 
 import which from "which";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   BROWSER_TOOL,
   anyTaskUsesBrowser,
   browserGuidance,
   browserStatus,
+  browserStatusAsync,
   taskUsesBrowser,
 } from "./browser.js";
 import type { Task } from "./prd.js";
 
 const whichSync = vi.mocked(which.sync);
 const mSpawn = vi.mocked(spawnSync);
+const mSpawnAsync = vi.mocked(spawn);
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -77,6 +80,45 @@ describe("browserStatus", () => {
     whichSync.mockReturnValue("/p/dev-browser" as never);
     mSpawn.mockReturnValue({ status: 1 } as never); // non-zero exit / null on spawn failure
     expect(browserStatus()).toBe("broken");
+  });
+});
+
+describe("browserStatusAsync (non-blocking probe for the wizard)", () => {
+  const armChild = () => {
+    const child = new EventEmitter();
+    mSpawnAsync.mockReturnValue(child as never);
+    return child;
+  };
+
+  it("resolves 'missing' without spawning when the binary is absent", async () => {
+    whichSync.mockReturnValue(null as never);
+    await expect(browserStatusAsync()).resolves.toBe("missing");
+    expect(mSpawnAsync).not.toHaveBeenCalled();
+  });
+
+  it("resolves 'ok' when `--help` closes with 0 (spawned via shell)", async () => {
+    whichSync.mockReturnValue("/p/dev-browser" as never);
+    const child = armChild();
+    const p = browserStatusAsync();
+    child.emit("close", 0);
+    await expect(p).resolves.toBe("ok");
+    expect(mSpawnAsync).toHaveBeenCalledWith(BROWSER_TOOL, ["--help"], expect.objectContaining({ shell: true }));
+  });
+
+  it("resolves 'broken' on a non-zero/null close (hang killed by timeout)", async () => {
+    whichSync.mockReturnValue("/p/dev-browser" as never);
+    const child = armChild();
+    const p = browserStatusAsync();
+    child.emit("close", null);
+    await expect(p).resolves.toBe("broken");
+  });
+
+  it("resolves 'broken' on a spawn error (never throws / crashes the wizard)", async () => {
+    whichSync.mockReturnValue("/p/dev-browser" as never);
+    const child = armChild();
+    const p = browserStatusAsync();
+    child.emit("error", new Error("ENOENT"));
+    await expect(p).resolves.toBe("broken");
   });
 });
 

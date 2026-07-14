@@ -159,6 +159,11 @@ const en = {
   "wizard.preflight.notInstalled": "❌ Not installed",
   "wizard.preflight.notLoggedIn": "⚠️ Not logged in (run '{cmd}')",
   "wizard.preflight.authUnknown": "✅ Installed (auth unknown)",
+  "wizard.preflight.optionalTools": "optional (only for UI browser tests):",
+  "wizard.preflight.browserChecking": "… checking",
+  "wizard.preflight.browserOk": "✅ ready",
+  "wizard.preflight.browserMissing": "— not installed (install: {cmd})",
+  "wizard.preflight.browserBroken": "❌ installed but won't run — reinstall: {cmd}",
   "wizard.preflight.continue": "press ⏎ to continue",
   "wizard.noClis": "No supported CLIs are ready. Install and login to Claude, Grok, or Cursor, then press r.",
 
@@ -427,6 +432,11 @@ const ptBr: Record<MsgKey, string> = {
   "wizard.preflight.notInstalled": "❌ Não instalada",
   "wizard.preflight.notLoggedIn": "⚠️ Não logada (rode '{cmd}')",
   "wizard.preflight.authUnknown": "✅ Instalada (auth desconhecida)",
+  "wizard.preflight.optionalTools": "opcional (só para testes de UI no browser):",
+  "wizard.preflight.browserChecking": "… checando",
+  "wizard.preflight.browserOk": "✅ pronto",
+  "wizard.preflight.browserMissing": "— não instalado (instale: {cmd})",
+  "wizard.preflight.browserBroken": "❌ instalado mas não executa — reinstale: {cmd}",
   "wizard.preflight.continue": "pressione ⏎ para continuar",
   "wizard.noClis": "Nenhuma CLI suportada está pronta. Instale e faça login no Claude, Grok ou Cursor, depois pressione r.",
 

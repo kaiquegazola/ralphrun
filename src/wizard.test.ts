@@ -17,6 +17,7 @@ vi.mock("./userconfig.js", () => ({
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { checkAllAgents } from "./diagnostics.js";
+import { browserStatusAsync } from "./browser.js";
 import { mountWizard, type MountWizardArgs } from "./tui/wizard/mount.js";
 import type { WizardState } from "./tui/wizard/wizardController.js";
 import { loadUserConfig, saveUserConfig, userConfigExists } from "./userconfig.js";
@@ -153,6 +154,7 @@ describe("initWizard TTY path", () => {
     });
     expect("advisor" in a.init.saved).toBe(false);
     expect(a.checkAgents).toBe(checkAllAgents);
+    expect(a.checkBrowser).toBe(browserStatusAsync);
   });
 
   it("passes hasUserConfig + saved defaults (advisor null = disabled) through", async () => {

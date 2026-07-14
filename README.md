@@ -9,8 +9,8 @@ UI in English and Português (pt-BR).
 - **Fresh context per task** (the ralph reset): each task is a brand-new headless
   session. State lives in `prd.json` — the executor forgets everything between
   tasks.
-- **Real file editing**: the coding CLI (`claude` / `grok` / `cursor`) does the
-  work.
+- **Real file editing**: the coding CLI (`claude` / `grok` / `cursor` / `codex` /
+  `agy`) does the work.
 - **Advisor**: a stronger model steers. Two paths, picked automatically:
 
 | Mode | When | How |
@@ -117,12 +117,17 @@ ralphrun config edit        # Clack wizard over the key knobs
 ```
 
 - Flags override the file: `--executor cli:model`, `--advisor cli:model|none`.
-- `cli` is `claude`, `grok`, or `cursor`. To add another, extend `buildCmd()` in
-  `src/adapters.ts`.
+- `cli` is `claude`, `grok`, `cursor`, `codex`, or `agy`. **To add another, add one
+  entry to `AGENTS` in `src/agents.ts`** — the registry is the single source of
+  truth, and the adapters, preflight, pickers and NATIVE/CROSS routing all derive
+  from it.
 - Model shorthand: `--executor grok` → `grok:grok-4.5`, `--executor claude` →
-  `claude:sonnet`. `--executor cursor` (no model) lets Cursor pick its own default.
-- Only `claude` + `claude` runs NATIVE (server-side advisor). Any `grok`/`cursor`
-  → CROSS.
+  `claude:sonnet`. `--executor cursor` / `codex` / `agy` (no model) lets that CLI
+  pick its own default.
+- Model names with spaces need quoting in the shell:
+  `--executor "agy:Gemini 3.1 Pro (High)"`.
+- NATIVE (server-side advisor) requires the same CLI on both sides *and* a CLI that
+  supports it — today only `claude` + `claude`. Everything else → CROSS.
 
 ## Global config
 
@@ -143,13 +148,48 @@ ralphrun --lang pt-br            # force the UI language for one run (not saved)
 
 The CLIs you name must be installed and logged in:
 
-- `claude` — Claude Code >= 2.1.170 (needed for native `--advisor`).
-- `grok` — Grok CLI (`x.ai/cli`), browser login. Only if you use a grok executor.
+- `claude` — Claude Code >= 2.1.170 (needed for native `--advisor`). The only CLI
+  with a NATIVE advisor today.
+- `grok` — Grok CLI (`x.ai/cli`), browser login.
 - `cursor` — Cursor CLI (`cursor-agent` via `cursor.com/install`). Router CLI.
-  Always CROSS — no native advisor.
+- `codex` — Codex CLI (`codex exec`).
+- `agy` — Antigravity CLI. Model names contain spaces — quote them
+  (`--advisor "agy:Claude Opus 4.6 (Thinking)"`).
 
 Preflight fails fast if a named CLI isn't on PATH, with a clear message instead
-of burning every task's retry budget.
+of burning every task's retry budget. Login is only *verified* for `claude` and
+`cursor` — the others have no reliable headless auth probe, so they report
+"unknown" and are never blocked on it.
+
+## Browser validation (optional)
+
+For UI tasks, a `verify` gate can drive a real browser via
+[`dev-browser`](https://github.com/SawyerHood/dev-browser) — a Playwright-backed
+CLI that runs a JS script from stdin and exits non-zero when it throws:
+
+```json
+"verify": "npm run build && dev-browser --headless < e2e/login.mjs"
+```
+
+It's **not bundled** (Playwright + Chromium is ~300MB, and a bundled dep wouldn't
+be on the PATH where a `verify` shell command resolves it). It's an external tool
+you install once, like the coding CLIs:
+
+```bash
+npm i -g dev-browser && dev-browser install   # installs Playwright + Chromium
+npm update -g dev-browser                      # it does NOT self-update — refresh manually
+```
+
+How it wires up, with zero extra config:
+
+- A task **opts in** simply by naming `dev-browser` in its `verify` command —
+  that's the only switch. The planner emits these for UI tasks (never for
+  backend/lib/config).
+- The executor prompt then gets a short guide pointing at `dev-browser --help`
+  (the binary's own always-current API docs — nothing is vendored, so nothing
+  rots). Works for every executor CLI, not just `claude`.
+- Preflight fails fast with the install command if any task needs `dev-browser`
+  and it's missing, and logs a one-line update reminder when it's present.
 
 ## Permissions
 
@@ -236,13 +276,16 @@ src/
   userconfig.ts # per-user global config (sanitize + atomic write)
   i18n.ts       # en + pt-br dicts, typed t()
   prd.ts        # backlog types, recover/normalize, next_task
-  adapters.ts   # build_cmd for each CLI (claude/grok/cursor)
+  agents.ts     # THE agent registry: one entry per CLI (bin, models, buildCmd,
+                #   auth probe, native-advisor capability). Add a CLI here, only here.
+  adapters.ts   # build_cmd — thin seam over the registry
   prompts.ts    # executor/advisor prompt templates (always English)
   log.ts        # stdout/reporter + progress.md with timestamps
   git.ts        # git + capture_diff
   executor.ts   # streaming executor + heartbeat + AbortSignal cancel
   advisor.ts    # get_advice + advisor_review (CROSS)
   verify.ts     # objective gate + assembled feedback
+  browser.ts    # dev-browser validation tool: opt-in detection + prompt guide
   run.ts        # NATIVE vs CROSS per task
   loop.ts       # main loop: recover, preflight, route, run, retry, commit
   wizard.ts     # ralphrun init glue (non-TTY fallback + finalize writes)

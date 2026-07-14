@@ -35,6 +35,8 @@ const en = {
   // loop.ts — preflight errors
   "loop.err.notInstalled": "❌ CLI '{cli}' is not installed on your PATH.",
   "loop.err.notLoggedIn": "❌ CLI '{cli}' is installed but NOT logged in. Please run '{cmd}' first.",
+  "loop.err.browserMissing": "❌ A task's verify uses '{tool}', but it's not on your PATH. Install: {cmd}",
+  "loop.err.browserBroken": "❌ '{tool}' is on your PATH but won't run (e.g. a broken Volta shim). Reinstall: {cmd}",
   "loop.err.noPrd": "no PRD at {path}",
   "loop.err.noTask": "no task {id}",
   "loop.err.invalidPrd": "invalid PRD at {path}:",
@@ -52,6 +54,7 @@ const en = {
   // loop.ts / run.ts / verify.ts / executor.ts / advisor.ts — run log lines
   // (rendered live in the TUI pane; also appended to progress.md)
   "loop.log.recovered": "recovered/normalized prd.json (reset stuck tasks, filled defaults)",
+  "loop.log.browserActive": "browser validation active ({tool}) — it does not self-update; refresh with: {cmd}",
   "loop.log.midrunCorrupt": "prd.json unreadable mid-run — stopping: {msg}",
   "loop.log.taskVanished": "task {id} disappeared from prd.json mid-run — stopping",
   "loop.log.quit": "quit by user",
@@ -81,7 +84,7 @@ const en = {
   "loop.reason.reviewStalled": "review loop stalled",
   "loop.reason.reviewChanges": "review requested changes",
   "loop.reason.reviewExhausted": "review not approved",
-  "run.log.native": "  {id}: NATIVE claude {model} + advisor {advisorModel}",
+  "run.log.native": "  {id}: NATIVE {cli} {model} + advisor {advisorModel}",
   "run.log.cross": "  {id}: CROSS executor {executor}",
   "run.log.pass": "  {id}: round {n} → PASS (tests ok, review ok)",
   "run.log.reviewChanges": "  {id}: round {n} → review requested changes (tests ok)",
@@ -309,6 +312,8 @@ const ptBr: Record<MsgKey, string> = {
 
   "loop.err.notInstalled": "❌ A CLI '{cli}' não está instalada no seu PATH.",
   "loop.err.notLoggedIn": "❌ A CLI '{cli}' está instalada mas NÃO está logada. Rode '{cmd}' primeiro.",
+  "loop.err.browserMissing": "❌ O verify de uma task usa '{tool}', mas ele não está no PATH. Instale: {cmd}",
+  "loop.err.browserBroken": "❌ '{tool}' está no PATH mas não executa (ex.: shim quebrado do Volta). Reinstale: {cmd}",
   "loop.err.noPrd": "nenhum PRD em {path}",
   "loop.err.noTask": "task {id} não existe",
   "loop.err.invalidPrd": "PRD inválido em {path}:",
@@ -323,6 +328,7 @@ const ptBr: Record<MsgKey, string> = {
   "loop.dry.reviewNative": "nativo",
 
   "loop.log.recovered": "prd.json recuperado/normalizado (tasks travadas resetadas, padrões preenchidos)",
+  "loop.log.browserActive": "validação por browser ativa ({tool}) — ele não se atualiza sozinho; atualize com: {cmd}",
   "loop.log.midrunCorrupt": "prd.json ilegível durante a execução — parando: {msg}",
   "loop.log.taskVanished": "a task {id} sumiu do prd.json durante a execução — parando",
   "loop.log.quit": "encerrado pelo usuário",
@@ -352,7 +358,7 @@ const ptBr: Record<MsgKey, string> = {
   "loop.reason.reviewStalled": "loop de review travou",
   "loop.reason.reviewChanges": "review pediu mudanças",
   "loop.reason.reviewExhausted": "review não aprovado",
-  "run.log.native": "  {id}: NATIVE claude {model} + advisor {advisorModel}",
+  "run.log.native": "  {id}: NATIVE {cli} {model} + advisor {advisorModel}",
   "run.log.cross": "  {id}: CROSS executor {executor}",
   "run.log.pass": "  {id}: rodada {n} → PASSOU (testes ok, review ok)",
   "run.log.reviewChanges": "  {id}: rodada {n} → review pediu mudanças (testes ok)",

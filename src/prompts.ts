@@ -1,6 +1,7 @@
 // prompts.ts — the text prompts injected into executor + advisor
 
 import { existsSync, readFileSync } from "node:fs";
+import { browserGuidance, taskUsesBrowser } from "./browser.js";
 import type { PRD, Task } from "./prd.js";
 
 export function readStandards(workspace: string): string {
@@ -40,7 +41,7 @@ Rules:
 - Never touch prd.json, progress.md, or ralph.config.json — loop control files.
 - Explore the existing workspace first, then implement.
 - Run the build/tests yourself to confirm acceptance before finishing.
-Work in the current directory. Begin.`;
+Work in the current directory. Begin.${taskUsesBrowser(task) ? "\n" + browserGuidance() : ""}`;
 }
 
 export function advisorPrompt(task: Task, prd: PRD, standards = ""): string {

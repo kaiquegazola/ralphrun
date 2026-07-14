@@ -75,6 +75,13 @@ describe("buildPrompt", () => {
     const out = buildPrompt(task, prd);
     expect(out).not.toContain("Project standards");
   });
+  it("appends the browser guide only when the task's verify uses dev-browser", () => {
+    expect(buildPrompt(task, prd)).not.toContain("Browser validation");
+    const browserTask: Task = { ...task, verify: "npm run build && dev-browser --headless < e2e.mjs" };
+    const out = buildPrompt(browserTask, { ...prd, tasks: [browserTask] });
+    expect(out).toContain("Browser validation");
+    expect(out).toContain("dev-browser --help");
+  });
 });
 
 describe("advisorPrompt", () => {

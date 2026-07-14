@@ -1,6 +1,9 @@
+// diagnostics.ts — is each cli installed / logged in? Preflight fails fast on a
+// missing or logged-out cli instead of burning every task's retry budget.
+// The per-cli probe lives in the registry (agents.ts); this only runs it.
+
 import which from "which";
-import { execSync } from "node:child_process";
-import { BINARIES } from "./config.js";
+import { agentClis, agentDef, binOf } from "./agents.js";
 
 export interface AgentDiagnostic {
   cli: string;
@@ -12,43 +15,25 @@ export interface AgentDiagnostic {
 export function checkAgent(cli: string): AgentDiagnostic {
   // a shape-corrupt config can hand us a non-string cli at runtime — which.sync
   // throws a TypeError on non-strings (nothrow only covers not-found), so gate it.
-  const bin = BINARIES[cli] ?? cli;
+  const bin = binOf(cli);
   const installed = typeof bin === "string" && !!which.sync(bin, { nothrow: true });
-  
-  if (!installed) {
-    return { cli, installed: false, loggedIn: "unknown" };
-  }
+  if (!installed) return { cli, installed: false, loggedIn: "unknown" };
 
-  let loggedIn: boolean | "unknown" = "unknown";
-  let loginCommand: string | undefined = undefined;
+  // no registered probe (grok, agy and codex have no reliable headless auth check)
+  // → "unknown", which never blocks the run.
+  const auth = agentDef(cli)?.auth;
+  if (!auth) return { cli, installed, loggedIn: "unknown" };
 
+  let loggedIn: boolean | "unknown";
   try {
-    if (cli === "claude") {
-      loginCommand = "claude auth login";
-      // returns 0 if logged in, 1 if not
-      execSync(`${bin} auth status`, { stdio: "ignore" });
-      loggedIn = true;
-    } else if (cli === "cursor") {
-      loginCommand = "cursor agent login";
-      // returns 0 but prints "Not logged in" if not logged in
-      const out = execSync(`${bin} status`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-      if (out.includes("Not logged in")) {
-        loggedIn = false;
-      } else {
-        loggedIn = true;
-      }
-    } else if (cli === "grok" || cli === "agy" || cli === "codex") {
-      // Grok, agy, and codex don't have a reliable headless auth status check yet.
-      loggedIn = "unknown";
-    }
-  } catch (err) {
-    // If execSync throws (non-zero exit code), it's generally not logged in
+    loggedIn = auth.check(bin);
+  } catch {
+    // probe threw (non-zero exit) → read as logged out
     loggedIn = false;
   }
-
-  return { cli, installed, loggedIn, loginCommand };
+  return { cli, installed, loggedIn, loginCommand: auth.loginCommand };
 }
 
 export function checkAllAgents(): AgentDiagnostic[] {
-  return ["agy", "claude", "grok", "cursor", "codex"].map(checkAgent);
+  return agentClis.map(checkAgent);
 }

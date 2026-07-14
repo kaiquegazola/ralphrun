@@ -2,19 +2,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { defaultModelOf } from "./agents.js";
 import { t } from "./i18n.js";
 import { loadUserConfig } from "./userconfig.js";
-
-export const BINARIES: Record<string, string> = {
-  claude: "claude",
-  grok: "grok",
-  cursor: "cursor-agent",
-};
-
-export const DEFAULT_MODELS: Record<string, string> = {
-  claude: "sonnet",
-  grok: "grok-4.5",
-};
 
 export interface AgentSpec {
   cli: string;
@@ -58,10 +48,10 @@ export function parseAgent(spec: string | undefined): AgentSpec | null {
   let model: string;
   if (idx === -1) {
     cli = spec;
-    model = DEFAULT_MODELS[spec] ?? "";
+    model = defaultModelOf(spec);
   } else {
     cli = spec.slice(0, idx);
-    model = spec.slice(idx + 1) || DEFAULT_MODELS[cli] || "";
+    model = spec.slice(idx + 1) || defaultModelOf(cli);
   }
   return { cli, model };
 }

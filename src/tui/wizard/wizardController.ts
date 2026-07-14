@@ -4,6 +4,7 @@
 // default) mirrors prdController.ts for branch coverage.
 
 import { relative } from "node:path";
+import { AGENTS, agentClis, type AgentRole } from "../../agents.js";
 import type { AgentDiagnostic } from "../../diagnostics.js";
 import { t, type Locale } from "../../i18n.js";
 
@@ -18,7 +19,7 @@ export type Screen =
   | "studio"
   | "saveAs";
 
-export type AgentRole = "planner" | "executor" | "advisor";
+export type { AgentRole };
 
 export interface CliSpec {
   cli: string;
@@ -89,63 +90,16 @@ export type WizardAction =
   | { type: "prdInvalid"; errors: string[]; parseable: boolean }
   | { type: "quit" };
 
-export const CLI_OPTIONS: Option[] = [
-  { value: "agy", label: "Antigravity CLI" },
-  { value: "claude", label: "Claude Code CLI" },
-  { value: "grok", label: "Grok CLI" },
-  { value: "cursor", label: "Cursor CLI" },
-  { value: "codex", label: "Codex CLI" },
-];
+// derived from the agent registry — adding a cli there makes it show up here.
+export const CLI_OPTIONS: Option[] = agentClis.map((cli) => ({ value: cli, label: AGENTS[cli].label }));
 
-export const MODELS: Record<string, Option[]> = {
-  codex: [
-    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-    { value: "gpt-5.6-lua", label: "GPT-5.6 Lua" },
-    { value: "gpt-4.5-preview", label: "GPT-4.5 Preview" },
-  ],
-  agy: [
-    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-    { value: "gemini-2.0-pro-exp", label: "Gemini 2.0 Pro Exp" },
-  ],
-  claude: [
-    { value: "sonnet", label: "sonnet" },
-    { value: "opus", label: "opus" },
-    { value: "fable", label: "fable" },
-    { value: "haiku", label: "haiku" },
-  ],
-  grok: [{ value: "grok-4.5", label: "grok-4.5" }],
-  cursor: [
-    { value: "cursor-grok-4.5", label: "Cursor Grok 4.5" },
-    { value: "composer-2.5", label: "Composer 2.5" },
-    { value: "opus-4.8", label: "Opus 4.8" },
-    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-    { value: "gpt-5.6-lua", label: "GPT-5.6 Lua" },
-    { value: "gpt-5.5", label: "GPT-5.5" },
-    { value: "fable-5", label: "Fable 5" },
-    { value: "sonnet-5", label: "Sonnet 5" },
-    { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
-    { value: "sonnet-4.6", label: "Sonnet 4.6" },
-  ],
-};
+export const MODELS: Record<string, Option[]> = Object.fromEntries(
+  agentClis.map((cli) => [cli, AGENTS[cli].models.map((m) => ({ ...m }))]),
+);
 
 export function getModelOptions(role: AgentRole, cli: string): Option[] {
   const models = MODELS[cli] || [];
-  let recommended = "";
-
-  if (cli === "claude") {
-    if (role === "planner") recommended = "opus";
-    if (role === "executor") recommended = "sonnet";
-    if (role === "advisor") recommended = "fable";
-  } else if (cli === "cursor") {
-    recommended = role === "executor" ? "sonnet-5" : "opus-4.8";
-  } else if (cli === "grok") {
-    recommended = "grok-4.5";
-  } else if (cli === "agy") {
-    recommended = role === "advisor" ? "gemini-2.0-pro-exp" : "gemini-2.5-pro";
-  } else if (cli === "codex") {
-    recommended = "gpt-5.6-sol";
-  }
+  const recommended = AGENTS[cli]?.recommended[role] ?? "";
 
   return models
     .map((m) => (m.value === recommended ? { ...m, hint: t("wizard.model.recommended") } : { ...m }))

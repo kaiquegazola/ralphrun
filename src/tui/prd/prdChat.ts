@@ -52,6 +52,10 @@ const PREAMBLE = [
   '"cargo test", "go test ./...", "pytest tests/foo_test.py").',
   "When a task adds or changes integration surface, include build or integration tests too.",
   "Do not mark a task done if typecheck/lint/build is known to fail, even when unit tests pass.",
+  "For tasks that build or change USER-FACING UI, prefer a real browser check in verify using",
+  'dev-browser (a Playwright-backed CLI): e.g. "npm run build && dev-browser --headless < e2e/login.mjs",',
+  "where the script throws on any failed assertion. Add this ONLY for tasks with actual UI to drive —",
+  "never for backend, library, or config tasks.",
 ].join("\n");
 
 const REQUIRED_OUTPUT =

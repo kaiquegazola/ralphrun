@@ -1,6 +1,7 @@
 // run.ts — run a single task: NATIVE (one claude call with --advisor) or
 // CROSS (planner-before → executor → unified fix loop with verify + review).
 
+import { nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
 import type { Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
@@ -33,7 +34,7 @@ export async function runTask(
 ): Promise<RunTaskResult> {
   const execu = cfg.executor;
   const advis = cfg.advisor;
-  const native = !!advis && execu.cli === "claude" && advis.cli === "claude";
+  const native = supportsNativeAdvisor(execu.cli, advis?.cli);
   const standards = readStandards(workspace);
   const prompt = injectReviewRetryFeedback(buildPrompt(task, prd, standards), reviewRetryFeedback);
 
@@ -41,9 +42,10 @@ export async function runTask(
   // one call. Objective test gate still applies; failures fall to task retry.
   const attempt = { n: task.retries + 1, max: cfg.max_retries_per_task };
   if (native && advis) {
-    log(progress, t("run.log.native", { id: task.id, model: execu.model, advisorModel: advis.model }));
+    log(progress, t("run.log.native", { id: task.id, cli: execu.cli, model: execu.model, advisorModel: advis.model }));
     emit({ taskId: task.id, subphase: "executing", attempt });
-    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, ["--advisor", advis.model], signal);
+    const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
+    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
     const passed = ok && (await runVerify(task, workspace, progress)).passed;
     return { ok: passed, reason: passed ? undefined : "failed" };

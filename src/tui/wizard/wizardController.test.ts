@@ -4,6 +4,7 @@
 // precedence (cwd config > saved global > recommended), esc/back/quit at
 // every screen, refresh clamps, and the CLI_OPTIONS/MODELS tables.
 import { describe, it, expect } from "vitest";
+import { AGENTS, agentClis } from "../../agents.js";
 import type { AgentDiagnostic } from "../../diagnostics.js";
 import { t } from "../../i18n.js";
 import {
@@ -74,37 +75,32 @@ const refineOrRun = (path = "/w/sub/x.json", over: Partial<WizardInit> = {}): Wi
 const studioNew = (over: Partial<WizardInit> = {}): WizardState =>
   reducer(action(over), { type: "select" });
 
+// The pickers DERIVE from the agent registry (src/agents.ts) — they hold no cli
+// list of their own. So these assert the WIRING, not the model names: the values
+// live in exactly one place, and agents.test.ts guards their shape there.
 describe("tables", () => {
-  it("CLI_OPTIONS lists every supported CLI in picker order", () => {
-    expect(CLI_OPTIONS.map((o) => o.value)).toEqual(["agy", "claude", "grok", "cursor", "codex"]);
+  const ROLES: AgentRole[] = ["planner", "executor", "advisor"];
+
+  it("CLI_OPTIONS lists every registered CLI, in registry order, with its label", () => {
+    expect(CLI_OPTIONS.map((o) => o.value)).toEqual(agentClis);
+    for (const o of CLI_OPTIONS) expect(o.label).toBe(AGENTS[o.value].label);
   });
 
-  it("MODELS covers every CLI in CLI_OPTIONS", () => {
-    for (const o of CLI_OPTIONS) expect(MODELS[o.value].length).toBeGreaterThan(0);
+  it("MODELS mirrors each CLI's registry models", () => {
+    for (const cli of agentClis) {
+      expect(MODELS[cli].map((m) => m.value)).toEqual(AGENTS[cli].models.map((m) => m.value));
+    }
   });
 
-  it("recommends role-specific Antigravity and Codex models", () => {
-    expect(getModelOptions("advisor", "agy")[0].value).toBe("gemini-2.0-pro-exp");
-    expect(getModelOptions("executor", "agy")[0].value).toBe("gemini-2.5-pro");
-    expect(getModelOptions("planner", "codex")[0].value).toBe("gpt-5.6-sol");
-  });
-
-  it("getModelOptions puts the recommended model first with a hint", () => {
-    const cases: [AgentRole, string, string][] = [
-      ["planner", "claude", "opus"],
-      ["executor", "claude", "sonnet"],
-      ["advisor", "claude", "fable"],
-      ["planner", "cursor", "opus-4.8"],
-      ["executor", "cursor", "sonnet-5"],
-      ["advisor", "cursor", "opus-4.8"],
-      ["planner", "grok", "grok-4.5"],
-    ];
-    for (const [role, cli, recommended] of cases) {
-      const opts = getModelOptions(role, cli);
-      expect(opts[0].value).toBe(recommended);
-      expect(opts[0].hint).toBe(t("wizard.model.recommended"));
-      expect(opts.slice(1).every((o) => o.hint === undefined)).toBe(true);
-      expect(opts.length).toBe(MODELS[cli].length);
+  it("getModelOptions puts the registry's recommended model first, hinted, for every cli+role", () => {
+    for (const cli of agentClis) {
+      for (const role of ROLES) {
+        const opts = getModelOptions(role, cli);
+        expect(opts[0].value).toBe(AGENTS[cli].recommended[role]);
+        expect(opts[0].hint).toBe(t("wizard.model.recommended"));
+        expect(opts.slice(1).every((o) => o.hint === undefined)).toBe(true);
+        expect(opts.length).toBe(MODELS[cli].length); // recommended is sorted first, never dropped
+      }
     }
   });
 

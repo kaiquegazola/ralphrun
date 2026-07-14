@@ -13,9 +13,18 @@ vi.mock("./config.js", () => ({ loadConfig: vi.fn(), parseAgent: vi.fn() }));
 // mock above would not satisfy — stub the module instead.
 vi.mock("./userconfig.js", () => ({ loadUserConfig: vi.fn(() => ({ version: 1 })) }));
 vi.mock("./diagnostics.js", () => ({ checkAgent: vi.fn() }));
+// browser.js runs REAL against these mocks (its only external calls) so the
+// dev-browser preflight is drivable without stubbing the module.
+vi.mock("which", () => ({ default: { sync: vi.fn() } }));
+vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 // prdload is NOT mocked: the intake pipeline runs REAL against the fs mock,
 // so every test's mRead must return a parseable+valid PRD for the preflight.
-vi.mock("./prd.js", () => ({ findTask: vi.fn(), nextTask: vi.fn() }));
+// findTask/nextTask are driven per-test; sessionRunnableIds (pure) runs REAL so
+// the browser-preflight scope reflects the actual dependency closure.
+vi.mock("./prd.js", async (importActual) => {
+  const actual = await importActual<typeof import("./prd.js")>();
+  return { findTask: vi.fn(), nextTask: vi.fn(), sessionRunnableIds: actual.sessionRunnableIds };
+});
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
 vi.mock("./git.js", () => ({ git: vi.fn(), headCommit: vi.fn(() => null), captureReviewBase: vi.fn(() => "base-tree") }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
@@ -38,7 +47,18 @@ import { runTask } from "./run.js";
 import { mount } from "./tui/mount.js";
 import { pickModel } from "./configcmd.js";
 import { isCancel, select } from "@clack/prompts";
+import which from "which";
+import { spawnSync } from "node:child_process";
 import type { Config } from "./config.js";
+
+const mWhichSync = vi.mocked(which.sync);
+const mSpawnSync = vi.mocked(spawnSync);
+const browserTask = (over: Record<string, unknown> = {}) => ({
+  id: "T1", title: "UI", status: "todo", deps: [], retries: 0, description: "d", acceptance: [],
+  verify: "dev-browser --headless < e2e.mjs", ...over,
+});
+const prdWith = (tasks: unknown[]) => JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks });
+const BROWSER_PRD = prdWith([browserTask()]);
 
 const mExists = vi.mocked(existsSync);
 const mRead = vi.mocked(readFileSync);
@@ -179,6 +199,65 @@ describe("runLoop preflight", () => {
     mCheckAgent.mockReturnValue({ cli: "claude", installed: true, loggedIn: false, loginCommand: "claude auth login" });
     await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("NOT logged in"));
+  });
+
+  it("exits when a task's verify needs dev-browser but it's not on PATH", async () => {
+    mRead.mockReturnValue(BROWSER_PRD);
+    mWhichSync.mockReturnValue(null as never);
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("not on your PATH"));
+  });
+
+  it("exits when dev-browser resolves but won't run (broken shim)", async () => {
+    mRead.mockReturnValue(BROWSER_PRD);
+    mWhichSync.mockReturnValue("/usr/local/bin/dev-browser" as never);
+    mSpawnSync.mockReturnValue({ status: 1 } as never); // `--help` fails
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("won't run"));
+  });
+
+  it("proceeds and logs the update reminder when dev-browser is runnable", async () => {
+    fastTimers();
+    mRead.mockReturnValue(BROWSER_PRD);
+    mWhichSync.mockReturnValue("/usr/local/bin/dev-browser" as never);
+    mSpawnSync.mockReturnValue({ status: 0 } as never); // `--help` exits 0
+    await runLoop({ prd: "prd.json" });
+    expect(mLog).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("browser validation active"));
+  });
+
+  it("on a TTY, demands dev-browser for a BLOCKED browser task (menus can promote it)", async () => {
+    setTTY(true);
+    mSelect.mockResolvedValue("start" as never); // resume menu → start (blocked stays blocked)
+    mRead.mockReturnValue(prdWith([browserTask({ status: "blocked" })]));
+    mWhichSync.mockReturnValue(null as never);
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("not on your PATH"));
+  });
+
+  it("in non-TTY/CI, does NOT demand dev-browser for a BLOCKED browser task (it can never run)", async () => {
+    fastTimers();
+    mRead.mockReturnValue(prdWith([
+      browserTask({ id: "T0", status: "blocked" }),
+      { id: "T1", title: "back", status: "todo", deps: [], retries: 0, description: "d", acceptance: [], verify: "npm test" },
+    ]));
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce({ id: "T1", title: "back", status: "todo", deps: [], retries: 0, description: "d", acceptance: [] } as never).mockReturnValue(null);
+    mWhichSync.mockReturnValue(null as never); // dev-browser absent — must NOT matter in non-TTY
+    await runLoop({ prd: "prd.json" });
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining("dev-browser"));
+  });
+
+  it("does NOT demand dev-browser for a DONE browser task alongside non-browser work", async () => {
+    fastTimers();
+    mRead.mockReturnValue(prdWith([
+      browserTask({ id: "T0", status: "done" }),
+      { id: "T1", title: "back", status: "todo", deps: [], retries: 0, description: "d", acceptance: [], verify: "npm test" },
+    ]));
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce({ id: "T1", title: "back", status: "todo", deps: [], retries: 0, description: "d", acceptance: [] } as never).mockReturnValue(null);
+    mWhichSync.mockReturnValue(null as never); // dev-browser absent — must NOT matter
+    await runLoop({ prd: "prd.json" });
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining("dev-browser"));
   });
 
   it("allows changing an unavailable initial agent before preflight", async () => {

@@ -3,10 +3,12 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { supportsNativeAdvisor } from "./agents.js";
+import { anyTaskUsesBrowser, BROWSER_INSTALL_HINT, BROWSER_TOOL, BROWSER_UPDATE_HINT, browserStatus } from "./browser.js";
 import { loadConfig, parseAgent, type AgentSpec, type Config } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
 import { t } from "./i18n.js";
-import { findTask, nextTask, type PRD } from "./prd.js";
+import { findTask, nextTask, sessionRunnableIds, type PRD } from "./prd.js";
 import { loadPrdFile } from "./prdload.js";
 import { log, setReporter } from "./log.js";
 import { captureReviewBase, git, headCommit } from "./git.js";
@@ -146,6 +148,31 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   if (!opts.dryRun) {
     log(progress, `\n---`);
     log(progress, t("loop.dry.mode", { mode, executor: exe, advisor: adv }));
+    // Browser-validation preflight: a task opts in by invoking dev-browser in
+    // its verify gate. Fail fast if the tool is missing OR present-but-unrunnable
+    // (else every such task burns its retry budget on a gate that can't run),
+    // and remind that it does not self-update. Scope to the tasks that CAN run
+    // this session: the single --task (it executes regardless of status), else
+    // the dependency closure of what will actually run — todo tasks and, on a
+    // TTY, blocked tasks the menus can promote — so the tool is demanded iff a
+    // browser task genuinely runs, never for one transitively gated by a task
+    // that can't complete this session.
+    const willRun = opts.task
+      ? new Set([opts.task])
+      : sessionRunnableIds(prd0, !!process.stdout.isTTY);
+    const browserScope = prd0.tasks.filter((t) => willRun.has(t.id));
+    if (anyTaskUsesBrowser(browserScope)) {
+      const status = browserStatus();
+      if (status === "missing") {
+        console.error(t("loop.err.browserMissing", { tool: BROWSER_TOOL, cmd: BROWSER_INSTALL_HINT }));
+        process.exit(1);
+      }
+      if (status === "broken") {
+        console.error(t("loop.err.browserBroken", { tool: BROWSER_TOOL, cmd: BROWSER_INSTALL_HINT }));
+        process.exit(1);
+      }
+      log(progress, t("loop.log.browserActive", { tool: BROWSER_TOOL, cmd: BROWSER_UPDATE_HINT }));
+    }
   }
 
   let tui: TuiHandle | null = null;
@@ -426,7 +453,7 @@ function shortHash(hash: string): string {
 }
 
 function runMode(cfg: Config): "NATIVE" | "CROSS" {
-  return cfg.advisor && cfg.executor.cli === "claude" && cfg.advisor.cli === "claude" ? "NATIVE" : "CROSS";
+  return supportsNativeAdvisor(cfg.executor.cli, cfg.advisor?.cli) ? "NATIVE" : "CROSS";
 }
 
 function prepareRun(cfg: Config, workspace: string): void {

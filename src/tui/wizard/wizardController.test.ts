@@ -395,7 +395,7 @@ describe("agentPick", () => {
       hint: t("wizard.model.recommended"),
     });
     expect(opts.map((o) => o.value)).toContain("grok:grok-4.5");
-    expect(opts.map((o) => o.value)).toContain("cursor:sonnet-5");
+    expect(opts.map((o) => o.value)).toContain("cursor:composer-2.5");
     expect(opts.slice(1).every((o) => o.hint === undefined)).toBe(true);
     expect(opts.some((o) => o.value === "disable")).toBe(false);
   });
@@ -419,9 +419,9 @@ describe("agentPick", () => {
 
   it("executor select parses cli:model with dots/dashes in the model", () => {
     let s = agentPick(1);
-    const idx = visibleOptions(s).findIndex((o) => o.value === "cursor:gpt-5.5");
+    const idx = visibleOptions(s).findIndex((o) => o.value === "cursor:gpt-5.5-high");
     s = reducer({ ...s, cursor: idx }, { type: "select" });
-    expect(s.executorSpec).toEqual({ cli: "cursor", model: "gpt-5.5" });
+    expect(s.executorSpec).toEqual({ cli: "cursor", model: "gpt-5.5-high" });
     expect(s.screen).toBe("settings");
     expect(s.cursor).toBe(1); // executor row
   });

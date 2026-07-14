@@ -130,20 +130,30 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
   cursor: {
     label: "Cursor CLI",
     bin: "cursor-agent",
-    defaultModel: "", // router cli: no model = Cursor picks its own
+    defaultModel: "", // router cli: no model = Cursor picks its own (auto)
+    // Cursor's model IDs churn fast and now carry effort suffixes; these are a
+    // curated slice of valid `cursor agent models` (a user can still type any
+    // exact id via the "custom" picker). Stale ids make the CLI hard-fail every
+    // task ("Cannot use this model: ..."), so keep these matching the real list.
     models: [
-      { value: "cursor-grok-4.5", label: "Cursor Grok 4.5" },
+      { value: "auto", label: "Auto (Cursor picks)" },
       { value: "composer-2.5", label: "Composer 2.5" },
-      { value: "opus-4.8", label: "Opus 4.8" },
-      { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-      { value: "gpt-5.6-lua", label: "GPT-5.6 Lua" },
-      { value: "gpt-5.5", label: "GPT-5.5" },
-      { value: "fable-5", label: "Fable 5" },
-      { value: "sonnet-5", label: "Sonnet 5" },
-      { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
-      { value: "sonnet-4.6", label: "Sonnet 4.6" },
+      { value: "claude-sonnet-5-high", label: "Sonnet 5 1M" },
+      { value: "claude-sonnet-5-thinking-high", label: "Sonnet 5 1M Thinking" },
+      { value: "claude-opus-4-8-high", label: "Opus 4.8 1M" },
+      { value: "claude-opus-4-8-thinking-high", label: "Opus 4.8 1M Thinking" },
+      { value: "claude-fable-5-high", label: "Fable 5 1M" },
+      { value: "gpt-5.6-sol-high", label: "GPT-5.6 Sol High" },
+      { value: "gpt-5.6-terra-high", label: "GPT-5.6 Terra High" },
+      { value: "gpt-5.5-high", label: "GPT-5.5 High" },
+      { value: "cursor-grok-4.5-high", label: "Cursor Grok 4.5" },
+      { value: "gemini-3.1-pro", label: "Gemini 3.1 Pro" },
     ],
-    recommended: { planner: "opus-4.8", executor: "sonnet-5", advisor: "opus-4.8" },
+    recommended: {
+      planner: "claude-opus-4-8-high",
+      executor: "claude-sonnet-5-high",
+      advisor: "claude-opus-4-8-high",
+    },
     buildCmd: ({ bin, prompt, model, autoApprove }) => {
       const cmd = [bin, "agent", "--trust", "-p", prompt];
       if (model) cmd.push("--model", model);

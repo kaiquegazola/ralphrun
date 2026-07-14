@@ -1,6 +1,7 @@
 // loop.test.ts — covers runLoop: preflight gates, dry-run, task lifecycle,
 // and the TTY Ink dashboard wiring (mount/control/reporter) vs non-TTY fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { performance } from "node:perf_hooks";
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("./prd.js", async (importActual) => {
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
 vi.mock("./git.js", () => ({ git: vi.fn(), headCommit: vi.fn(() => null), captureReviewBase: vi.fn(() => "base-tree") }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
+vi.mock("./plan-cache.js", () => ({ advisorPlanKey: vi.fn(() => "plan-key") }));
 vi.mock("./tui/mount.js", () => ({ mount: vi.fn() }));
 vi.mock("./configcmd.js", () => ({ pickModel: vi.fn() }));
 vi.mock("@clack/prompts", () => ({
@@ -44,6 +46,7 @@ import { findTask, nextTask } from "./prd.js";
 import { log, setReporter } from "./log.js";
 import { git, headCommit, captureReviewBase } from "./git.js";
 import { runTask } from "./run.js";
+import { advisorPlanKey } from "./plan-cache.js";
 import { mount } from "./tui/mount.js";
 import { pickModel } from "./configcmd.js";
 import { isCancel, select } from "@clack/prompts";
@@ -74,6 +77,7 @@ const mGit = vi.mocked(git);
 const mHeadCommit = vi.mocked(headCommit);
 const mCaptureReviewBase = vi.mocked(captureReviewBase);
 const mRunTask = vi.mocked(runTask);
+const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
 const mMount = vi.mocked(mount);
 const mPickModel = vi.mocked(pickModel);
 const mSelect = vi.mocked(select);
@@ -463,12 +467,21 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
     expect(mParseAgent).toHaveBeenCalled();
     expect(mMount).not.toHaveBeenCalled(); // non-TTY: no dashboard
-    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree");
+    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree", expect.any(Function));
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "init");
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "add", "-A");
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1"));
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
     expect(mSetReporter).toHaveBeenLastCalledWith(null); // cleaned up on exit
+  });
+
+  it("done → commit; falls back to default template when commit_message_template is empty", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ commit_message_template: "" })); // Falsy forces fallback
+    mRunTask.mockResolvedValueOnce({ ok: true });
+    mHeadCommit.mockReturnValueOnce("aaaa").mockReturnValueOnce("bbbb");
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
+    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1: Task one"));
   });
 
   it("failing task (runTask throws) → retry (todo); parseAgent null skips override", async () => {
@@ -610,6 +623,59 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await expect(runLoop({ prd: "prd.json", task: "X" })).rejects.toThrow("exit:1");
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("no task X"));
   });
+
+  it("CROSS mode advising -> triggers onPlanGenerated and saves to PRD", async () => {
+    fastTimers();
+    mRunTask.mockImplementationOnce(async (t, p, c, w, prog, sig, rfb, rb, onPlan) => {
+      t.plan = "new-plan";
+      t.planKey = "plan-key";
+      if (onPlan) onPlan("new-plan", "plan-key");
+      return { ok: true };
+    });
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
+
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    const planWrites = writes.map((w) => JSON.parse(w)).filter((p) => p.tasks[0].plan === "new-plan");
+    expect(planWrites).not.toHaveLength(0);
+    expect(planWrites[0].tasks[0]).toMatchObject({ plan: "new-plan", planKey: "plan-key", status: "doing" });
+  });
+
+  it("does not restore an in-memory plan over a control-file replacement after a failed run", async () => {
+    fastTimers();
+    const initialTask = { ...TASK, plan: "old-plan", planKey: "old-key" };
+    const humanTask = { ...TASK, status: "doing", plan: "human-plan", planKey: "human-key" };
+    const initial = JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks: [initialTask] });
+    const changed = JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks: [humanTask] });
+    mRead.mockReturnValueOnce(initial).mockReturnValueOnce(initial).mockReturnValue(changed);
+    mFindTask.mockReturnValue(initialTask as never);
+    mRunTask.mockImplementationOnce(async (t, p, c, w, prog, sig, rfb, rb, onPlan) => {
+      t.plan = "generated-plan";
+      t.planKey = "plan-key";
+      onPlan?.("generated-plan", "plan-key");
+      return { ok: false, reason: "failed" };
+    });
+
+    await runLoop({ prd: "prd.json", task: "T1" });
+
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    const final = JSON.parse(writes.at(-1)!);
+    expect(final.tasks[0]).toMatchObject({ plan: "human-plan", planKey: "human-key", status: "todo" });
+    expect(writes.some((value) => value.includes("generated-plan"))).toBe(false);
+  });
+
+  it("does not persist generated advice when task prompt inputs changed mid-run", async () => {
+    fastTimers();
+    mAdvisorPlanKey.mockReturnValueOnce("changed-input-key");
+    mRunTask.mockImplementationOnce(async (t, p, c, w, prog, sig, rfb, rb, onPlan) => {
+      onPlan?.("generated-plan", "original-key");
+      return { ok: true };
+    });
+
+    await runLoop({ prd: "prd.json", task: "T1" });
+
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(writes.some((value) => value.includes("generated-plan"))).toBe(false);
+  });
 });
 
 describe("runLoop TTY dashboard", () => {
@@ -685,13 +751,42 @@ describe("runLoop TTY dashboard", () => {
       [{ id: "T1", title: "Task one", status: "todo" }],
       "P — exec: claude:sonnet | adv: claude:fable",
       "P",
+      false,
+      expect.any(Function),
     );
     // reporter routed into the TUI as an event carrying the current task id
     expect(handle.update).toHaveBeenCalledWith({ taskId: "T1", line: "mid", lineSource: "system" });
     // per-task abort signal came from the handle
-    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), SIG, undefined, "base-tree");
+    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), SIG, undefined, "base-tree", expect.any(Function));
     expect(handle.control.takeSkip).toHaveBeenCalled();
     expect(handle.unmount).toHaveBeenCalled();
+  });
+
+  it("accounts for pause transitions between ticks and samples pause state at task stop", async () => {
+    setTTY(true);
+    let nowMs = 0;
+    const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+    const handle = makeHandle();
+    let paused = false;
+    handle.control.isPaused = vi.fn(() => paused);
+    mMount.mockReturnValue(handle);
+    mRunTask.mockImplementation(async () => {
+      const onPausedChange = mMount.mock.calls[0][4]!;
+      nowMs = 100;
+      paused = true;
+      onPausedChange(true);
+      nowMs = 400;
+      paused = false;
+      onPausedChange(false);
+      nowMs = 1_000;
+      paused = true;
+      return { ok: true };
+    });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1 (1s)"));
+    nowSpy.mockRestore();
   });
 
   it("quit → unmounts and stops before running a task", async () => {
@@ -826,5 +921,26 @@ describe("runLoop TTY dashboard", () => {
     expect(logs).toContain("SKIPPED T1");
     expect(logs).not.toContain("stopping on blocked task"); // skip overrides the gate
     expect(handle.unmount).toHaveBeenCalled();
+  });
+
+  it("reuses one time-ticker callback when config is modified mid-run", async () => {
+    fastTimers();
+    setTTY(true);
+    const mockSetInterval = vi.spyOn(globalThis, "setInterval").mockImplementation((cb) => {
+      cb();
+      return 123 as any;
+    });
+    const mockClearInterval = vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+
+    const handle = makeHandle();
+    handle.waitConfigOrResume = vi.fn().mockResolvedValueOnce("config").mockResolvedValueOnce("quit");
+    mMount.mockReturnValue(handle);
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mockSetInterval).toHaveBeenCalledTimes(2);
+    expect(mockSetInterval.mock.calls[0][0]).toBe(mockSetInterval.mock.calls[1][0]);
+    mockSetInterval.mockRestore();
+    mockClearInterval.mockRestore();
   });
 });

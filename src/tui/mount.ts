@@ -24,7 +24,13 @@ export interface TuiHandle {
   unmount(): void;
 }
 
-export function mount(seedTasks: UiState["tasks"], header: string, project: string, startPaused = false): TuiHandle {
+export function mount(
+  seedTasks: UiState["tasks"],
+  header: string,
+  project: string,
+  startPaused = false,
+  onPausedChange?: (paused: boolean) => void,
+): TuiHandle {
   const initialStateWithTasks = { ...initialState, tasks: seedTasks };
   if (startPaused) initialStateWithTasks.paused = true;
   let state: UiState = reducer(initialStateWithTasks, { type: "seedTasks", tasks: seedTasks });
@@ -42,7 +48,9 @@ export function mount(seedTasks: UiState["tasks"], header: string, project: stri
       return state;
     },
     dispatch(a: Action): void {
+      const wasPaused = state.paused;
       state = reducer(state, a);
+      if (state.paused !== wasPaused) onPausedChange?.(state.paused);
       // side-effect: a confirmed skip OR quit aborts the running task's executor
       // child so the control takes effect now, not after the task finishes.
       if (state.skipRequested || state.quit) ac?.abort();

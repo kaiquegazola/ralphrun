@@ -19,7 +19,11 @@ const STATUSES = new Set(["todo", "doing", "done", "blocked"]);
 // "doing" → "todo" (crash recovery — skipped with keepDoing, the planner path);
 // retries non-number → 0; deps/acceptance UNDEFINED → []
 // (wrong TYPE untouched — validation rejects). Returns whether anything changed.
-export function normalizePrd(obj: unknown, opts?: { keepDoing?: boolean }): boolean {
+export interface NormalizePrdOptions {
+  keepDoing?: boolean;
+}
+
+export function normalizePrd(obj: unknown, opts?: NormalizePrdOptions): boolean {
   const tasks = (obj as { tasks?: unknown } | null)?.tasks;
   if (!Array.isArray(tasks)) return false;
   let changed = false;
@@ -90,6 +94,8 @@ export function validatePrd(obj: unknown): { ok: boolean; errors: string[] } {
     if (!Array.isArray(t.deps)) errors.push(msg("prd.err.deps", { i }));
     else for (const d of t.deps) if (!ids.has(d)) errors.push(msg("prd.err.depUnknown", { i, d }));
     if (t.verify !== undefined && typeof t.verify !== "string") errors.push(msg("prd.err.verify", { i }));
+    if (t.plan !== undefined && typeof t.plan !== "string") errors.push(msg("prd.err.plan", { i }));
+    if (t.planKey !== undefined && typeof t.planKey !== "string") errors.push(msg("prd.err.planKey", { i }));
   });
 
   return { ok: errors.length === 0, errors };
@@ -111,6 +117,8 @@ function seedSafe(obj: object): PRD {
     if (!Array.isArray(t.acceptance)) t.acceptance = [];
     t.acceptance = (t.acceptance as unknown[]).map(String); // React can't render object children
     if (t.verify !== undefined && typeof t.verify !== "string") delete t.verify;
+    if (t.plan !== undefined && typeof t.plan !== "string") delete t.plan;
+    if (t.planKey !== undefined && typeof t.planKey !== "string") delete t.planKey;
   }
   return p as unknown as PRD;
 }
@@ -123,14 +131,14 @@ export type PrdLoadResult =
   | { ok: true; prd: PRD; normalized: boolean }
   | { ok: false; errors: string[]; prd?: PRD };
 
-export function loadPrdFile(path: string): PrdLoadResult {
+export function loadPrdFile(path: string, opts?: NormalizePrdOptions): PrdLoadResult {
   let obj: unknown;
   try {
     obj = JSON.parse(readFileSync(path, "utf8"));
   } catch (e) {
     return { ok: false, errors: [msg("prd.err.json", { msg: e instanceof Error ? e.message : String(e) })] };
   }
-  const normalized = normalizePrd(obj);
+  const normalized = normalizePrd(obj, opts);
   const v = validatePrd(obj);
   if (!v.ok) {
     return typeof obj === "object" && obj !== null

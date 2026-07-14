@@ -75,7 +75,7 @@ export async function getAdvice(
   }
   log(progress, t("advisor.advice", { id: task.id, agent: `${advis.cli}:${advis.model}`, n: advice.length }));
   if (advice.trim()) emit({ taskId: task.id, line: compactLine(advice), lineSource: "advisor" });
-  return advice || null;
+  return advice;
 }
 
 export async function advisorReview(

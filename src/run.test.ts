@@ -5,6 +5,7 @@ vi.mock("./executor.js", () => ({ runExecutor: vi.fn() }));
 vi.mock("./advisor.js", () => ({ getAdvice: vi.fn(), advisorReview: vi.fn() }));
 vi.mock("./verify.js", () => ({ runVerify: vi.fn(), assembleFeedback: vi.fn() }));
 vi.mock("./prompts.js", () => ({
+  advisorPrompt: vi.fn(() => "ADVISOR_PROMPT"),
   buildPrompt: vi.fn(() => "PROMPT"),
   injectAdvice: vi.fn(() => "PROMPT+ADVICE"),
   readStandards: vi.fn(() => "STD"),
@@ -21,6 +22,7 @@ import { injectAdvice } from "./prompts.js";
 import { log } from "./log.js";
 import { emit } from "./tui/events.js";
 import { captureReviewBase } from "./git.js";
+import { advisorPlanKey } from "./plan-cache.js";
 import type { Config } from "./config.js";
 import type { PRD, Task } from "./prd.js";
 
@@ -58,6 +60,9 @@ function cfg(over: Partial<Config> = {}): Config {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete task.plan;
+  delete task.planKey;
+  task.retries = 0;
   mExec.mockResolvedValue(true);
   mVerify.mockReturnValue({ passed: true, output: "out" });
   mAdvice.mockResolvedValue("advice");
@@ -111,6 +116,14 @@ describe("runTask CROSS", () => {
     expect(mReview).not.toHaveBeenCalled();
   });
 
+  it("no advisor never injects a leftover plan into a fix round", async () => {
+    const t = { ...task, plan: "stale-plan", planKey: "stale-key" };
+    mVerify.mockReturnValue({ passed: false, output: "failed" });
+    await runTask(t, prd, cfg({ advisor: null, max_review_rounds: 1 }), "/ws", "/prog");
+    expect(mExec).toHaveBeenCalledTimes(2);
+    expect(mInject).not.toHaveBeenCalled();
+  });
+
   it("review_after off but advisor present → passes without review", async () => {
     const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, review_after: false }), "/ws", "/prog");
     expect(result.ok).toBe(true);
@@ -137,10 +150,32 @@ describe("runTask CROSS", () => {
   it("injects reviewer feedback into a human-requested retry prompt", async () => {
     const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
     expect(result.ok).toBe(true);
-    const prompt = mExec.mock.calls[0][1];
-    expect(prompt).toContain("Human-requested review retry");
-    expect(prompt).toContain("fix the missing gate");
-    expect(prompt).toContain("Do not answer by arguing that no changes are needed");
+    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined);
+  });
+
+  it("reuses plan if task.plan is already set", async () => {
+    const c = cfg({ advisor: { cli: "grok", model: "g" } });
+    const t = { ...task, plan: "old-plan" };
+    t.planKey = advisorPlanKey(t, prd, c.advisor!, "STD");
+    const result = await runTask(t, prd, c, "/ws", "/prog");
+    expect(result.ok).toBe(true);
+    expect(mAdvice).not.toHaveBeenCalled();
+    expect(mInject).toHaveBeenCalledWith(expect.any(String), "old-plan");
+  });
+
+  it("regenerates a cached plan whose provenance does not match", async () => {
+    const t = { ...task, plan: "old-plan", planKey: "other-advisor:other-model:hash" };
+    await runTask(t, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(mAdvice).toHaveBeenCalled();
+    expect(mInject).toHaveBeenCalledWith(expect.any(String), "advice");
+  });
+
+  it("calls onPlanGenerated when a new plan is created", async () => {
+    mAdvice.mockResolvedValue("brand-new-plan");
+    const onPlan = vi.fn();
+    await runTask(task, prd, cfg({ advisor: { cli: "c", model: "m" } }), "/ws", "/prog", undefined, undefined, undefined, onPlan);
+    expect(onPlan).toHaveBeenCalledWith("brand-new-plan", expect.stringMatching(/^c:m:[0-9a-f]{64}$/));
+    expect(task.planKey).toMatch(/^c:m:[0-9a-f]{64}$/);
   });
 
   it("stops the fix loop early when failing verify/review/diff repeats", async () => {

@@ -153,7 +153,7 @@ describe("loadPrdFile", () => {
         tasks: [
           42,
           null,
-          { id: 1, title: 2, description: 3, deps: "x", acceptance: [1, { a: 1 }], verify: 42, status: "todo" },
+          { id: 1, title: 2, description: 3, deps: "x", acceptance: [1, { a: 1 }], verify: 42, plan: 42, planKey: 42, status: "todo" },
           { acceptance: "x" },
         ],
       }),
@@ -168,6 +168,8 @@ describe("loadPrdFile", () => {
       expect(p.tasks[0]).toMatchObject({ id: "", title: "", description: "", deps: [] });
       expect(p.tasks[0].acceptance).toEqual(["1", "[object Object]"]); // stringified for render
       expect(p.tasks[0].verify).toBeUndefined();
+      expect(p.tasks[0].plan).toBeUndefined();
+      expect(p.tasks[0].planKey).toBeUndefined();
       expect(p.tasks[1].acceptance).toEqual([]);
     }
   });

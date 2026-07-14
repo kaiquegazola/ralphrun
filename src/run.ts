@@ -12,6 +12,7 @@ import { getAdvice, advisorReview } from "./advisor.js";
 import { runVerify, assembleFeedback } from "./verify.js";
 import { emit } from "./tui/events.js";
 import { captureReviewBase } from "./git.js";
+import { advisorPlanKey } from "./plan-cache.js";
 
 export type RunTaskFailureReason = "failed" | "review_changes" | "review_exhausted" | "review_stalled";
 
@@ -31,6 +32,7 @@ export async function runTask(
   signal?: AbortSignal,
   reviewRetryFeedback?: string,
   reviewBase?: string | null,
+  onPlanGenerated?: (plan: string, planKey: string) => void,
 ): Promise<RunTaskResult> {
   const execu = cfg.executor;
   const advis = cfg.advisor;
@@ -54,10 +56,23 @@ export async function runTask(
   // CROSS: planner up front, then a unified fix loop — tests + review feed the
   // SAME feedback into the executor, within this task's budget.
   let execPrompt = prompt;
+  let activeAdvice: string | undefined;
   if (advis) {
-    emit({ taskId: task.id, subphase: "advising" });
-    const advice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
-    if (advice) execPrompt = injectAdvice(prompt, advice);
+    const currentPlanKey = advisorPlanKey(task, prd, advis, standards);
+    if (task.plan && task.planKey === currentPlanKey) {
+      activeAdvice = task.plan;
+      log(progress, `  ${task.id}› reusing saved plan from PRD`);
+    } else {
+      emit({ taskId: task.id, subphase: "advising" });
+      const newAdvice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
+      if (newAdvice) {
+        activeAdvice = newAdvice;
+        task.plan = newAdvice;
+        task.planKey = currentPlanKey;
+        onPlanGenerated?.(newAdvice, currentPlanKey);
+      }
+    }
+    if (activeAdvice) execPrompt = injectAdvice(prompt, activeAdvice);
   }
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
@@ -109,7 +124,9 @@ export async function runTask(
       progress,
       t("run.log.fixing", { id: task.id, n: rnd, exec: String(ok), tests: String(testOk), approved: String(approved) }),
     );
-    const fixPrompt = buildPrompt(task, prd, standards) + "\n\n" + feedback;
+    let fixPrompt = buildPrompt(task, prd, standards);
+    if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
+    fixPrompt += "\n\n" + feedback;
     emit({ taskId: task.id, subphase: "fixing" });
     ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal);
   }

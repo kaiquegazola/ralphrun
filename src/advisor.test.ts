@@ -148,6 +148,7 @@ describe("advisorReview", () => {
     mockChild.stdout = new PassThrough();
     mockChild.stderr = new PassThrough();
     mockChild.on.mockReset();
+    mockChild.on.mockReset();
 
     vi.mocked(parseReview).mockReturnValueOnce({ approved: false, changes: "" });
     p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
@@ -157,6 +158,15 @@ describe("advisorReview", () => {
     expect(emitMock.mock.calls.at(-1)?.[0].line).toContain("review output");
   });
 
+  it("kills process on timeout", async () => {
+    vi.useFakeTimers();
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    vi.advanceTimersByTime(300_000);
+    expect(mockChild.kill).toHaveBeenCalledWith("SIGKILL");
+    finishSpawn(1);
+    await p;
+    vi.useRealTimers();
+  });
   it("passes the task baseline to the diff capture", async () => {
     diffMock.mockReturnValue("some diff");
     const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std", "base-commit");

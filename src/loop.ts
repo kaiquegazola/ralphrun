@@ -3,17 +3,21 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { supportsNativeAdvisor } from "./agents.js";
 import { anyTaskUsesBrowser, BROWSER_INSTALL_HINT, BROWSER_TOOL, BROWSER_UPDATE_HINT, browserStatus } from "./browser.js";
 import { loadConfig, parseAgent, type AgentSpec, type Config } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
+import { createElapsedTracker } from "./elapsed.js";
 import { t } from "./i18n.js";
 import { findTask, nextTask, sessionRunnableIds, type PRD } from "./prd.js";
-import { loadPrdFile } from "./prdload.js";
+import { loadPrdFile, type NormalizePrdOptions } from "./prdload.js";
 import { log, setReporter } from "./log.js";
 import { captureReviewBase, git, headCommit } from "./git.js";
+import { advisorPlanKey } from "./plan-cache.js";
+import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
-import { emit } from "./tui/events.js";
+import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
 
 export interface RunOptions {
@@ -79,8 +83,8 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   // preflight: a file corrupted or shape-broken MID-RUN (the executor agent can
   // write to the workspace) fails gracefully (log + unmount + stop) instead of
   // feeding runTask an invalid task or throwing a raw stack.
-  const reload = (): PRD | null => {
-    const r = loadPrdFile(prdPath);
+  const reload = (normalizeOpts?: NormalizePrdOptions): PRD | null => {
+    const r = loadPrdFile(prdPath, normalizeOpts);
     if (!r.ok) {
       log(progress, t("loop.log.midrunCorrupt", { msg: r.errors.join("; ") }));
       return null;
@@ -126,6 +130,8 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             if (t.status === "blocked") {
               t.status = "todo";
               t.retries = 0;
+              delete t.plan;
+              delete t.planKey;
               changed = true;
             }
           }
@@ -177,17 +183,26 @@ export async function runLoop(opts: RunOptions): Promise<void> {
 
   let tui: TuiHandle | null = null;
   let curTaskId = "";
-  let globalStartMs = Date.now();
-  let taskStartMs = Date.now();
+  const elapsedTracker = createElapsedTracker(performance.now());
+  const setElapsedPaused = (paused: boolean): void => {
+    elapsedTracker.setPaused(paused, performance.now());
+  };
   let timeTicker: NodeJS.Timeout | null = null;
+  const tickElapsed = (): void => {
+    const payload: Pick<RunEvent, "taskId"> &
+      Partial<Pick<RunEvent, "globalElapsedMs" | "taskElapsedMs">> =
+      elapsedTracker.tick(curTaskId, tui!.control.isPaused(), performance.now());
+    emit(payload);
+  };
+  const startTimeTicker = (): void => {
+    timeTicker = setInterval(tickElapsed, 1000);
+  };
   if (!opts.dryRun && process.stdout.isTTY) {
     const seed = prd0.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }));
     const header = `${prd0.project} — exec: ${exe} | adv: ${adv}`;
-    tui = mount(seed, header, prd0.project);
+    tui = mount(seed, header, prd0.project, false, setElapsedPaused);
     setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
-    timeTicker = setInterval(() => {
-      emit({ taskId: curTaskId, globalElapsedMs: Date.now() - globalStartMs, taskElapsedMs: Date.now() - taskStartMs });
-    }, 1000);
+    startTimeTicker();
   }
   const done = (): void => {
     if (timeTicker) clearInterval(timeTicker);
@@ -198,7 +213,9 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   const reviewBaselines = new Map<string, string | null>();
 
   while (true) {
+    if (tui) setElapsedPaused(tui.control.isPaused());
     const tuiAction = tui ? await tui.waitConfigOrResume() : "resume";
+    if (tui) setElapsedPaused(tuiAction === "config" || tui.control.isPaused());
     if (tuiAction === "quit" || tui?.control.shouldQuit()) {
       done();
       log(progress, t("loop.log.quit"));
@@ -206,6 +223,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     }
 
     if (tuiAction === "config" && tui) {
+      setElapsedPaused(true);
       if (timeTicker) clearInterval(timeTicker);
       tui.unmount();
       setReporter(null);
@@ -219,11 +237,9 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       const pState = reload() ?? prd0;
       const seed = pState.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }));
       const header = `${pState.project} — exec: ${exe} | adv: ${adv}`;
-      tui = mount(seed, header, pState.project, true);
+      tui = mount(seed, header, pState.project, true, setElapsedPaused);
       setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
-      timeTicker = setInterval(() => {
-        emit({ taskId: curTaskId, globalElapsedMs: Date.now() - globalStartMs, taskElapsedMs: Date.now() - taskStartMs });
-      }, 1000);
+      startTimeTicker();
       continue;
     }
 
@@ -265,6 +281,8 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             if (t.status === "blocked") {
               t.status = "todo";
               t.retries = 0;
+              delete t.plan;
+              delete t.planKey;
               changed = true;
               emit({ taskId: t.id, status: "todo" });
             }
@@ -293,7 +311,9 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     log(progress, t("loop.log.start", { id: task.id, title: task.title, n: task.retries + 1 }));
     task.status = "doing";
     curTaskId = task.id;
-    taskStartMs = Date.now();
+    const taskStartMs = performance.now();
+    if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStartMs);
+    elapsedTracker.startTask(taskStartMs);
     savePRD(prdPath, prd);
     emit({ taskId: task.id, title: task.title, status: "doing" });
 
@@ -308,15 +328,36 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       taskReviewBase = reviewBaselines.get(task.id);
     }
     const taskStartCommit = headCommit(workspace);
-    const t0 = Date.now();
+    const planBeforeRun = task.plan;
+    const planKeyBeforeRun = task.planKey;
     let result: RunTaskResult = { ok: false, reason: "failed" };
     try {
-      result = await runTask(task, prd, cfg, workspace, progress, signal, reviewRetryFeedback, taskReviewBase);
+      result = await runTask(task, prd, cfg, workspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
+        const currentPrd = reload({ keepDoing: true });
+        if (currentPrd) {
+          const currentTask = currentPrd.tasks.find((x) => x.id === task.id);
+          const advisor = cfg.advisor;
+          const controlFileCacheUnchanged = currentTask?.plan === planBeforeRun && currentTask?.planKey === planKeyBeforeRun;
+          if (
+            currentTask &&
+            advisor &&
+            controlFileCacheUnchanged &&
+            advisorPlanKey(currentTask, currentPrd, advisor, readStandards(workspace)) === planKey
+          ) {
+            currentTask.status = "doing";
+            currentTask.plan = plan;
+            currentTask.planKey = planKey;
+            savePRD(prdPath, currentPrd);
+          }
+        }
+      });
     } catch (e) {
       log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
       result = { ok: false, reason: "failed" };
     }
-    const elapsedMs = Date.now() - t0;
+    const taskStopMs = performance.now();
+    if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStopMs);
+    const elapsedMs = elapsedTracker.stopTask(taskStopMs);
     const elapsed = Math.round(elapsedMs / 1000);
     const taskEndCommit = headCommit(workspace);
     if (taskEndCommit && taskEndCommit !== taskStartCommit) {

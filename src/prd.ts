@@ -11,6 +11,8 @@ export interface Task {
   description: string;
   acceptance: string[];
   verify?: string;
+  plan?: string;
+  planKey?: string;
 }
 
 export interface PRD {

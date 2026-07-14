@@ -249,6 +249,8 @@ const en = {
   "prd.err.deps": "task[{i}].deps must be an array",
   "prd.err.depUnknown": "task[{i}] dep references unknown id: {d}",
   "prd.err.verify": "task[{i}].verify must be a string",
+  "prd.err.plan": "task[{i}].plan must be a string",
+  "prd.err.planKey": "task[{i}].planKey must be a string",
 
   // run-loop TUI (App.tsx + controller.ts)
   "run.tasks": "Tasks",
@@ -516,6 +518,8 @@ const ptBr: Record<MsgKey, string> = {
   "prd.err.deps": "task[{i}].deps precisa ser um array",
   "prd.err.depUnknown": "task[{i}] dep referencia id desconhecido: {d}",
   "prd.err.verify": "task[{i}].verify precisa ser uma string",
+  "prd.err.plan": "task[{i}].plan precisa ser uma string",
+  "prd.err.planKey": "task[{i}].planKey precisa ser uma string",
 
   "run.tasks": "Tarefas",
   "run.phase": "fase",

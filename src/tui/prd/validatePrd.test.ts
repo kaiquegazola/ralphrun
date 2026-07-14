@@ -102,6 +102,13 @@ it("rejects a non-string verify (undefined stays allowed)", () => {
   expect(validatePrd(prd()).ok).toBe(true); // verify omitted
 });
 
+it("rejects non-string persisted plan fields", () => {
+  const r = validatePrd(prd({ tasks: [task({ plan: 42, planKey: false })] }));
+  expect(r.errors).toContain("task[0].plan must be a string");
+  expect(r.errors).toContain("task[0].planKey must be a string");
+  expect(validatePrd(prd({ tasks: [task({ plan: "steps", planKey: "advisor:hash" })] })).ok).toBe(true);
+});
+
 it("rejects a dep referencing an unknown id", () => {
   const r = validatePrd(prd({ tasks: [task({ id: "A", deps: ["ghost"] })] }));
   expect(r.errors).toContain("task[0] dep references unknown id: ghost");

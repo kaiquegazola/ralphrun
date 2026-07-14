@@ -180,7 +180,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   if (!opts.dryRun && process.stdout.isTTY) {
     const seed = prd0.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }));
     const header = `${prd0.project} — exec: ${exe} | adv: ${adv}`;
-    tui = mount(seed, header);
+    tui = mount(seed, header, prd0.project);
     setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
   }
   const done = (): void => {
@@ -211,7 +211,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       const pState = reload() ?? prd0;
       const seed = pState.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }));
       const header = `${pState.project} — exec: ${exe} | adv: ${adv}`;
-      tui = mount(seed, header, true);
+      tui = mount(seed, header, pState.project, true);
       setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
       continue;
     }

@@ -24,7 +24,7 @@ export interface TuiHandle {
   unmount(): void;
 }
 
-export function mount(seedTasks: UiState["tasks"], header: string, startPaused = false): TuiHandle {
+export function mount(seedTasks: UiState["tasks"], header: string, project: string, startPaused = false): TuiHandle {
   const initialStateWithTasks = { ...initialState, tasks: seedTasks };
   if (startPaused) initialStateWithTasks.paused = true;
   let state: UiState = reducer(initialStateWithTasks, { type: "seedTasks", tasks: seedTasks });
@@ -51,7 +51,7 @@ export function mount(seedTasks: UiState["tasks"], header: string, startPaused =
   };
 
   const unsubBus = on((e) => store.dispatch({ type: "event", event: e }));
-  const instance = render(React.createElement(App, { store, header }));
+  const instance = render(React.createElement(App, { store, header, project }));
 
   return {
     update: (e) => store.dispatch({ type: "event", event: e }),

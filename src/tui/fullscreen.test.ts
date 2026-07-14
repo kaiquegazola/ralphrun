@@ -2,7 +2,7 @@
 // default process.stdout path.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { enterAltScreen, exitAltScreen } from "./fullscreen.js";
+import { enterAltScreen, exitAltScreen, setTitle } from "./fullscreen.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -25,5 +25,11 @@ describe("fullscreen", () => {
     exitAltScreen();
     expect(spy).toHaveBeenNthCalledWith(1, "\x1b[?1049h\x1b[?25l\x1b[?1007h");
     expect(spy).toHaveBeenNthCalledWith(2, "\x1b[?1007l\x1b[?1049l\x1b[?25h");
+  });
+
+  it("setTitle writes the OSC 2 window-title sequence", () => {
+    const writes: string[] = [];
+    setTitle("MyProject · 3/8", { write: (s) => writes.push(s) });
+    expect(writes).toEqual(["\x1b]2;MyProject · 3/8\x07"]);
   });
 });

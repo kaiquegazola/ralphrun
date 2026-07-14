@@ -3,12 +3,13 @@
 // actions via useInput. All state folding lives in controller.ts. Excluded from
 // coverage (vitest include glob is *.ts, which does not match *.tsx).
 
-import React, { useSyncExternalStore } from "react";
+import React, { useEffect, useSyncExternalStore } from "react";
 import { Box, Text, useInput } from "ink";
 import { t } from "../i18n.js";
 import type { TaskStatus } from "../prd.js";
 import type { Action, UiState } from "./controller.js";
 import { selectFooterHint, selectProgress } from "./controller.js";
+import { setTitle } from "./fullscreen.js";
 
 export interface Store {
   subscribe(cb: () => void): () => void;
@@ -19,6 +20,7 @@ export interface Store {
 export interface AppProps {
   store: Store;
   header: string;
+  project: string;
 }
 
 const GLYPH: Record<TaskStatus, string> = { todo: "○", doing: "◐", done: "✓", blocked: "✗" };
@@ -39,8 +41,18 @@ function gate(label: string, v?: boolean): React.ReactElement {
   );
 }
 
-export function App({ store, header }: AppProps): React.ReactElement {
+export function App({ store, header, project }: AppProps): React.ReactElement {
   const s = useSyncExternalStore(store.subscribe, store.getSnapshot);
+
+  // Live terminal tab title: "<project> · <done>/<total>[ · <current task>]".
+  // App only mounts on a TTY, so this never pollutes piped output.
+  const cur = s.current.title ?? s.tasks.find((tk) => tk.id === s.current.taskId)?.title;
+  const done = s.counts.done;
+  const total = s.counts.total;
+  useEffect(() => {
+    const suffix = done >= total && total > 0 ? " ✓" : cur ? ` · ${cur}` : "";
+    setTitle(`${project} · ${done}/${total}${suffix}`);
+  }, [project, done, total, cur]);
 
   useInput((input, key) => {
     const low = input.toLowerCase();

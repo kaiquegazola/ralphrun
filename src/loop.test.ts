@@ -683,6 +683,7 @@ describe("runLoop TTY dashboard", () => {
     expect(mMount).toHaveBeenCalledWith(
       [{ id: "T1", title: "Task one", status: "todo" }],
       "P — exec: claude:sonnet | adv: claude:fable",
+      "P",
     );
     // reporter routed into the TUI as an event carrying the current task id
     expect(handle.update).toHaveBeenCalledWith({ taskId: "T1", line: "mid", lineSource: "system" });

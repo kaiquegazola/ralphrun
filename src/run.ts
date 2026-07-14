@@ -56,7 +56,7 @@ export async function runTask(
   let execPrompt = prompt;
   if (advis) {
     emit({ taskId: task.id, subphase: "advising" });
-    const advice = getAdvice(task, prd, advis, cfg, workspace, progress, standards);
+    const advice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
     if (advice) execPrompt = injectAdvice(prompt, advice);
   }
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
@@ -81,7 +81,7 @@ export async function runTask(
     emit({ taskId: task.id, subphase: "reviewing" });
     const { approved, changes, diff = "" } =
       reviewOn && advis
-        ? advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase)
+        ? await advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase)
         : { approved: true, changes: "", diff: "" };
     lastApproved = approved;
     if (changes.trim()) lastReviewChanges = changes;

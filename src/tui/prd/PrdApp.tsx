@@ -132,7 +132,7 @@ export function PrdApp({ store, cwd, onSend, onSave, onBuild, onQuit, savedPath,
           }
           if (chosen) {
             store.dispatch({ type: "addAttachment", path: chosen.absolute });
-            setBuffer(buffer.slice(0, atIdx)); // strip the '@fragment' token
+            setBuffer(buffer.slice(0, atIdx) + "@" + chosen.relative + " ");
           }
           setPickerOpen(false);
           setPickerIndex(0);

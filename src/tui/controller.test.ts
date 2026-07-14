@@ -55,6 +55,14 @@ describe("foldEvent fields", () => {
     expect(s.current.timeoutMs).toBe(9000);
   });
 
+  it("elapsed ticks: taskElapsedMs lands on current, globalElapsedMs on top-level state (purely)", () => {
+    const before = seeded();
+    const s = reducer(before, { type: "event", event: { taskId: "T1", taskElapsedMs: 4200, globalElapsedMs: 61000 } });
+    expect(s.current.taskElapsedMs).toBe(4200);
+    expect(s.globalElapsedMs).toBe(61000);
+    expect(before.globalElapsedMs).toBeUndefined(); // reducer must not mutate its input
+  });
+
   it("gates shallow-merge across events", () => {
     let s = reducer(seeded(), { type: "event", event: { taskId: "T1", gates: { exec: true } } });
     s = reducer(s, { type: "event", event: { taskId: "T1", gates: { tests: false } } });

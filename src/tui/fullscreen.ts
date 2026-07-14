@@ -16,9 +16,9 @@ export function exitAltScreen(out: AnsiOut = process.stdout): void {
   out.write("\x1b[?1007l\x1b[?1049l\x1b[?25h");
 }
 
-// OSC 2: set the terminal window/tab title. TTY-only (callers gate on isTTY, so
-// the escape never lands in piped/CI output); the shell reclaims the title on
-// its next prompt after ralphrun exits.
+// OSC 0: set the terminal window/tab title and icon name. TTY-only (callers gate
+// on isTTY, so the escape never lands in piped/CI output); the shell reclaims
+// the title on its next prompt after ralphrun exits.
 export function setTitle(title: string, out: AnsiOut = process.stdout): void {
-  out.write(`\x1b]2;${title}\x07`);
+  out.write(`\x1b]0;${title}\x07`);
 }

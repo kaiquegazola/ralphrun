@@ -22,6 +22,7 @@ export interface Config {
   max_stalled_review_rounds: number;
   heartbeat_secs: number;
   commit_per_task: boolean;
+  commit_message_template: string;
   stop_on_blocked: boolean;
   extra_executor_args: string[];
 }
@@ -37,6 +38,7 @@ export const DEFAULTS: Config = {
   max_stalled_review_rounds: 2,
   heartbeat_secs: 30,
   commit_per_task: true,
+  commit_message_template: "{id}: {title}",
   stop_on_blocked: false,
   extra_executor_args: [],
 };

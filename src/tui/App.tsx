@@ -31,6 +31,12 @@ function bar(fraction: number, width: number): string {
   return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
+function formatTime(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
 function gate(label: string, v?: boolean): React.ReactElement {
   const color = v === undefined ? "gray" : v ? "green" : "red";
   const mark = v === undefined ? "·" : v ? "✓" : "✗";
@@ -98,6 +104,17 @@ export function App({ store, header, project }: AppProps): React.ReactElement {
           <Box marginTop={1} flexDirection="column">
             <Text>
               {bar(selectProgress(s), 20)} {Math.round(selectProgress(s) * 100)}%
+              {s.globalElapsedMs !== undefined && (() => {
+                const globalSec = Math.floor(s.globalElapsedMs / 1000);
+                const progress = selectProgress(s);
+                let etaStr = "";
+                if (progress > 0 && progress < 1 && globalSec > 0) {
+                  const totalEst = Math.round(globalSec / progress);
+                  const rem = totalEst - globalSec;
+                  etaStr = ` · ETA: ${formatTime(rem)}`;
+                }
+                return ` (${formatTime(globalSec)}${etaStr})`;
+              })()}
             </Text>
             <Text dimColor>
               {counts.done}✓ {counts.doing}◐ {counts.todo}○ {counts.blocked}✗ / {counts.total}
@@ -130,9 +147,14 @@ export function App({ store, header, project }: AppProps): React.ReactElement {
             {gate(t("run.gate.tests"), current.gates.tests)}
             {gate(t("run.gate.review"), current.gates.review)}
           </Box>
+          {current.taskElapsedMs !== undefined && (
+            <Text dimColor>
+              Task: {formatTime(Math.floor(current.taskElapsedMs / 1000))}
+            </Text>
+          )}
           {elapsedS !== undefined && (
             <Text dimColor>
-              {timeoutS !== undefined ? bar(elapsedS / timeoutS, 20) + " " : ""}
+              Exec: {timeoutS !== undefined ? bar(elapsedS / timeoutS, 20) + " " : ""}
               {elapsedS}s{timeoutS !== undefined ? ` / ${timeoutS}s` : ""}
             </Text>
           )}

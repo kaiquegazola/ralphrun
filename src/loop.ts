@@ -177,13 +177,20 @@ export async function runLoop(opts: RunOptions): Promise<void> {
 
   let tui: TuiHandle | null = null;
   let curTaskId = "";
+  let globalStartMs = Date.now();
+  let taskStartMs = Date.now();
+  let timeTicker: NodeJS.Timeout | null = null;
   if (!opts.dryRun && process.stdout.isTTY) {
     const seed = prd0.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status }));
     const header = `${prd0.project} — exec: ${exe} | adv: ${adv}`;
     tui = mount(seed, header, prd0.project);
     setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
+    timeTicker = setInterval(() => {
+      emit({ taskId: curTaskId, globalElapsedMs: Date.now() - globalStartMs, taskElapsedMs: Date.now() - taskStartMs });
+    }, 1000);
   }
   const done = (): void => {
+    if (timeTicker) clearInterval(timeTicker);
     setReporter(null);
     tui?.unmount();
   };
@@ -199,6 +206,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     }
 
     if (tuiAction === "config" && tui) {
+      if (timeTicker) clearInterval(timeTicker);
       tui.unmount();
       setReporter(null);
       console.clear();
@@ -213,6 +221,9 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       const header = `${pState.project} — exec: ${exe} | adv: ${adv}`;
       tui = mount(seed, header, pState.project, true);
       setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
+      timeTicker = setInterval(() => {
+        emit({ taskId: curTaskId, globalElapsedMs: Date.now() - globalStartMs, taskElapsedMs: Date.now() - taskStartMs });
+      }, 1000);
       continue;
     }
 
@@ -282,6 +293,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     log(progress, t("loop.log.start", { id: task.id, title: task.title, n: task.retries + 1 }));
     task.status = "doing";
     curTaskId = task.id;
+    taskStartMs = Date.now();
     savePRD(prdPath, prd);
     emit({ taskId: task.id, title: task.title, status: "doing" });
 
@@ -347,7 +359,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       emit({ taskId: task.id, status: "done", elapsedMs });
       savePRD(prdPath, fresh);
       if (cfg.commit_per_task) {
-        logTaskCommit(workspace, progress, task.id, task.title);
+        logTaskCommit(workspace, progress, task.id, task.title, cfg);
       }
     } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
       const reason =
@@ -382,7 +394,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
           savePRD(prdPath, fresh);
           if (cfg.commit_per_task) {
-            logTaskCommit(workspace, progress, task.id, task.title);
+            logTaskCommit(workspace, progress, task.id, task.title, cfg);
           }
           if (opts.task) {
             done();
@@ -440,10 +452,13 @@ function withReviewFeedback(reason: string, changes?: string): string {
   return `${reason}: ${summary}`;
 }
 
-function logTaskCommit(workspace: string, progress: string, id: string, title: string): void {
+function logTaskCommit(workspace: string, progress: string, id: string, title: string, cfg: Config): void {
   const before = headCommit(workspace);
   git(workspace, "add", "-A");
-  git(workspace, "commit", "-m", `${id}: ${title}`);
+  // function replacers: a literal id/title is used verbatim (a "$&"/"$1" in a
+  // task title must not be interpreted as a replacement pattern).
+  const msg = (cfg.commit_message_template || "{id}: {title}").replace(/{id}/g, () => id).replace(/{title}/g, () => title);
+  git(workspace, "commit", "-m", msg);
   const after = headCommit(workspace);
   if (after && after !== before) log(progress, t("loop.log.committed", { id, hash: shortHash(after) }));
 }

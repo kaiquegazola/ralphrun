@@ -11,9 +11,18 @@ vi.mock("./prompts.js", () => ({
   reviewPrompt: vi.fn(() => "rp"),
   parseReview: vi.fn(() => ({ approved: false, changes: "do x" })),
 }));
-vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 
-import { spawnSync } from "node:child_process";
+// We must use actual streams so readline works
+import { PassThrough } from "node:stream";
+const mockChild = {
+  stdout: new PassThrough(),
+  stderr: new PassThrough(),
+  on: vi.fn(),
+  kill: vi.fn(),
+};
+vi.mock("node:child_process", () => ({ spawn: vi.fn(() => mockChild) }));
+
+import { spawn } from "node:child_process";
 import { log } from "./log.js";
 import { captureDiff } from "./git.js";
 import { parseReview } from "./prompts.js";
@@ -22,7 +31,7 @@ import { emit } from "./tui/events.js";
 import type { AgentSpec, Config } from "./config.js";
 import type { PRD, Task } from "./prd.js";
 
-const spawnMock = spawnSync as unknown as Mock;
+const spawnMock = spawn as unknown as Mock;
 const diffMock = captureDiff as unknown as Mock;
 const emitMock = vi.mocked(emit);
 
@@ -33,40 +42,69 @@ const prd = { project: "p", stack: "s", architecture_notes: "" } as unknown as P
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockChild.stdout = new PassThrough();
+  mockChild.stderr = new PassThrough();
+  mockChild.on.mockReset();
 });
 
+function finishSpawn(code = 0) {
+  const calls = mockChild.on.mock.calls;
+  for (const [event, cb] of calls) {
+    if (event === "close") cb(code);
+  }
+}
+
+function errorSpawn(err = new Error("nope")) {
+  const calls = mockChild.on.mock.calls;
+  for (const [event, cb] of calls) {
+    if (event === "error") cb(err);
+  }
+}
+
 describe("getAdvice", () => {
-  it("returns trimmed advice on success and logs char count", () => {
-    spawnMock.mockReturnValue({ stdout: "  advice text  " });
-    const r = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+  it("returns trimmed advice on success and logs char count", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("  advice text  \n");
+    finishSpawn(0);
+    const r = await p;
     expect(r).toBe("advice text");
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("→ 11 chars"));
-    expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "advice text", lineSource: "advisor" });
+    expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "  advice text  ", lineSource: "advisor" });
   });
 
-  it("returns null when advice is empty (whitespace only)", () => {
-    spawnMock.mockReturnValue({ stdout: "   " });
-    expect(getAdvice(task, prd, advis, cfg, "ws", "prog", "std")).toBeNull();
+  it("returns null when advice is empty (whitespace only)", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("   \n");
+    finishSpawn(0);
+    expect(await p).toBeNull();
   });
 
-  it("handles missing stdout (?? fallback)", () => {
-    spawnMock.mockReturnValue({});
-    expect(getAdvice(task, prd, advis, cfg, "ws", "prog", "std")).toBeNull();
+  it("handles missing stdout (?? fallback)", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("");
+    finishSpawn(0);
+    expect(await p).toBeNull();
   });
 
-  it("returns null and logs failure when spawn throws", () => {
-    spawnMock.mockImplementation(() => {
+  it("returns null and logs failure when spawn throws", async () => {
+    spawnMock.mockImplementationOnce(() => {
       throw new Error("nope");
     });
-    expect(getAdvice(task, prd, advis, cfg, "ws", "prog", "std")).toBeNull();
+    expect(await getAdvice(task, prd, advis, cfg, "ws", "prog", "std")).toBeNull();
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("advisor failed"));
+  });
+
+  it("returns null and logs failure when child error event fires", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    errorSpawn();
+    expect(await p).toBeNull();
   });
 });
 
 describe("advisorReview", () => {
-  it("approves immediately on empty diff without spawning", () => {
+  it("approves immediately on empty diff without spawning", async () => {
     diffMock.mockReturnValue("   ");
-    expect(advisorReview(task, prd, advis, cfg, "ws", "prog", "std")).toEqual({
+    expect(await advisorReview(task, prd, advis, cfg, "ws", "prog", "std")).toEqual({
       approved: true,
       changes: "",
       diff: "   ",
@@ -74,45 +112,78 @@ describe("advisorReview", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("delegates to parseReview on success", () => {
+  it("delegates to parseReview on success", async () => {
     diffMock.mockReturnValue("some diff");
-    spawnMock.mockReturnValue({ stdout: "CHANGES: x" });
-    const r = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("CHANGES: x\n");
+    finishSpawn(0);
+    const r = await p;
     expect(parseReview).toHaveBeenCalledWith("CHANGES: x");
     expect(r).toEqual({ approved: false, changes: "do x", diff: "some diff" });
-    expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "do x", lineSource: "review" });
+    expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "CHANGES: x", lineSource: "review" });
   });
 
-  it("emits an approval verdict and compacts oversized reviewer output", () => {
+  it("emits an approval verdict and compacts oversized reviewer output", async () => {
     diffMock.mockReturnValue("some diff");
-    vi.mocked(parseReview).mockReturnValue({ approved: true, changes: "" });
-    spawnMock.mockReturnValue({ stdout: "APPROVE" });
-    advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    vi.mocked(parseReview).mockReturnValueOnce({ approved: true, changes: "" });
+    let p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
     expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "APPROVE", lineSource: "review" });
 
-    vi.mocked(parseReview).mockReturnValue({ approved: false, changes: "x".repeat(600) });
-    advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    // Reset streams for next call
+    mockChild.stdout = new PassThrough();
+    mockChild.stderr = new PassThrough();
+    mockChild.on.mockReset();
+
+    vi.mocked(parseReview).mockReturnValueOnce({ approved: false, changes: "x".repeat(600) });
+    p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("x".repeat(600) + "\n");
+    finishSpawn(0);
+    await p;
     expect(emitMock.mock.calls.at(-1)?.[0].line).toHaveLength(500);
 
-    vi.mocked(parseReview).mockReturnValue({ approved: false, changes: "" });
-    spawnMock.mockReturnValue({ stdout: "review output without changes" });
-    advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    // Reset streams for next call
+    mockChild.stdout = new PassThrough();
+    mockChild.stderr = new PassThrough();
+    mockChild.on.mockReset();
+
+    vi.mocked(parseReview).mockReturnValueOnce({ approved: false, changes: "" });
+    p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("review output without changes\n");
+    finishSpawn(0);
+    await p;
     expect(emitMock.mock.calls.at(-1)?.[0].line).toContain("review output");
   });
 
-  it("passes the task baseline to the diff capture", () => {
+  it("passes the task baseline to the diff capture", async () => {
     diffMock.mockReturnValue("some diff");
-    spawnMock.mockReturnValue({ stdout: "CHANGES: x" });
-    advisorReview(task, prd, advis, cfg, "ws", "prog", "std", "base-commit");
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std", "base-commit");
+    mockChild.stdout.end("CHANGES: x\n");
+    finishSpawn(0);
+    await p;
     expect(diffMock).toHaveBeenCalledWith("ws", "base-commit");
   });
 
-  it("approves and logs when review CLI throws", () => {
+  it("approves and logs when review CLI throws synchronously", async () => {
     diffMock.mockReturnValue("some diff");
-    spawnMock.mockImplementation(() => {
+    spawnMock.mockImplementationOnce(() => {
       throw new Error("boom");
     });
-    expect(advisorReview(task, prd, advis, cfg, "ws", "prog", "std")).toEqual({
+    expect(await advisorReview(task, prd, advis, cfg, "ws", "prog", "std")).toEqual({
+      approved: true,
+      changes: "",
+      diff: "some diff",
+    });
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("review failed"));
+  });
+
+  it("approves and logs when review CLI fires error event", async () => {
+    diffMock.mockReturnValue("some diff");
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    errorSpawn();
+    expect(await p).toEqual({
       approved: true,
       changes: "",
       diff: "some diff",

@@ -1,6 +1,7 @@
 // advisor.ts — CROSS-mode advisor: guidance before, review after
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 
 import { buildCmd } from "./adapters.js";
 import type { AgentSpec, Config } from "./config.js";
@@ -17,20 +18,47 @@ export interface AdvisorReviewResult {
   diff: string;
 }
 
-function runAdvisorCli(advis: AgentSpec, cmd: string[], cfg: Config, workspace: string): string | null {
-  try {
-    const p = spawnSync(cmd[0], cmd.slice(1), {
-      cwd: workspace,
-      encoding: "utf8",
-      timeout: cfg.advisor_timeout * 1000,
-    });
-    return (p.stdout ?? "").trim();
-  } catch {
-    return null;
-  }
+function runAdvisorCli(advis: AgentSpec, cmd: string[], cfg: Config, workspace: string, taskId: string, source: "advisor" | "review"): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      const proc = spawn(cmd[0], cmd.slice(1), {
+        cwd: workspace,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      // The RESULT is parsed from stdout only (the model's answer / review
+      // verdict); stderr is streamed to the TUI for visibility but must NOT
+      // enter `out`, or diagnostic noise could corrupt the parsed advice or flip
+      // a review verdict.
+      let out = "";
+      const outRl = createInterface({ input: proc.stdout });
+      outRl.on("line", (line) => {
+        out += line + "\n";
+        emit({ taskId, line, lineSource: source });
+      });
+      const errRl = createInterface({ input: proc.stderr });
+      errRl.on("line", (line) => emit({ taskId, line, lineSource: source }));
+
+      const timeout = setTimeout(() => {
+        proc.kill("SIGKILL");
+      }, cfg.advisor_timeout * 1000);
+
+      proc.on("close", () => {
+        clearTimeout(timeout);
+        resolve(out.trim() || null);
+      });
+
+      proc.on("error", () => {
+        clearTimeout(timeout);
+        resolve(null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
-export function getAdvice(
+export async function getAdvice(
   task: Task,
   prd: PRD,
   advis: AgentSpec,
@@ -38,9 +66,9 @@ export function getAdvice(
   workspace: string,
   progress: string,
   standards: string,
-): string | null {
+): Promise<string | null> {
   const cmd = buildCmd(advis.cli, advisorPrompt(task, prd, standards), advis.model, workspace, false);
-  const advice = runAdvisorCli(advis, cmd, cfg, workspace);
+  const advice = await runAdvisorCli(advis, cmd, cfg, workspace, task.id, "advisor");
   if (advice === null) {
     log(progress, t("advisor.failed", { id: task.id }));
     return null;
@@ -50,7 +78,7 @@ export function getAdvice(
   return advice || null;
 }
 
-export function advisorReview(
+export async function advisorReview(
   task: Task,
   prd: PRD,
   advis: AgentSpec,
@@ -59,11 +87,11 @@ export function advisorReview(
   progress: string,
   standards: string,
   reviewBase?: string | null,
-): AdvisorReviewResult {
+): Promise<AdvisorReviewResult> {
   const diff = captureDiff(workspace, reviewBase);
   if (!diff.trim()) return { approved: true, changes: "", diff };
   const cmd = buildCmd(advis.cli, reviewPrompt(task, prd, standards, diff), advis.model, workspace, false);
-  const out = runAdvisorCli(advis, cmd, cfg, workspace);
+  const out = await runAdvisorCli(advis, cmd, cfg, workspace, task.id, "review");
   if (out === null) {
     log(progress, t("advisor.reviewFailed", { id: task.id }));
     return { approved: true, changes: "", diff };

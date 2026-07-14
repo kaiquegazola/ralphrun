@@ -20,7 +20,9 @@ export interface UiState {
     lines: string[]; // last LINE_CAP executor lines, ring-capped
     elapsedMs?: number;
     timeoutMs?: number;
+    taskElapsedMs?: number;
   };
+  globalElapsedMs?: number;
   counts: { done: number; doing: number; todo: number; blocked: number; total: number };
   blocked: { id: string; reason: string }[];
   paused: boolean;
@@ -79,6 +81,7 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   let current = { ...state.current };
   let tasks = state.tasks;
   let blocked = state.blocked;
+  let globalElapsedMs = state.globalElapsedMs;
 
   // status "doing" = task transition: wipe the per-task view so lines/gates from
   // the previous task don't bleed into the next one.
@@ -97,6 +100,8 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   if (e.line !== undefined) current.lines = [...current.lines, formatLine(e.line, e.lineSource)].slice(-LINE_CAP);
   if (e.elapsedMs !== undefined) current.elapsedMs = e.elapsedMs;
   if (e.timeoutMs !== undefined) current.timeoutMs = e.timeoutMs;
+  if (e.taskElapsedMs !== undefined) current.taskElapsedMs = e.taskElapsedMs;
+  if (e.globalElapsedMs !== undefined) globalElapsedMs = e.globalElapsedMs;
 
   if (e.status !== undefined) {
     const mapped: TaskStatus = e.status === "retry" ? "todo" : e.status;
@@ -108,7 +113,7 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
     }
   }
 
-  return { ...state, current, tasks, blocked, counts: countOf(tasks) };
+  return { ...state, current, tasks, blocked, globalElapsedMs, counts: countOf(tasks) };
 }
 
 function formatLine(line: string, source?: RunEvent["lineSource"]): string {

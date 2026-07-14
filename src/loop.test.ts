@@ -94,6 +94,7 @@ function cfg(over: Partial<Config> = {}): Config {
     max_stalled_review_rounds: 2,
     heartbeat_secs: 30,
     commit_per_task: true,
+    commit_message_template: "{id}: {title}",
     stop_on_blocked: false,
     extra_executor_args: [],
     ...over,

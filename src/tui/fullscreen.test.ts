@@ -27,9 +27,9 @@ describe("fullscreen", () => {
     expect(spy).toHaveBeenNthCalledWith(2, "\x1b[?1007l\x1b[?1049l\x1b[?25h");
   });
 
-  it("setTitle writes the OSC 2 window-title sequence", () => {
+  it("setTitle writes the OSC 0 window-title sequence", () => {
     const writes: string[] = [];
     setTitle("MyProject · 3/8", { write: (s) => writes.push(s) });
-    expect(writes).toEqual(["\x1b]2;MyProject · 3/8\x07"]);
+    expect(writes).toEqual(["\x1b]0;MyProject · 3/8\x07"]);
   });
 });

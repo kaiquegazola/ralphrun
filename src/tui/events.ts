@@ -18,6 +18,8 @@ export interface RunEvent {
   reason?: string; // when status==="blocked" (e.g. "skipped by user" / "max retries")
   elapsedMs?: number;
   timeoutMs?: number;
+  globalElapsedMs?: number;
+  taskElapsedMs?: number;
 }
 
 type Listener = (e: RunEvent) => void;

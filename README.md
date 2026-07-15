@@ -24,12 +24,14 @@ Both CLIs auth by their own subscription login — **no API keys**.
 
 ```bash
 # use without installing
-npx ralphrun --help
+npx @kaiquegazola/ralphrun --help
 
 # or install globally
-npm install -g ralphrun
+npm install -g @kaiquegazola/ralphrun
 ralphrun --help
 ```
+
+Published as [`@kaiquegazola/ralphrun`](https://www.npmjs.com/package/@kaiquegazola/ralphrun); the CLI binary is `ralphrun`.
 
 Requires Node >= 20.
 

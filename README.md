@@ -10,7 +10,7 @@ UI in English and Português (pt-BR).
   session. State lives in `prd.json` — the executor forgets everything between
   tasks.
 - **Real file editing**: the coding CLI (`claude` / `grok` / `cursor` / `codex` /
-  `agy`) does the work.
+  `agy` / `opencode`) does the work.
 - **Advisor**: a stronger model steers. Two paths, picked automatically:
 
 | Mode | When | How |
@@ -119,13 +119,13 @@ ralphrun config edit        # Clack wizard over the key knobs
 ```
 
 - Flags override the file: `--executor cli:model`, `--advisor cli:model|none`.
-- `cli` is `claude`, `grok`, `cursor`, `codex`, or `agy`. **To add another, add one
-  entry to `AGENTS` in `src/agents.ts`** — the registry is the single source of
-  truth, and the adapters, preflight, pickers and NATIVE/CROSS routing all derive
-  from it.
+- `cli` is `claude`, `grok`, `cursor`, `codex`, `agy`, or `opencode`. **To add
+  another, add one entry to `AGENTS` in `src/agents.ts`** — the registry is the
+  single source of truth, and the adapters, preflight, pickers and NATIVE/CROSS
+  routing all derive from it.
 - Model shorthand: `--executor grok` → `grok:grok-4.5`, `--executor claude` →
-  `claude:sonnet`. `--executor cursor` / `codex` / `agy` (no model) lets that CLI
-  pick its own default.
+  `claude:sonnet`. `--executor cursor` / `codex` / `agy` / `opencode` (no model)
+  lets that CLI pick its own default.
 - Model names with spaces need quoting in the shell:
   `--executor "agy:Gemini 3.1 Pro (High)"`.
 - NATIVE (server-side advisor) requires the same CLI on both sides *and* a CLI that
@@ -157,6 +157,9 @@ The CLIs you name must be installed and logged in:
 - `codex` — Codex CLI (`codex exec`).
 - `agy` — Antigravity CLI. Model names contain spaces — quote them
   (`--advisor "agy:Claude Opus 4.6 (Thinking)"`).
+- `opencode` — opencode CLI (`opencode run`). Models are `provider/model`
+  (`--executor opencode:opencode/big-pickle`); no model = its configured default.
+  Auth is per-provider, so login is reported "unknown" like grok/agy/codex.
 
 Preflight fails fast if a named CLI isn't on PATH, with a clear message instead
 of burning every task's retry budget. Login is only *verified* for `claude` and

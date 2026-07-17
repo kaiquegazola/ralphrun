@@ -188,6 +188,56 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       return cmd;
     },
   },
+
+  opencode: {
+    label: "opencode CLI",
+    bin: "opencode",
+    defaultModel: "", // models are "provider/model" and user-configured; "" = opencode's own default
+    // `opencode models` — the opencode/* ids are the built-in Zen provider's
+    // free tier and opencode-go/* is the OpenCode Go subscription; BOTH need
+    // credentials (`/connect` → API key, per https://opencode.ai/docs/providers).
+    // Any other provider/model the user has configured can be typed via flags,
+    // config, or the "custom" picker.
+    models: [
+      { value: "opencode/big-pickle", label: "Big Pickle (free)" },
+      { value: "opencode/deepseek-v4-flash-free", label: "DeepSeek V4 Flash (free)" },
+      { value: "opencode/hy3-free", label: "Hy3 (free)" },
+      { value: "opencode/mimo-v2.5-free", label: "MiMo V2.5 (free)" },
+      { value: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra (free)" },
+      { value: "opencode/north-mini-code-free", label: "North Mini Code (free)" },
+      { value: "opencode-go/deepseek-v4-flash", label: "Go · DeepSeek V4 Flash" },
+      { value: "opencode-go/deepseek-v4-pro", label: "Go · DeepSeek V4 Pro" },
+      { value: "opencode-go/glm-5.1", label: "Go · GLM 5.1" },
+      { value: "opencode-go/glm-5.2", label: "Go · GLM 5.2" },
+      { value: "opencode-go/grok-4.5", label: "Go · Grok 4.5" },
+      { value: "opencode-go/kimi-k2.6", label: "Go · Kimi K2.6" },
+      { value: "opencode-go/kimi-k2.7-code", label: "Go · Kimi K2.7 Code" },
+      { value: "opencode-go/kimi-k3", label: "Go · Kimi K3" },
+      { value: "opencode-go/mimo-v2.5", label: "Go · MiMo V2.5" },
+      { value: "opencode-go/mimo-v2.5-pro", label: "Go · MiMo V2.5 Pro" },
+      { value: "opencode-go/minimax-m2.7", label: "Go · MiniMax M2.7" },
+      { value: "opencode-go/minimax-m3", label: "Go · MiniMax M3" },
+      { value: "opencode-go/qwen3.6-plus", label: "Go · Qwen 3.6 Plus" },
+      { value: "opencode-go/qwen3.7-max", label: "Go · Qwen 3.7 Max" },
+      { value: "opencode-go/qwen3.7-plus", label: "Go · Qwen 3.7 Plus" },
+    ],
+    // advisor leans on a DIFFERENT model family than the executor — the whole
+    // point of the advisor is a second opinion, not an echo.
+    recommended: {
+      planner: "opencode/big-pickle",
+      executor: "opencode/big-pickle",
+      advisor: "opencode/nemotron-3-ultra-free",
+    },
+    buildCmd: ({ bin, prompt, model, autoApprove }) => {
+      const cmd = [bin, "run"];
+      if (model) cmd.push("--model", model);
+      if (autoApprove) cmd.push("--auto");
+      cmd.push(prompt); // opencode takes the prompt LAST, after the flags
+      return cmd;
+    },
+    // no auth probe: opencode auth is per-provider (`opencode auth list`),
+    // so there is no single reliable headless "logged in" check → "unknown".
+  },
 } satisfies Record<string, AgentDef>);
 
 /** every registered cli, in picker order */

@@ -40,6 +40,14 @@ describe("buildCmd", () => {
       "--dangerously-bypass-hook-trust", "P",
     ]);
   });
+  it("opencode uses run with --model, --auto and the prompt last", () => {
+    expect(buildCmd("opencode", "P", "opencode/big-pickle", "/w", true)).toEqual([
+      "opencode", "run", "--model", "opencode/big-pickle", "--auto", "P",
+    ]);
+  });
+  it("opencode without model, no autoApprove", () => {
+    expect(buildCmd("opencode", "P", "", "/w", false)).toEqual(["opencode", "run", "P"]);
+  });
   it("unknown cli throws", () => {
     expect(() => buildCmd("nope", "P", "", "/w", false)).toThrow("unknown cli: nope");
   });

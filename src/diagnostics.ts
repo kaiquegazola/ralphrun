@@ -19,8 +19,8 @@ export function checkAgent(cli: string): AgentDiagnostic {
   const installed = typeof bin === "string" && !!which.sync(bin, { nothrow: true });
   if (!installed) return { cli, installed: false, loggedIn: "unknown" };
 
-  // no registered probe (grok, agy and codex have no reliable headless auth check)
-  // → "unknown", which never blocks the run.
+  // no registered probe (grok, agy, codex and opencode have no reliable headless
+  // auth check) → "unknown", which never blocks the run.
   const auth = agentDef(cli)?.auth;
   if (!auth) return { cli, installed, loggedIn: "unknown" };
 

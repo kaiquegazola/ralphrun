@@ -90,6 +90,6 @@ describe("checkAllAgents", () => {
     whichSync.mockReturnValue("/bin/x" as any);
     exec.mockReturnValue("" as any);
     const all = checkAllAgents();
-    expect(all.map((a) => a.cli)).toEqual(["agy", "claude", "grok", "cursor", "codex"]);
+    expect(all.map((a) => a.cli)).toEqual(["agy", "claude", "grok", "cursor", "codex", "opencode"]);
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@kaiquegazola/ralphrun",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CLI-agnostic autonomous build loop — fresh context per task, executor + advisor. Inspired by snarktank/ralph.",
   "type": "module",
   "bin": {

@@ -3,7 +3,6 @@
 // Node has no select(): we attach readline to stdout+stderr (merged) and run a
 // heartbeat interval. A timeout side shoots the proc if task_timeout elapses.
 
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 
@@ -12,7 +11,12 @@ import type { AgentSpec, Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { Task } from "./prd.js";
+import { killTree, releasePipes, spawn } from "./spawn.js";
 import { emit } from "./tui/events.js";
+
+// after a kill, a surviving grandchild can hold the stdout pipe open so 'close'
+// never arrives. Settle anyway once this elapses instead of hanging the run.
+const KILL_GRACE_MS = 5_000;
 
 export function runExecutor(
   execu: AgentSpec,
@@ -58,8 +62,9 @@ export function runExecutor(
       const elapsed = Date.now() - start;
       if (elapsed >= timeout * 1000) {
         timedOut = true;
-        proc.kill("SIGKILL");
         clearInterval(hbTimer);
+        log(progress, t("exec.timeout", { tag, cli: execu.cli, s: Math.round(elapsed / 1000) }));
+        killAndSettle();
         return;
       }
       emit({ taskId: task.id, elapsedMs: elapsed, timeoutMs: timeout * 1000 });
@@ -72,21 +77,33 @@ export function runExecutor(
     // single-settle guard: abort / close / timeout can race — first one wins,
     // the rest are no-ops, and the abort listener is removed to avoid leaks.
     let settled = false;
+    let grace: NodeJS.Timeout | undefined;
     const finish = (v: boolean): void => {
       if (settled) return;
       settled = true;
       clearInterval(hbTimer);
+      clearTimeout(grace);
       if (signal) signal.removeEventListener("abort", onAbort);
       resolve(v);
     };
+    // kill the whole tree, then settle on 'close' — or on the grace timer if a
+    // surviving grandchild keeps the pipes open and 'close' never comes.
+    const killAndSettle = (): void => {
+      killTree(proc);
+      releasePipes(proc, merged, rl); // killed: a survivor must not keep writing
+      grace = setTimeout(() => finish(false), KILL_GRACE_MS);
+      grace.unref?.();
+    };
     const onAbort = (): void => {
       log(progress, t("exec.skipped", { tag, cli: execu.cli }));
-      proc.kill("SIGKILL");
+      killTree(proc);
+      releasePipes(proc, merged, rl);
       finish(false);
     };
     if (signal) {
       if (signal.aborted) {
-        proc.kill("SIGKILL");
+        killTree(proc);
+        releasePipes(proc, merged, rl);
         return finish(false);
       }
       signal.addEventListener("abort", onAbort, { once: true });
@@ -94,10 +111,7 @@ export function runExecutor(
 
     proc.on("close", (code) => {
       const elapsed = Math.round((Date.now() - start) / 1000);
-      if (timedOut) {
-        log(progress, t("exec.timeout", { tag, cli: execu.cli, s: elapsed }));
-        return finish(false);
-      }
+      if (timedOut) return finish(false); // already logged when the timeout fired
       log(progress, `  ${tag}: ${execu.cli} exit=${code} (${elapsed}s)`);
       finish(code === 0);
     });

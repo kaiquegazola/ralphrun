@@ -27,18 +27,20 @@
   "dependencies": {
     "@clack/prompts": "^1.7.0",
     "commander": "^15.0.0",
+    "cross-spawn": "^7.0.6",
     "ink": "^7.1.0",
     "react": "^19.2.0",
     "which": "^7.0.0"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.0",
     "@types/which": "^3.0.4",
+    "@vitest/coverage-v8": "^3.0.0",
     "tsup": "^8.5.1",
     "typescript": "^7.0.2",
-    "vitest": "^3.0.0",
-    "@vitest/coverage-v8": "^3.0.0"
+    "vitest": "^3.0.0"
   },
   "keywords": [
     "ralph",

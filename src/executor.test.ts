@@ -7,9 +7,14 @@ import { PassThrough } from "node:stream";
 vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]) }));
 vi.mock("./log.js", () => ({ log: vi.fn() }));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
-vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
+// releasePipes stays REAL: it operates on the fake child's actual streams
+vi.mock("./spawn.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./spawn.js")>()),
+  spawn: vi.fn(),
+  killTree: vi.fn(),
+}));
 
-import { spawn } from "node:child_process";
+import { killTree, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { emit } from "./tui/events.js";
 import { runExecutor } from "./executor.js";
@@ -17,6 +22,7 @@ import type { AgentSpec, Config } from "./config.js";
 import type { Task } from "./prd.js";
 
 const spawnMock = spawn as unknown as Mock;
+const killTreeMock = killTree as unknown as Mock;
 const emitMock = emit as unknown as Mock;
 
 function makeProc() {
@@ -106,7 +112,7 @@ it("kills the process on timeout and resolves false", async () => {
     spawnMock.mockReturnValue(proc);
     const p = runExecutor(execu, "prompt", cfg({ task_timeout: 1 }), "ws", "prog", task);
     vi.advanceTimersByTime(1000); // interval fires, elapsed >= timeout -> kill
-    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(killTreeMock).toHaveBeenCalledWith(proc);
     proc.emit("close", null);
     expect(await p).toBe(false);
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("TIMEOUT"));
@@ -115,13 +121,55 @@ it("kills the process on timeout and resolves false", async () => {
   }
 });
 
+it("settles after the kill grace even if 'close' never fires (orphan holding the pipes)", async () => {
+  vi.useFakeTimers();
+  try {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ task_timeout: 1 }), "ws", "prog", task);
+    vi.advanceTimersByTime(1000); // timeout -> kill
+    vi.advanceTimersByTime(5000); // grace elapses, no 'close' ever arrives
+    expect(await p).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// releasePipes destroys the child's stdio, so it must NOT run when the child
+// closed on its own — a final line readline had not emitted yet would be lost.
+it("a clean exit keeps the streams intact (no output dropped on the happy path)", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const p = runExecutor(execu, "prompt", cfg(), "ws", "prog", task);
+  // a newline-less tail is only flushed by readline when the stream ENDS, which
+  // can land after 'close' — so the streams must still be alive once we settle
+  proc.stdout.end("no trailing newline");
+  proc.emit("close", 0);
+  expect(await p).toBe(true);
+  expect(proc.stdout.destroyed).toBe(false);
+  expect(proc.stderr.destroyed).toBe(false);
+  await tick();
+  expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("no trailing newline"), false);
+});
+
+it("a killed child gets its pipes released so a survivor cannot keep writing", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const ac = new AbortController();
+  const p = runExecutor(execu, "prompt", cfg(), "ws", "prog", task, [], ac.signal);
+  ac.abort();
+  expect(await p).toBe(false);
+  expect(proc.stdout.destroyed).toBe(true);
+  expect(proc.stderr.destroyed).toBe(true);
+});
+
 it("already-aborted signal kills immediately and resolves false", async () => {
   const proc = makeProc();
   spawnMock.mockReturnValue(proc);
   const ac = new AbortController();
   ac.abort();
   const p = runExecutor(execu, "prompt", cfg(), "ws", "prog", task, [], ac.signal);
-  expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
   expect(await p).toBe(false);
 });
 
@@ -131,7 +179,7 @@ it("abort mid-run kills, resolves false, and a later close is a no-op", async ()
   const ac = new AbortController();
   const p = runExecutor(execu, "prompt", cfg(), "ws", "prog", task, [], ac.signal);
   ac.abort(); // onAbort -> kill + finish(false)
-  expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
   expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("skipped by user"));
   proc.emit("close", 0); // settled guard: no-op, stays false
   expect(await p).toBe(false);

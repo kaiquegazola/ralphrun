@@ -1,6 +1,5 @@
 // advisor.ts — CROSS-mode advisor: guidance before, review after
 
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { buildCmd } from "./adapters.js";
@@ -10,7 +9,12 @@ import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
 import { advisorPrompt, parseReview, reviewPrompt } from "./prompts.js";
 import { captureDiff } from "./git.js";
+import { killTree, spawn } from "./spawn.js";
 import { emit } from "./tui/events.js";
+
+// see executor.ts — a killed child's grandchildren can hold the pipes open, so
+// 'close' may never arrive. Settle on our own after this.
+const KILL_GRACE_MS = 5_000;
 
 export interface AdvisorReviewResult {
   approved: boolean;
@@ -39,19 +43,31 @@ function runAdvisorCli(advis: AgentSpec, cmd: string[], cfg: Config, workspace: 
       const errRl = createInterface({ input: proc.stderr });
       errRl.on("line", (line) => emit({ taskId, line, lineSource: source }));
 
+      let settled = false;
+      let grace: NodeJS.Timeout | undefined;
+      const finish = (v: string | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        clearTimeout(grace);
+        outRl.close();
+        errRl.close();
+        resolve(v);
+      };
+
       const timeout = setTimeout(() => {
-        proc.kill("SIGKILL");
+        killTree(proc);
+        // killed: a survivor must not keep writing into the parsed output
+        outRl.close();
+        errRl.close();
+        proc.stdout?.destroy();
+        proc.stderr?.destroy();
+        grace = setTimeout(() => finish(null), KILL_GRACE_MS);
+        grace.unref?.();
       }, cfg.advisor_timeout * 1000);
 
-      proc.on("close", () => {
-        clearTimeout(timeout);
-        resolve(out.trim() || null);
-      });
-
-      proc.on("error", () => {
-        clearTimeout(timeout);
-        resolve(null);
-      });
+      proc.on("close", () => finish(out.trim() || null));
+      proc.on("error", () => finish(null));
     } catch {
       resolve(null);
     }

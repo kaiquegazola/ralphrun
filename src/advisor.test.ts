@@ -20,9 +20,13 @@ const mockChild = {
   on: vi.fn(),
   kill: vi.fn(),
 };
-vi.mock("node:child_process", () => ({ spawn: vi.fn(() => mockChild) }));
+vi.mock("./spawn.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./spawn.js")>()),
+  spawn: vi.fn(() => mockChild),
+  killTree: vi.fn(),
+}));
 
-import { spawn } from "node:child_process";
+import { killTree, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { captureDiff } from "./git.js";
 import { parseReview } from "./prompts.js";
@@ -32,6 +36,7 @@ import type { AgentSpec, Config } from "./config.js";
 import type { PRD, Task } from "./prd.js";
 
 const spawnMock = spawn as unknown as Mock;
+const killTreeMock = killTree as unknown as Mock;
 const diffMock = captureDiff as unknown as Mock;
 const emitMock = vi.mocked(emit);
 
@@ -162,10 +167,39 @@ describe("advisorReview", () => {
     vi.useFakeTimers();
     const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
     vi.advanceTimersByTime(300_000);
-    expect(mockChild.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(killTreeMock).toHaveBeenCalledWith(mockChild);
     finishSpawn(1);
     await p;
     vi.useRealTimers();
+  });
+
+  // a grandchild that outlives the kill keeps the pipes open, so 'close' can
+  // never arrive — the advisor must not wedge the whole loop waiting for it.
+  it("settles after the kill grace when 'close' never fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+      vi.advanceTimersByTime(300_000); // timeout -> kill
+      vi.advanceTimersByTime(5_000); // grace elapses, no close
+      expect(await p).toBeNull();
+      expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("advisor failed"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a 'close' that arrives after the grace already settled is a no-op", async () => {
+    vi.useFakeTimers();
+    try {
+      const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+      vi.advanceTimersByTime(305_000);
+      expect(await p).toBeNull();
+      mockChild.stdout.end("late advice\n");
+      finishSpawn(0); // must not throw / re-resolve
+      expect(await p).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("passes the task baseline to the diff capture", async () => {
     diffMock.mockReturnValue("some diff");

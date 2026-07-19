@@ -5,14 +5,20 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 vi.mock("../../adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]) }));
-vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
+// releasePipes stays REAL: it operates on the fake child's actual streams
+vi.mock("../../spawn.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../spawn.js")>()),
+  spawn: vi.fn(),
+  killTree: vi.fn(),
+}));
 
-import { spawn } from "node:child_process";
+import { killTree, spawn } from "../../spawn.js";
 import { buildCmd } from "../../adapters.js";
 import { runPlannerTurn, type PlannerTurnArgs } from "./prdChat.js";
 import type { PRD } from "../../prd.js";
 
 const spawnMock = spawn as unknown as Mock;
+const killTreeMock = killTree as unknown as Mock;
 const buildCmdMock = buildCmd as unknown as Mock;
 
 function makeProc() {
@@ -71,10 +77,41 @@ it("parses a valid reply: summary before fence + fenced json, streams every line
   expect(buildCmdMock.mock.calls[0][4]).toBe(false);
 });
 
-it("passes the abort signal through to spawn so teardown kills the child", async () => {
+// NOT spawn's own `signal` option: that only SIGTERMs the direct child, which
+// leaves the agent's descendants alive.
+it("aborting mid-turn kills the whole tree instead of handing the signal to spawn", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
   const ac = new AbortController();
-  await run(["s", "", "```json", VALID_JSON, "```"], { signal: ac.signal });
-  expect(spawnMock).toHaveBeenCalledWith("mybin", ["a1"], expect.objectContaining({ signal: ac.signal }));
+  const p = runPlannerTurn({ cli: "claude", model: "m", cwd: "/w", currentPrd: null, history: [], instruction: "i", attachments: [], onChunk: vi.fn(), signal: ac.signal });
+  expect(spawnMock.mock.calls[0][2]).not.toHaveProperty("signal");
+  proc.stdout.write(["s", "```json", VALID_JSON, "```"].join("\n") + "\n");
+  await tick();
+  ac.abort();
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
+  // settles on the abort itself — NOT on a later 'close' that may never come,
+  // and the streamed reply is discarded so a torn-down wizard gets nothing.
+  expect(await p).toEqual({ summary: "", prd: null, errors: [] });
+  proc.emit("close", 0); // late close: no-op
+  expect(await p).toEqual({ summary: "", prd: null, errors: [] });
+});
+
+it("an already-aborted signal kills before any output and still settles", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const p = runPlannerTurn({
+    cli: "claude",
+    model: "m",
+    cwd: "/w",
+    currentPrd: null,
+    history: [],
+    instruction: "i",
+    attachments: [],
+    onChunk: vi.fn(),
+    signal: AbortSignal.abort(),
+  });
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
+  expect(await p).toEqual({ summary: "", prd: null, errors: [] });
 });
 
 it("injects current PRD json, chat history, and attachment contents into the prompt", async () => {
@@ -205,10 +242,39 @@ it("kills the process on timeout", async () => {
       onChunk,
     });
     vi.advanceTimersByTime(600_000);
-    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(killTreeMock).toHaveBeenCalledWith(proc);
     proc.emit("close", null);
     const res = await p;
     expect(res.prd).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// a grandchild outliving the kill holds the pipes open -> no 'close' ever
+it("settles on whatever it parsed when 'close' never follows the timeout kill", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }); // setImmediate stays real for readline
+  try {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runPlannerTurn({
+      cli: "claude",
+      model: "m",
+      cwd: "/w",
+      currentPrd: null,
+      history: [],
+      instruction: "x",
+      attachments: [],
+      onChunk: vi.fn(),
+    });
+    proc.stdout.write("half a plan\n");
+    await tick(); // let readline emit the line before the clock jumps
+    await vi.advanceTimersByTimeAsync(600_000); // timeout -> kill
+    await vi.advanceTimersByTimeAsync(5_000); // grace elapses, no close
+    // settles instead of hanging: the partial output is parsed, PRD is rejected
+    const res = await p;
+    expect(res.prd).toBeNull();
+    expect(res.errors.length).toBeGreaterThan(0);
   } finally {
     vi.useRealTimers();
   }

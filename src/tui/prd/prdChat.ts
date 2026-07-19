@@ -3,11 +3,11 @@
 // and validate it. Reuses the spawn+readline merge pattern from executor.ts.
 // Parses fail-safe: junk output -> { prd: null, errors } so nothing is written.
 
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 
 import { buildCmd } from "../../adapters.js";
+import { killTree, releasePipes, spawn } from "../../spawn.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
 import { normalizePrd } from "../../prdload.js";
@@ -15,6 +15,8 @@ import type { ChatMessage, PlannerResult } from "./prdController.js";
 import { validatePrd } from "./validatePrd.js";
 
 const TIMEOUT_MS = 600_000;
+// see executor.ts — how long to wait for 'close' after a kill before settling
+const KILL_GRACE_MS = 5_000;
 // errors render in the studio chat pane → localized (function: locale is set after import)
 const NO_JSON = (): string => t("studio.err.noJson");
 
@@ -122,10 +124,12 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
     // planner is chat-only: NO auto-approve flags, so a studio turn can never
     // grant the agent permission to write to disk.
     const cmd = buildCmd(args.cli, buildPrompt(args), args.model, args.cwd, false);
+    // NOT spawn's own `signal` option: node aborts with a SIGTERM to the direct
+    // child, which leaves the agent's descendants running. killTree takes the
+    // whole tree on every platform.
     const proc = spawn(cmd[0], cmd.slice(1), {
       cwd: args.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      signal: args.signal,
     });
 
     const merged = new PassThrough();
@@ -139,16 +143,41 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
       args.onChunk(line);
     });
 
-    const timer = setTimeout(() => proc.kill("SIGKILL"), TIMEOUT_MS);
-
-    // single-settle guard: close / error / timeout-then-close can race.
+    // single-settle guard: close / error / timeout / abort can race.
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
     const finish = (result: PlannerResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(grace);
+      args.signal?.removeEventListener("abort", onAbort);
       resolve(result);
     };
+
+    // a surviving grandchild can hold the pipes open, so 'close' may never
+    // arrive after a kill — settle on our own once the grace elapses.
+    function killAndSettle(): void {
+      killTree(proc);
+      releasePipes(proc, merged, rl); // killed: a survivor must not keep writing
+      grace = setTimeout(() => finish(parseReply(full)), KILL_GRACE_MS);
+      grace.unref?.();
+    }
+    // An abort is a CANCELLATION, not a slow turn: settle immediately and
+    // discard whatever was streamed. Waiting for 'close' here would let a late
+    // reply land on a wizard that has already torn down.
+    function onAbort(): void {
+      killTree(proc);
+      releasePipes(proc, merged, rl);
+      finish({ summary: "", prd: null, errors: [] });
+    }
+
+    timer = setTimeout(killAndSettle, TIMEOUT_MS);
+    if (args.signal) {
+      if (args.signal.aborted) onAbort();
+      else args.signal.addEventListener("abort", onAbort, { once: true });
+    }
 
     proc.on("close", () => finish(parseReply(full)));
     proc.on("error", () => finish({ summary: "", prd: null, errors: [t("studio.err.spawnFailed")] }));

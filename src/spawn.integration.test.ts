@@ -69,7 +69,9 @@ describe.skipIf(!posix)("killTree on real processes", () => {
   // group outlives its leader, so killTree must still reap it.
   it("reaps descendants that outlived the direct child", async () => {
     const proc = spawn("sh", ["-c", "sleep 60 & exit 0"], { stdio: ["ignore", "pipe", "pipe"] });
-    await wait(400);
+    // poll, don't sleep a fixed amount: under parallel test load the shell can
+    // take longer than any constant you pick, which makes this flaky
+    for (let i = 0; i < 100 && proc.exitCode === null; i++) await wait(50);
     expect(proc.exitCode).not.toBeNull(); // the direct child is already gone...
     expect(groupAlive(proc.pid)).toBe(true); // ...but its child is not
 

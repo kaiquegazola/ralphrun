@@ -91,7 +91,7 @@ export async function runTask(
 
   for (let rnd = 1; rnd <= cfg.max_review_rounds; rnd++) {
     emit({ taskId: task.id, subphase: "verifying", round: { n: rnd, max: cfg.max_review_rounds } });
-    const { passed: testOk, output: testOut } = runVerify(task, workspace, progress);
+    const { passed: testOk, output: testOut } = await runVerify(task, workspace, progress);
     lastVerificationPassed = testOk;
     emit({ taskId: task.id, subphase: "reviewing" });
     const { approved, changes, diff = "" } =

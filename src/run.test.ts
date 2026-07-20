@@ -64,7 +64,7 @@ beforeEach(() => {
   delete task.planKey;
   task.retries = 0;
   mExec.mockResolvedValue(true);
-  mVerify.mockReturnValue({ passed: true, output: "out" });
+  mVerify.mockResolvedValue({ passed: true, output: "out" });
   mAdvice.mockResolvedValue("advice");
   mReview.mockResolvedValue({ approved: true, changes: "", diff: "" });
   mFeedback.mockReturnValue("FEEDBACK");
@@ -80,7 +80,7 @@ describe("runTask NATIVE", () => {
   });
 
   it("fails when verify fails even if executor ok", async () => {
-    mVerify.mockReturnValue({ passed: false, output: "x" });
+    mVerify.mockResolvedValue({ passed: false, output: "x" });
     const result = await runTask(task, prd, cfg(), "/ws", "/prog");
     expect(result.ok).toBe(false);
   });
@@ -118,7 +118,7 @@ describe("runTask CROSS", () => {
 
   it("no advisor never injects a leftover plan into a fix round", async () => {
     const t = { ...task, plan: "stale-plan", planKey: "stale-key" };
-    mVerify.mockReturnValue({ passed: false, output: "failed" });
+    mVerify.mockResolvedValue({ passed: false, output: "failed" });
     await runTask(t, prd, cfg({ advisor: null, max_review_rounds: 1 }), "/ws", "/prog");
     expect(mExec).toHaveBeenCalledTimes(2);
     expect(mInject).not.toHaveBeenCalled();
@@ -132,7 +132,7 @@ describe("runTask CROSS", () => {
   });
 
   it("reviewer requests changes while tests pass → automatically runs one focused fix", async () => {
-    mVerify.mockReturnValue({ passed: true, output: "" }); // tests always pass
+    mVerify.mockResolvedValue({ passed: true, output: "" }); // tests always pass
     mReview
       .mockResolvedValueOnce({ approved: false, changes: "do X", diff: "D" })
       .mockResolvedValueOnce({ approved: true, changes: "", diff: "D2" });
@@ -142,7 +142,9 @@ describe("runTask CROSS", () => {
     expect(mLog).toHaveBeenCalledWith("/prog", expect.stringContaining("do X"));
     expect(mFeedback).toHaveBeenCalledWith(true, true, "", false, "do X");
     // The review feedback, not a user decision, drove the second executor run.
-    expect(mVerify.mock.results.every((r) => (r.value as { passed: boolean }).passed)).toBe(true);
+    // runVerify is async now, so each recorded result is a promise
+    const verdicts = await Promise.all(mVerify.mock.results.map((r) => r.value as Promise<{ passed: boolean }>));
+    expect(verdicts.every((v) => v.passed)).toBe(true);
     expect(mReview).toHaveBeenCalledTimes(2);
     expect(mExec).toHaveBeenCalledTimes(2);
   });
@@ -179,7 +181,7 @@ describe("runTask CROSS", () => {
   });
 
   it("stops the fix loop early when failing verify/review/diff repeats", async () => {
-    mVerify.mockReturnValue({ passed: false, output: "same failure" });
+    mVerify.mockResolvedValue({ passed: false, output: "same failure" });
     mReview.mockResolvedValue({ approved: false, changes: "same issue", diff: "same diff" });
     const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 8, max_stalled_review_rounds: 1 });
     const result = await runTask(task, prd, c, "/ws", "/prog");
@@ -192,7 +194,7 @@ describe("runTask CROSS", () => {
   });
 
   it("uses default stalled-rounds and compacts oversized review feedback", async () => {
-    mVerify.mockReturnValue({ passed: true, output: "" });
+    mVerify.mockResolvedValue({ passed: true, output: "" });
     mReview.mockResolvedValue({ approved: false, changes: "x".repeat(1_200), diff: "d" });
     const c = cfg({ advisor: { cli: "grok", model: "g" } });
     delete (c as Partial<Config>).max_stalled_review_rounds;
@@ -221,10 +223,10 @@ describe("runTask CROSS", () => {
     mReview.mockResolvedValue({ approved: true, changes: "", diff: "" });
     // 3 in-loop verifies fail (never PASS), final verify passes
     mVerify
-      .mockReturnValueOnce({ passed: false, output: "f" })
-      .mockReturnValueOnce({ passed: false, output: "f" })
-      .mockReturnValueOnce({ passed: false, output: "f" })
-      .mockReturnValue({ passed: true, output: "" });
+      .mockResolvedValueOnce({ passed: false, output: "f" })
+      .mockResolvedValueOnce({ passed: false, output: "f" })
+      .mockResolvedValueOnce({ passed: false, output: "f" })
+      .mockResolvedValue({ passed: true, output: "" });
     const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
     expect(result.ok).toBe(true);
   });
@@ -252,7 +254,7 @@ describe("runTask RunEvents (spy the bus)", () => {
   });
 
   it("CROSS emits fixing before the fix executor re-runs", async () => {
-    mVerify.mockReturnValue({ passed: false, output: "fail" });
+    mVerify.mockResolvedValue({ passed: false, output: "fail" });
     mReview.mockResolvedValue({ approved: false, changes: "do X", diff: "D" }); // never approves -> loops + fixes
     await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
     expect(mEmit).toHaveBeenCalledWith({ taskId: "T1", subphase: "fixing" });

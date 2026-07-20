@@ -14,6 +14,8 @@
 
 import { execSync } from "node:child_process";
 
+import { parseClaudeStream, type StreamEvent } from "./stream.js";
+
 export type AgentRole = "planner" | "executor" | "advisor";
 
 export interface BuildCmdArgs {
@@ -42,6 +44,14 @@ export interface AgentDef {
    * mid-task, in one call. Present = the cli supports NATIVE mode. Absent = CROSS.
    */
   nativeAdvisor?: (advisorModel: string) => string[];
+  /**
+   * Event streaming. Present = this cli can report progress WHILE it works, so
+   * the live pane shows real activity; absent = plain buffered text, which for
+   * `-p` style CLIs means total silence until the turn ends. Every cli has its
+   * own event schema, so only add this with a parser written against a real
+   * captured stream (see stream.ts).
+   */
+  stream?: { args: string[]; parse: (line: string) => StreamEvent | null };
   /**
    * Headless auth probe. Absent = no reliable check -> "unknown" (never blocks).
    * Throwing (non-zero exit) is read as "not logged in" by the caller.
@@ -102,6 +112,8 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       if (autoApprove) cmd.push("--dangerously-skip-permissions");
       return cmd;
     },
+    // verified against a real captured stream; see stream.ts
+    stream: { args: ["--output-format", "stream-json", "--verbose"], parse: parseClaudeStream },
     // the only cli with a server-side advisor today (needs Claude Code >= 2.1.170)
     nativeAdvisor: (advisorModel) => ["--advisor", advisorModel],
     auth: {

@@ -105,11 +105,26 @@ tail -f ralph.out
   "max_review_rounds": 3,
   "max_stalled_review_rounds": 2,
   "heartbeat_secs": 30,
+  "stream_output": true,
   "commit_per_task": true,
   "stop_on_blocked": false,
   "extra_executor_args": []
 }
 ```
+
+- `stream_output` turns on the executor CLI's own event stream, so the live pane
+  shows tool calls and answers **as they happen**. Without it a `-p` style CLI
+  buffers everything and delivers it in one chunk when the turn ends — measured
+  at 25s of total silence for a 25s task. Only applied to CLIs with a verified
+  event parser (today: `claude`); the rest ignore it. The advisor never streams,
+  because its stdout *is* its verdict.
+
+There is deliberately **no** idle timeout. A silence-based kill sounds obvious
+but measurement says otherwise: a buffered CLI is silent for the entire task, and
+even a streaming one goes quiet while a tool runs — a 40s foreground command
+produced a 25.9s gap with no events at all, and that gap grows with the command.
+Any value small enough to catch a wedged run is small enough to kill a healthy
+test suite, so only `task_timeout` bounds a task.
 
 Inspect or edit interactively:
 

@@ -57,6 +57,9 @@ function cfg(over: Partial<Config> = {}): Config {
     task_timeout: 1800,
     heartbeat_secs: 30,
     extra_executor_args: [],
+    // these cases cover the PLAIN (buffered) path; the streaming path has its
+    // own describe below, because it changes both the argv and the line handling
+    stream_output: false,
     ...over,
   } as unknown as Config;
 }
@@ -303,4 +306,221 @@ it("emits a heartbeat once the idle window elapses", async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+describe("streaming mode", () => {
+  const ev = (o: unknown): string => JSON.stringify(o) + "\n";
+  const text = (s: string): string => ev({ type: "assistant", message: { content: [{ type: "text", text: s }] } });
+  const noise = ev({ type: "system", subtype: "thinking_tokens", estimated_tokens: 114 });
+
+  it("turns the cli's event stream on and renders events instead of raw json", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    expect(spawnMock.mock.calls[0][1]).toEqual(["a1", "--output-format", "stream-json", "--verbose"]);
+
+    proc.stdout.write(noise); // liveness only — must not reach the pane
+    proc.stdout.write(ev({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } }));
+    proc.stdout.write(text("all green"));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+
+    const lines = emitMock.mock.calls.map((c) => c[0].line).filter((l) => l !== undefined);
+    expect(lines).toContain("→ Bash(npm test)");
+    expect(lines).toContain("all green");
+    expect(lines.some((l: string) => l.includes("thinking_tokens"))).toBe(false);
+  });
+
+  it("reads the blocked marker out of the model's prose", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(text("RALPHRUN_BLOCKED: the reset would drop a shared database"));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(false);
+  });
+
+  // "last non-empty line of the run" means the LAST one, whatever kind it was:
+  // tracking only prose would leave a marker line standing after the agent
+  // shrugged it off and carried on working
+  it("does not fail a run whose marker prose was followed by more work", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(text("RALPHRUN_BLOCKED: I thought I was stuck"));
+    proc.stdout.write(
+      ev({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } }),
+    );
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "actually it worked" }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+  });
+
+  // the agent said something marker-shaped, then kept working INVISIBLY (a
+  // thinking-only turn, a tool result). Its last word is no longer the marker.
+  it("does not fail a run whose marker prose was followed by invisible work", async () => {
+    for (const later of [
+      ev({ type: "assistant", message: { content: [{ type: "thinking", thinking: "hmm, actually…" }] } }),
+      ev({ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } }),
+    ]) {
+      emitMock.mockClear();
+      const proc = makeProc();
+      spawnMock.mockReturnValue(proc);
+      const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+      proc.stdout.write(text("RALPHRUN_BLOCKED: temporary concern"));
+      proc.stdout.write(later);
+      await tick();
+      closeProc(proc, 0);
+      expect(await p).toBe(true);
+    }
+  });
+
+  // the exact repro from review, with the CAPTURED tool_progress shape: a long
+  // command heartbeating between the marker prose and the final result
+  it("does not fail a run whose marker prose was followed by a still-running tool", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(text("RALPHRUN_BLOCKED: temporary concern"));
+    proc.stdout.write(ev({ type: "tool_progress", tool_name: "Bash", elapsed_time_seconds: 30, heartbeat: true }));
+    proc.stdout.write(ev({ type: "system", subtype: "task_notification", task_id: "b80", status: "completed" }));
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "finished after all" }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    // and the long command was visible while it ran, not a blind timer
+    expect(emitMock.mock.calls.map((c) => c[0].line)).toContain("⋯ Bash still running 30s");
+  });
+
+  // ...but harness noise is NOT the agent working, and can legitimately trail
+  // the final answer — treating it as work would silence a real block
+  it("still fails when only infrastructure noise follows the marker", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(text("RALPHRUN_BLOCKED: no safe path"));
+    proc.stdout.write(ev({ type: "system", subtype: "thinking_tokens", estimated_tokens: 9 }));
+    proc.stdout.write(ev({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning" } }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(false);
+  });
+
+  // documented precedence: the cli's own final answer wins over earlier prose
+  it("lets the final result event override earlier prose, in both directions", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(text("RALPHRUN_BLOCKED: spoke too soon"));
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "actually finished" }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+
+    const proc2 = makeProc();
+    spawnMock.mockReturnValue(proc2);
+    const p2 = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc2.stdout.write(text("carrying on"));
+    proc2.stdout.write(ev({ type: "result", subtype: "success", result: "RALPHRUN_BLOCKED: gave up" }));
+    await tick();
+    closeProc(proc2, 0);
+    expect(await p2).toBe(false);
+  });
+
+  it("keeps the run alive on an oversized line instead of parsing megabytes", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write("x".repeat(300_000) + "\n");
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    const shown = emitMock.mock.calls.map((c) => c[0].line).filter((l) => typeof l === "string");
+    expect(shown.length).toBe(1);
+    expect(shown[0].length).toBeLessThan(600); // truncated, not echoed whole
+  });
+
+  // if the cli ever reports its last word ONLY in the result event, a genuine
+  // block would otherwise sail through as a success
+  it("hears a blocked marker that arrives only in the final result event", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "RALPHRUN_BLOCKED: no safe path" }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(false);
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("no safe path"));
+  });
+
+  it("shows a failed result, which is the only place its reason lives", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(ev({ type: "result", subtype: "error_max_turns", is_error: true, result: "hit the turn limit" }));
+    await tick();
+    closeProc(proc, 1);
+    expect(await p).toBe(false);
+    const lines = emitMock.mock.calls.map((c) => c[0].line);
+    expect(lines).toContain("hit the turn limit");
+  });
+
+  it("skips blank stream lines without touching the pane", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write("\n   \n");
+    proc.stdout.write(text("only line"));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    expect(emitMock.mock.calls.filter((c) => c[0].line !== undefined).map((c) => c[0].line)).toEqual(["only line"]);
+  });
+
+  // stream_output defaults to true, so a cli with no parser must be untouched
+  it("leaves a cli without a stream parser on the plain path", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor({ cli: "opencode", model: "m" }, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    expect(spawnMock.mock.calls[0][1]).toEqual(["a1"]); // no stream flags added
+    proc.stdout.write("plain text line\n");
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    expect(emitMock.mock.calls.map((c) => c[0].line)).toContain("plain text line");
+  });
+
+  it("puts the user's extra args AFTER the stream flags so they can still win", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true, extra_executor_args: ["--output-format", "text"] }), "ws", "prog", task);
+    expect(spawnMock.mock.calls[0][1]).toEqual([
+      "a1", "--output-format", "stream-json", "--verbose", "--output-format", "text",
+    ]);
+    closeProc(proc, 0);
+    await p;
+  });
+
+  // a tool call is not the agent speaking — grepping for the marker in one would
+  // let a task fail itself just by reading the prompt file back
+  it("does NOT read the marker out of a tool call's arguments", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task);
+    proc.stdout.write(
+      ev({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Bash", input: { command: "RALPHRUN_BLOCKED: grep me" } }] },
+      }),
+    );
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+  });
+
+
+
 });

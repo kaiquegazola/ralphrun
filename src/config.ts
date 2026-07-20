@@ -21,6 +21,8 @@ export interface Config {
   max_review_rounds: number;
   max_stalled_review_rounds: number;
   heartbeat_secs: number;
+  /** false = do not turn on the cli event stream (plain buffered output) */
+  stream_output?: boolean;
   commit_per_task: boolean;
   commit_message_template: string;
   stop_on_blocked: boolean;
@@ -37,6 +39,7 @@ export const DEFAULTS: Config = {
   max_review_rounds: 3,
   max_stalled_review_rounds: 2,
   heartbeat_secs: 30,
+  stream_output: true,
   commit_per_task: true,
   commit_message_template: "{id}: {title}",
   stop_on_blocked: false,

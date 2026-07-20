@@ -3,11 +3,16 @@
 // and 'close' must fire (a surviving grandchild holding the inherited pipes is
 // exactly what hung a run at 1800s/1800s forever).
 //
-// Liveness is probed with signal 0 against the child's process GROUP: it stays
-// alive as long as ANY member does, which is precisely the thing that used to
-// leak. POSIX only — the Windows path (taskkill /T /F) is pinned by the unit
-// tests in spawn.test.ts.
+// The first suite is POSIX only: it probes the child's process GROUP with
+// signal 0, which stays alive as long as ANY member does — precisely the thing
+// that used to leak, and a concept Windows has no equivalent for. The second
+// suite runs EVERYWHERE (so `taskkill /T /F` finally has real-process coverage
+// on a Windows runner, not just mocked assertions) by having the grandchild
+// report its own pid through a file.
 import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { killAllChildren, killTree, spawn } from "./spawn.js";
 
@@ -105,4 +110,47 @@ describe.skipIf(!posix)("killTree on real processes", () => {
     expect(groupAlive(a.pid)).toBe(false);
     expect(groupAlive(b.pid)).toBe(false);
   }, 15_000);
+});
+
+// The POSIX suite above proves the tree kill through process groups, which
+// Windows does not have — so the taskkill path used to have no real-process
+// coverage at all, only mocked assertions. This one is platform-agnostic: the
+// grandchild reports its own pid through a file, so the test can ask the OS
+// directly whether it survived. It is the same shape as a coding agent
+// shelling out to a tool that outlives its parent.
+describe("killTree kills a real grandchild on every platform", () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0); // existence probe, kills nothing
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("takes the grandchild down with the shell that started it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ralphrun-tree-"));
+    const pidFile = join(dir, "gc.pid");
+    // grandchild: record my pid, then stay alive well past the test
+    const script = `require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);`;
+    const node = process.execPath;
+
+    const proc =
+      process.platform === "win32"
+        ? spawn("cmd", ["/c", node, "-e", script, pidFile], { stdio: ["ignore", "pipe", "pipe"] })
+        : spawn("sh", ["-c", `"${node}" -e '${script}' "${pidFile}"`], { stdio: ["ignore", "pipe", "pipe"] });
+
+    try {
+      for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 100));
+      const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+      expect(Number.isInteger(gcPid)).toBe(true);
+      expect(alive(gcPid)).toBe(true); // the grandchild is really running
+
+      killTree(proc);
+      for (let i = 0; i < 50 && alive(gcPid); i++) await new Promise((r) => setTimeout(r, 100));
+      expect(alive(gcPid)).toBe(false); // ...and the kill reached it, not just its parent
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

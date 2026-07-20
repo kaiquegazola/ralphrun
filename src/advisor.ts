@@ -2,14 +2,14 @@
 
 import { createInterface } from "node:readline";
 
-import { buildCmd } from "./adapters.js";
+import { buildCmd, promptViaStdin } from "./adapters.js";
 import type { AgentSpec, Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
 import { advisorPrompt, parseReview, reviewPrompt } from "./prompts.js";
 import { captureDiff } from "./git.js";
-import { killTree, spawn } from "./spawn.js";
+import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
 
 // see executor.ts — a killed child's grandchildren can hold the pipes open, so
@@ -22,13 +22,23 @@ export interface AdvisorReviewResult {
   diff: string;
 }
 
-function runAdvisorCli(advis: AgentSpec, cmd: string[], cfg: Config, workspace: string, taskId: string, source: "advisor" | "review"): Promise<string | null> {
+function runAdvisorCli(
+  advis: AgentSpec,
+  cmd: string[],
+  prompt: string,
+  cfg: Config,
+  workspace: string,
+  taskId: string,
+  source: "advisor" | "review",
+): Promise<string | null> {
   return new Promise((resolve) => {
     try {
+      const viaStdin = promptViaStdin(advis.cli);
       const proc = spawn(cmd[0], cmd.slice(1), {
         cwd: workspace,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
       });
+      if (viaStdin) writePrompt(proc, prompt);
 
       // The RESULT is parsed from stdout only (the model's answer / review
       // verdict); stderr is streamed to the TUI for visibility but must NOT
@@ -83,8 +93,9 @@ export async function getAdvice(
   progress: string,
   standards: string,
 ): Promise<string | null> {
-  const cmd = buildCmd(advis.cli, advisorPrompt(task, prd, standards), advis.model, workspace, false);
-  const advice = await runAdvisorCli(advis, cmd, cfg, workspace, task.id, "advisor");
+  const prompt = advisorPrompt(task, prd, standards);
+  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false);
+  const advice = await runAdvisorCli(advis, cmd, prompt, cfg, workspace, task.id, "advisor");
   if (advice === null) {
     log(progress, t("advisor.failed", { id: task.id }));
     return null;
@@ -106,8 +117,9 @@ export async function advisorReview(
 ): Promise<AdvisorReviewResult> {
   const diff = captureDiff(workspace, reviewBase);
   if (!diff.trim()) return { approved: true, changes: "", diff };
-  const cmd = buildCmd(advis.cli, reviewPrompt(task, prd, standards, diff), advis.model, workspace, false);
-  const out = await runAdvisorCli(advis, cmd, cfg, workspace, task.id, "review");
+  const prompt = reviewPrompt(task, prd, standards, diff);
+  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false);
+  const out = await runAdvisorCli(advis, cmd, prompt, cfg, workspace, task.id, "review");
   if (out === null) {
     log(progress, t("advisor.reviewFailed", { id: task.id }));
     return { approved: true, changes: "", diff };

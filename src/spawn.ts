@@ -53,6 +53,20 @@ export function spawn(cmd: string, args: string[], opts: SpawnOptions): PipedChi
   return proc;
 }
 
+/**
+ * Hand the prompt to a cli that reads it from stdin, then close the pipe.
+ *
+ * The error handler is not optional: a cli that exits before reading (bad
+ * flags, missing auth) leaves us writing into a closed pipe, and an unhandled
+ * EPIPE on a child stream takes the whole process down. The real failure is
+ * reported through the child's exit code and output, not through this write.
+ */
+export function writePrompt(proc: ChildProcess, prompt: string): void {
+  if (!proc.stdin) return;
+  proc.stdin.on("error", () => {});
+  proc.stdin.end(prompt);
+}
+
 /** SIGKILL the child AND its descendants. Safe to call more than once. */
 export function killTree(proc: ChildProcess): void {
   const pid = proc.pid;

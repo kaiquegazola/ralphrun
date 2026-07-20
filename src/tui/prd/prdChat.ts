@@ -6,8 +6,8 @@
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 
-import { buildCmd } from "../../adapters.js";
-import { killTree, releasePipes, spawn } from "../../spawn.js";
+import { buildCmd, promptViaStdin } from "../../adapters.js";
+import { killTree, releasePipes, spawn, writePrompt } from "../../spawn.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
 import { normalizePrd } from "../../prdload.js";
@@ -123,14 +123,17 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
   return new Promise((resolve) => {
     // planner is chat-only: NO auto-approve flags, so a studio turn can never
     // grant the agent permission to write to disk.
-    const cmd = buildCmd(args.cli, buildPrompt(args), args.model, args.cwd, false);
+    const prompt = buildPrompt(args);
+    const cmd = buildCmd(args.cli, prompt, args.model, args.cwd, false);
     // NOT spawn's own `signal` option: node aborts with a SIGTERM to the direct
     // child, which leaves the agent's descendants running. killTree takes the
     // whole tree on every platform.
+    const viaStdin = promptViaStdin(args.cli);
     const proc = spawn(cmd[0], cmd.slice(1), {
       cwd: args.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
     });
+    if (viaStdin) writePrompt(proc, prompt);
 
     const merged = new PassThrough();
     proc.stdout.pipe(merged);

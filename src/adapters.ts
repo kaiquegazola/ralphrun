@@ -13,5 +13,14 @@ export function buildCmd(
 ): string[] {
   const def = agentDef(cli);
   if (!def) throw new Error(`unknown cli: ${cli}`);
-  return def.buildCmd({ bin: binOf(cli), prompt, model, cwd, autoApprove });
+  // A stdin cli gets an EMPTY prompt in the argv — the caller pipes the real
+  // one in. Keeping it out of the command line is what lets a 25k review prompt
+  // survive Windows, where a .cmd shim goes through cmd.exe's ~8191 char limit.
+  const argvPrompt = def.promptVia === "stdin" ? "" : prompt;
+  return def.buildCmd({ bin: binOf(cli), prompt: argvPrompt, model, cwd, autoApprove });
+}
+
+/** does this cli expect its prompt piped in rather than passed as an argument? */
+export function promptViaStdin(cli: string): boolean {
+  return agentDef(cli)?.promptVia === "stdin";
 }

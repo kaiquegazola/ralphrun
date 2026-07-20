@@ -45,6 +45,19 @@ export interface AgentDef {
    */
   nativeAdvisor?: (advisorModel: string) => string[];
   /**
+   * "stdin" = this cli reads its prompt from stdin when no prompt argument is
+   * given, so buildCmd leaves it out of the argv and the caller pipes it in.
+   *
+   * That is not a style choice, it is the only way big prompts survive Windows:
+   * an npm-installed cli is a `foo.cmd` shim, which cross-spawn must launch
+   * through cmd.exe, and cmd.exe truncates a command line at ~8191 chars. Our
+   * prompts reach ~17k (executor with standards) and ~25k (review, which embeds
+   * a 12k diff). Absent = the prompt goes in the argv and is capped by that.
+   *
+   * Only set this for a cli where it has actually been observed working.
+   */
+  promptVia?: "stdin";
+  /**
    * Event streaming. Present = this cli can report progress WHILE it works, so
    * the live pane shows real activity; absent = plain buffered text, which for
    * `-p` style CLIs means total silence until the turn ends. Every cli has its
@@ -106,8 +119,10 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       { value: "haiku", label: "haiku" },
     ],
     recommended: { planner: "opus", executor: "sonnet", advisor: "fable" },
+    // verified: `echo "<prompt>" | claude -p` answers the piped prompt
+    promptVia: "stdin",
     buildCmd: ({ bin, prompt, model, autoApprove }) => {
-      const cmd = [bin, "-p", prompt];
+      const cmd = [bin, "-p", ...(prompt ? [prompt] : [])];
       if (model) cmd.push("--model", model);
       if (autoApprove) cmd.push("--dangerously-skip-permissions");
       return cmd;
@@ -192,11 +207,14 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       { value: "gpt-4.5-preview", label: "GPT-4.5 Preview" },
     ],
     recommended: { planner: "gpt-5.6-sol", executor: "gpt-5.6-sol", advisor: "gpt-5.6-sol" },
+    // verified: `codex exec` with no prompt argument prints
+    // "Reading prompt from stdin..." and consumes it
+    promptVia: "stdin",
     buildCmd: ({ bin, prompt, model, autoApprove }) => {
       const cmd = [bin, "exec"];
       if (model) cmd.push("-m", model);
       if (autoApprove) cmd.push("--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust");
-      cmd.push(prompt); // codex takes the prompt LAST, after the flags
+      if (prompt) cmd.push(prompt); // codex takes the prompt LAST, after the flags
       return cmd;
     },
   },

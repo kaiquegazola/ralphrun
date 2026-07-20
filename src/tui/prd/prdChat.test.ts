@@ -4,7 +4,7 @@ import type { Mock } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-vi.mock("../../adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]) }));
+vi.mock("../../adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]), promptViaStdin: vi.fn(() => false) }));
 // releasePipes stays REAL: it operates on the fake child's actual streams
 vi.mock("../../spawn.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../spawn.js")>()),
@@ -12,6 +12,7 @@ vi.mock("../../spawn.js", async (importOriginal) => ({
   killTree: vi.fn(),
 }));
 
+import { promptViaStdin } from "../../adapters.js";
 import { killTree, spawn } from "../../spawn.js";
 import { buildCmd } from "../../adapters.js";
 import { runPlannerTurn, type PlannerTurnArgs } from "./prdChat.js";
@@ -112,6 +113,30 @@ it("an already-aborted signal kills before any output and still settles", async 
   });
   expect(killTreeMock).toHaveBeenCalledWith(proc);
   expect(await p).toEqual({ summary: "", prd: null, errors: [] });
+});
+
+it("pipes the prompt into stdin when the planner cli reads it there", async () => {
+  vi.mocked(promptViaStdin).mockReturnValueOnce(true);
+  const proc = makeProc() as ReturnType<typeof makeProc> & { stdin: PassThrough };
+  proc.stdin = new PassThrough();
+  const written: string[] = [];
+  proc.stdin.on("data", (d: Buffer) => written.push(d.toString()));
+  spawnMock.mockReturnValue(proc);
+  const p = runPlannerTurn({
+    cli: "claude",
+    model: "m",
+    cwd: "/w",
+    currentPrd: null,
+    history: [],
+    instruction: "do it",
+    attachments: [],
+    onChunk: vi.fn(),
+  });
+  expect(spawnMock.mock.calls[0][2].stdio[0]).toBe("pipe");
+  await tick();
+  expect(written.join("")).toContain("You are the planner");
+  proc.emit("close", 0);
+  await p;
 });
 
 it("injects current PRD json, chat history, and attachment contents into the prompt", async () => {

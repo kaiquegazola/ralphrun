@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Mock } from "vitest";
 
-vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["bin", "-p", "x"]) }));
+vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["bin", "-p", "x"]), promptViaStdin: vi.fn(() => false) }));
 vi.mock("./log.js", () => ({ log: vi.fn() }));
 vi.mock("./git.js", () => ({ captureDiff: vi.fn() }));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
@@ -26,6 +26,7 @@ vi.mock("./spawn.js", async (importOriginal) => ({
   killTree: vi.fn(),
 }));
 
+import { promptViaStdin } from "./adapters.js";
 import { killTree, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { captureDiff } from "./git.js";
@@ -161,6 +162,25 @@ describe("advisorReview", () => {
     finishSpawn(0);
     await p;
     expect(emitMock.mock.calls.at(-1)?.[0].line).toContain("review output");
+  });
+
+  // claude/codex read the prompt from stdin so it stays out of the argv, which
+  // is what keeps a 25k review prompt under cmd.exe's ~8191 char limit
+  it("pipes the review prompt into stdin when the cli reads it there", async () => {
+    vi.mocked(promptViaStdin).mockReturnValueOnce(true);
+    const stdin = new PassThrough();
+    const written: string[] = [];
+    stdin.on("data", (d: Buffer) => written.push(d.toString()));
+    (mockChild as unknown as { stdin: PassThrough }).stdin = stdin;
+    diffMock.mockReturnValue("some diff");
+
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    expect(spawnMock.mock.calls[0][2].stdio[0]).toBe("pipe");
+    await new Promise((r) => setImmediate(r));
+    expect(written.join("")).toBe("rp"); // reviewPrompt is mocked to "rp"
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
   });
 
   it("kills process on timeout", async () => {

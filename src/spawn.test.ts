@@ -9,7 +9,7 @@ vi.mock("node:child_process", () => ({ spawnSync: vi.fn(() => ({ status: 0 })) }
 
 import crossSpawn from "cross-spawn";
 import { spawnSync } from "node:child_process";
-import { killAllChildren, killTree, resetSpawnTrackingForTests, spawn } from "./spawn.js";
+import { killAllChildren, killTree, resetSpawnTrackingForTests, spawn, writePrompt } from "./spawn.js";
 
 const mCross = crossSpawn as unknown as ReturnType<typeof vi.fn>;
 const mSpawnSync = vi.mocked(spawnSync);
@@ -315,5 +315,32 @@ describe("teardown tracking", () => {
     expect(process.listenerCount("SIGINT")).toBe(before + 1);
     resetSpawnTrackingForTests();
     expect(process.listenerCount("SIGINT")).toBe(before);
+  });
+});
+
+describe("writePrompt", () => {
+  it("pipes the prompt in and closes stdin, so the cli stops waiting", () => {
+    const stdin = { on: vi.fn(), end: vi.fn() };
+    writePrompt({ stdin } as never, "THE PROMPT");
+    expect(stdin.end).toHaveBeenCalledWith("THE PROMPT");
+    expect(stdin.on).toHaveBeenCalledWith("error", expect.any(Function));
+  });
+
+  // a cli that died before reading leaves us writing into a closed pipe; an
+  // unhandled EPIPE on a child stream takes the whole process down
+  it("swallows a broken pipe rather than crashing the run", () => {
+    const handlers: Record<string, (e: Error) => void> = {};
+    const stdin = {
+      on: vi.fn((ev: string, fn: (e: Error) => void) => {
+        handlers[ev] = fn;
+      }),
+      end: vi.fn(),
+    };
+    writePrompt({ stdin } as never, "P");
+    expect(() => handlers.error(Object.assign(new Error("EPIPE"), { code: "EPIPE" }))).not.toThrow();
+  });
+
+  it("is a no-op when the child has no stdin (argv-prompt cli)", () => {
+    expect(() => writePrompt({} as never, "P")).not.toThrow();
   });
 });

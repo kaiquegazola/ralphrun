@@ -4,7 +4,7 @@ import type { Mock } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]) }));
+vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]), promptViaStdin: vi.fn(() => false) }));
 vi.mock("./log.js", () => ({ log: vi.fn() }));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
 // releasePipes keeps its REAL implementation (it operates on the fake child's
@@ -15,6 +15,7 @@ vi.mock("./spawn.js", async (importOriginal) => {
   return { ...actual, spawn: vi.fn(), killTree: vi.fn(), releasePipes: vi.fn(actual.releasePipes) };
 });
 
+import { promptViaStdin } from "./adapters.js";
 import { killTree, releasePipes, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { emit } from "./tui/events.js";
@@ -31,6 +32,7 @@ function makeProc() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
     stderr: PassThrough;
+    stdin?: PassThrough;
     kill: Mock;
   };
   proc.stdout = new PassThrough();
@@ -66,6 +68,49 @@ function cfg(over: Partial<Config> = {}): Config {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+// the prompt is the only oversized part of the command line; piping it is what
+// keeps a 17k executor prompt (or a 25k review one) under cmd.exe's ~8191 limit
+describe("prompt delivery", () => {
+  it("pipes the prompt into stdin for a cli that reads it there", async () => {
+    vi.mocked(promptViaStdin).mockReturnValueOnce(true);
+    const proc = makeProc();
+    proc.stdin = new PassThrough();
+    spawnMock.mockReturnValue(proc);
+    const written: string[] = [];
+    proc.stdin!.on("data", (d: Buffer) => written.push(d.toString()));
+
+    const p = runExecutor(execu, "THE PROMPT", cfg(), "ws", "prog", task);
+    expect(spawnMock.mock.calls[0][2].stdio[0]).toBe("pipe");
+    await tick();
+    expect(written.join("")).toBe("THE PROMPT");
+    expect(proc.stdin!.writableEnded).toBe(true); // closed, or the cli waits forever
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+  });
+
+  it("leaves stdin closed for a cli that takes the prompt as an argument", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "THE PROMPT", cfg(), "ws", "prog", task);
+    expect(spawnMock.mock.calls[0][2].stdio[0]).toBe("ignore");
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+  });
+
+  // a cli that dies before reading (bad flags, no auth) closes the pipe under us;
+  // an unhandled EPIPE on a child stream takes the whole process down
+  it("survives a cli that exits before reading the piped prompt", async () => {
+    vi.mocked(promptViaStdin).mockReturnValueOnce(true);
+    const proc = makeProc();
+    proc.stdin = new PassThrough();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "THE PROMPT", cfg(), "ws", "prog", task);
+    expect(() => proc.stdin!.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" }))).not.toThrow();
+    closeProc(proc, 1);
+    expect(await p).toBe(false);
+  });
 });
 
 it("resolves true on exit 0 and echoes non-blank lines (heartbeat_secs undefined)", async () => {

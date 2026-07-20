@@ -6,14 +6,14 @@
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 
-import { buildCmd } from "./adapters.js";
+import { buildCmd, promptViaStdin } from "./adapters.js";
 import { agentDef } from "./agents.js";
 import type { AgentSpec, Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
-import { killTree, releasePipes, spawn } from "./spawn.js";
+import { killTree, releasePipes, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
 
 // after a kill, a surviving grandchild can hold the stdout pipe open so 'close'
@@ -57,10 +57,12 @@ export function runExecutor(
     let lastLine = "";
     let lastWasProse = false;
 
+    const viaStdin = promptViaStdin(execu.cli);
     const proc = spawn(cmd[0], cmd.slice(1), {
       cwd: workspace,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
     });
+    if (viaStdin) writePrompt(proc, prompt);
 
     // merge stderr into stdout for live echo
     const merged = new PassThrough();

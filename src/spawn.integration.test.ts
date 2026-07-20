@@ -30,6 +30,22 @@ function groupAlive(pid: number | undefined): boolean {
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Poll until a condition holds, instead of sleeping a constant.
+ *
+ * Every fixed wait in this file was a latent flake: under parallel test load a
+ * shell can take longer to start its children, or the OS longer to reap them,
+ * than any number you pick. Polling is both faster in the common case and
+ * stable in the slow one.
+ */
+async function until(cond: () => boolean, timeoutMs = 5000): Promise<boolean> {
+  for (let waited = 0; waited < timeoutMs; waited += 50) {
+    if (cond()) return true;
+    await wait(50);
+  }
+  return cond();
+}
+
 /** a child that spawns a grandchild inheriting our pipes — the real-world shape */
 function spawnTree(): ReturnType<typeof spawn> {
   return spawn("sh", ["-c", "sleep 60 & sleep 60"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -47,37 +63,31 @@ const closed = (proc: ReturnType<typeof spawn>): Promise<boolean> =>
 describe.skipIf(!posix)("killTree on real processes", () => {
   it("kills the grandchildren too, and 'close' fires", async () => {
     const proc = spawnTree();
-    await wait(300); // let the grandchild exist
-    expect(groupAlive(proc.pid)).toBe(true);
+    expect(await until(() => groupAlive(proc.pid))).toBe(true); // grandchild exists
 
     killTree(proc);
     expect(await closed(proc)).toBe(true); // false with a direct-child-only kill
-    await wait(200);
-    expect(groupAlive(proc.pid)).toBe(false);
+    expect(await until(() => !groupAlive(proc.pid))).toBe(true);
   }, 15_000);
 
   it("is idempotent — a second kill of an exited child is a harmless no-op", async () => {
     const proc = spawnTree();
-    await wait(300);
+    await until(() => groupAlive(proc.pid));
     killTree(proc);
     await closed(proc);
     expect(() => killTree(proc)).not.toThrow();
-    expect(groupAlive(proc.pid)).toBe(false);
+    expect(await until(() => !groupAlive(proc.pid))).toBe(true);
   }, 15_000);
 
   // the agent can exit on its own while a tool it launched keeps running. The
   // group outlives its leader, so killTree must still reap it.
   it("reaps descendants that outlived the direct child", async () => {
     const proc = spawn("sh", ["-c", "sleep 60 & exit 0"], { stdio: ["ignore", "pipe", "pipe"] });
-    // poll, don't sleep a fixed amount: under parallel test load the shell can
-    // take longer than any constant you pick, which makes this flaky
-    for (let i = 0; i < 100 && proc.exitCode === null; i++) await wait(50);
-    expect(proc.exitCode).not.toBeNull(); // the direct child is already gone...
+    expect(await until(() => proc.exitCode !== null)).toBe(true); // direct child gone...
     expect(groupAlive(proc.pid)).toBe(true); // ...but its child is not
 
     killTree(proc);
-    await wait(200);
-    expect(groupAlive(proc.pid)).toBe(false);
+    expect(await until(() => !groupAlive(proc.pid))).toBe(true);
   }, 15_000);
 
   // KNOWN LIMIT, pinned deliberately: the post-exit group kill is gated on the
@@ -92,7 +102,6 @@ describe.skipIf(!posix)("killTree on real processes", () => {
       stdio: ["ignore", "pipe", "pipe"],
     });
     expect(await closed(proc)).toBe(true); // pipes released -> we DO settle cleanly
-    await wait(200);
     const pgid = proc.pid;
     killTree(proc);
     expect(groupAlive(pgid)).toBe(true); // documented leak, not a hang
@@ -103,14 +112,10 @@ describe.skipIf(!posix)("killTree on real processes", () => {
   it("killAllChildren on teardown leaves nothing behind", async () => {
     const a = spawnTree();
     const b = spawnTree();
-    await wait(300);
-    expect(groupAlive(a.pid)).toBe(true);
-    expect(groupAlive(b.pid)).toBe(true);
+    expect(await until(() => groupAlive(a.pid) && groupAlive(b.pid))).toBe(true);
 
     killAllChildren();
-    await wait(300);
-    expect(groupAlive(a.pid)).toBe(false);
-    expect(groupAlive(b.pid)).toBe(false);
+    expect(await until(() => !groupAlive(a.pid) && !groupAlive(b.pid))).toBe(true);
   }, 15_000);
 });
 
@@ -143,14 +148,13 @@ describe("killTree kills a real grandchild on every platform", () => {
         : spawn("sh", ["-c", `"${node}" -e '${script}' "${pidFile}"`], { stdio: ["ignore", "pipe", "pipe"] });
 
     try {
-      for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 100));
+      await until(() => existsSync(pidFile));
       const gcPid = Number(readFileSync(pidFile, "utf8").trim());
       expect(Number.isInteger(gcPid)).toBe(true);
       expect(alive(gcPid)).toBe(true); // the grandchild is really running
 
       killTree(proc);
-      for (let i = 0; i < 50 && alive(gcPid); i++) await new Promise((r) => setTimeout(r, 100));
-      expect(alive(gcPid)).toBe(false); // ...and the kill reached it, not just its parent
+      expect(await until(() => !alive(gcPid))).toBe(true); // the kill reached it, not just its parent
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

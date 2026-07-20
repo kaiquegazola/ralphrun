@@ -1,7 +1,12 @@
 // cli.test.ts — drives the Commander program actions (root loop, init, config).
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("node:fs", () => ({ existsSync: vi.fn() }));
+// partial mock: cli.ts reads the REAL package.json for --version, so only
+// existsSync (the PRD-presence probe) is faked
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  existsSync: vi.fn(),
+}));
 vi.mock("./loop.js", () => ({ runLoop: vi.fn() }));
 vi.mock("./wizard.js", () => ({ initWizard: vi.fn() }));
 vi.mock("./userconfig.js", () => ({ loadUserConfig: vi.fn(() => ({ version: 1 })) }));
@@ -14,6 +19,8 @@ vi.mock("./configcmd.js", () => ({
 
 import { existsSync } from "node:fs";
 import { getLocale, setLocale } from "./i18n.js";
+import { readFileSync } from "node:fs";
+import { sep } from "node:path";
 import { peekLang, program } from "./cli.js";
 import { runLoop } from "./loop.js";
 import { initWizard } from "./wizard.js";
@@ -30,6 +37,44 @@ beforeEach(() => {
   vi.spyOn(process, "exit").mockImplementation((() => {
     throw new Error("exit");
   }) as never);
+});
+
+// `--version` was hardcoded and drifted: it said 0.1.0 while the published
+// package was 0.2.1. It is the one number a user checks to answer "did I get
+// the fix?", so it silently lying is worse than it being absent.
+describe("--version", () => {
+  // `npm run test:winpaths` aliases node:path to win32 but leaves the real fs in
+  // place, so a win32-shaped path cannot be opened on a POSIX machine and
+  // readVersion() falls back. That is the documented limit of the simulation,
+  // not a defect — on a real Windows box path and fs agree.
+  const simulatedWindows = sep === "\\" && process.platform !== "win32";
+  it.skipIf(simulatedWindows)("reports the package's real version, not a hardcoded copy", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    expect(program.version()).toBe(pkg.version);
+  });
+
+  it("falls back instead of crashing the CLI when package.json cannot be read", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs", () => ({
+      existsSync: vi.fn(),
+      readFileSync: vi.fn(() => {
+        throw new Error("ENOENT");
+      }),
+    }));
+    const { program: p } = await import("./cli.js");
+    expect(p.version()).toBe("unknown");
+    vi.doUnmock("node:fs");
+    vi.resetModules();
+  });
+
+  it("falls back when package.json parses but has no version string", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs", () => ({ existsSync: vi.fn(), readFileSync: vi.fn(() => "{}") }));
+    const { program: p } = await import("./cli.js");
+    expect(p.version()).toBe("unknown");
+    vi.doUnmock("node:fs");
+    vi.resetModules();
+  });
 });
 
 describe("root action", () => {

@@ -1,7 +1,8 @@
 // cli.ts — Commander setup. Root action = run the loop; subcommands: init, config.
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 
 import { resolveLocale, setLocale, t } from "./i18n.js";
@@ -21,12 +22,34 @@ export function peekLang(argv: string[]): string | undefined {
 
 setLocale(resolveLocale(peekLang(process.argv)));
 
+/**
+ * Read the version from package.json instead of hardcoding it.
+ *
+ * It WAS hardcoded, and drifted: `--version` said 0.1.0 while the published
+ * package was 0.2.1. That is the one number a user checks to answer "did I get
+ * the fix?", so it lying is worse than it being absent.
+ *
+ * dist/index.js is bundled to the package root's dist/, so package.json is one
+ * level up from the bundle. Falls back rather than crashing the CLI: an
+ * unreadable package.json must not stop a run.
+ */
+function readVersion(): string {
+  try {
+    const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    const parsed: unknown = JSON.parse(readFileSync(pkg, "utf8"));
+    const v = (parsed as { version?: unknown }).version;
+    return typeof v === "string" ? v : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export const program = new Command();
 
 program
   .name("ralphrun")
   .description(t("cli.root.desc"))
-  .version("0.1.0")
+  .version(readVersion())
   .option("--prd <path>", t("cli.opt.prd"), "prd.json")
   .option("--workspace <path>", t("cli.opt.workspace"))
   .option("--config <path>", t("cli.opt.config"))

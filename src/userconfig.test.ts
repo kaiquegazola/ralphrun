@@ -8,6 +8,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { join } from "node:path";
+
 import {
   configDir,
   configPath,
@@ -42,35 +44,38 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+// Expectations are BUILT with join, never hand-typed with "/": the product
+// joins with the platform separator, so a literal "a/b" only ever matched on
+// POSIX and made the whole file fail on Windows for no real reason.
 describe("configDir / configPath", () => {
   it("win32 with APPDATA set", () => {
     setPlatform("win32");
     vi.stubEnv("APPDATA", "C:\\Users\\u\\AppData\\Roaming");
-    expect(configDir()).toBe("C:\\Users\\u\\AppData\\Roaming/ralphrun");
+    expect(configDir()).toBe(join("C:\\Users\\u\\AppData\\Roaming", "ralphrun"));
   });
 
   it("win32 without APPDATA falls back to ~/.config", () => {
     setPlatform("win32");
     vi.stubEnv("APPDATA", "");
-    expect(configDir()).toBe("/home/u/.config/ralphrun");
+    expect(configDir()).toBe(join("/home/u", ".config", "ralphrun"));
   });
 
   it("unix with XDG_CONFIG_HOME set", () => {
     setPlatform("linux");
     vi.stubEnv("XDG_CONFIG_HOME", "/xdg");
-    expect(configDir()).toBe("/xdg/ralphrun");
+    expect(configDir()).toBe(join("/xdg", "ralphrun"));
   });
 
   it("unix without XDG_CONFIG_HOME falls back to ~/.config", () => {
     setPlatform("linux");
     vi.stubEnv("XDG_CONFIG_HOME", "");
-    expect(configDir()).toBe("/home/u/.config/ralphrun");
+    expect(configDir()).toBe(join("/home/u", ".config", "ralphrun"));
   });
 
   it("configPath appends config.json", () => {
     setPlatform("linux");
     vi.stubEnv("XDG_CONFIG_HOME", "/xdg");
-    expect(configPath()).toBe("/xdg/ralphrun/config.json");
+    expect(configPath()).toBe(join("/xdg", "ralphrun", "config.json"));
   });
 });
 
@@ -80,7 +85,7 @@ describe("userConfigExists", () => {
     vi.stubEnv("XDG_CONFIG_HOME", "/xdg");
     vi.mocked(existsSync).mockReturnValue(true);
     expect(userConfigExists()).toBe(true);
-    expect(vi.mocked(existsSync)).toHaveBeenCalledWith("/xdg/ralphrun/config.json");
+    expect(vi.mocked(existsSync)).toHaveBeenCalledWith(join("/xdg", "ralphrun", "config.json"));
   });
 
   it("false when missing", () => {
@@ -205,10 +210,10 @@ describe("saveUserConfig", () => {
     saveUserConfig({ language: "pt-br" });
 
     expect(order).toEqual(["mkdir", "write", "rename"]);
-    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith("/xdg/ralphrun", { recursive: true });
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith(join("/xdg", "ralphrun"), { recursive: true });
     const [tmpPath, body] = vi.mocked(writeFileSync).mock.calls[0];
     // pid-unique tmp: two concurrent saves can't rename-steal each other's file
-    expect(tmpPath).toBe(`/xdg/ralphrun/config.json.${process.pid}.tmp`);
+    expect(tmpPath).toBe(join("/xdg", "ralphrun", `config.json.${process.pid}.tmp`));
     expect(JSON.parse(body as string)).toEqual({
       version: 1,
       language: "pt-br",
@@ -216,8 +221,8 @@ describe("saveUserConfig", () => {
     });
     expect(body).toMatch(/\n$/);
     expect(vi.mocked(renameSync)).toHaveBeenCalledWith(
-      `/xdg/ralphrun/config.json.${process.pid}.tmp`,
-      "/xdg/ralphrun/config.json",
+      join("/xdg", "ralphrun", `config.json.${process.pid}.tmp`),
+      join("/xdg", "ralphrun", "config.json"),
     );
   });
 
@@ -236,6 +241,6 @@ describe("resetUserConfig", () => {
     setPlatform("linux");
     vi.stubEnv("XDG_CONFIG_HOME", "/xdg");
     resetUserConfig();
-    expect(vi.mocked(rmSync)).toHaveBeenCalledWith("/xdg/ralphrun/config.json", { force: true });
+    expect(vi.mocked(rmSync)).toHaveBeenCalledWith(join("/xdg", "ralphrun", "config.json"), { force: true });
   });
 });

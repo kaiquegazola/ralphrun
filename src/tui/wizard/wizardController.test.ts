@@ -4,6 +4,7 @@
 // precedence (cwd config > saved global > recommended), esc/back/quit at
 // every screen, refresh clamps, and the CLI_OPTIONS/MODELS tables.
 import { describe, it, expect } from "vitest";
+import { join } from "node:path";
 import { AGENTS, agentClis } from "../../agents.js";
 import type { AgentDiagnostic } from "../../diagnostics.js";
 import { t } from "../../i18n.js";
@@ -628,7 +629,9 @@ describe("studio + saveAs", () => {
   it("openSaveAs defaults to the existing PRD's cwd-relative path", () => {
     const refined = reducer(refineOrRun("/w/sub/x.json"), { type: "select" });
     const s = reducer(refined, { type: "openSaveAs", build: true });
-    expect(s.saveAsInput).toBe("sub/x.json");
+    // relative() answers in the platform's separator, and that IS what the user
+    // should see and edit on Windows — the input is resolved back to a path
+    expect(s.saveAsInput).toBe(join("sub", "x.json"));
     expect(s.pendingBuild).toBe(true);
   });
 

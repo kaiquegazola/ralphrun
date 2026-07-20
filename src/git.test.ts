@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { git, captureDiff, captureReviewBase, headCommit } from "./git.js";
@@ -17,7 +18,8 @@ const mockRm = vi.mocked(rmSync);
 const indexOptions = {
   cwd: "/ws",
   encoding: "utf8",
-  env: expect.objectContaining({ GIT_INDEX_FILE: "/tmp/ralphrun-index/index" }),
+  // git.ts builds this with join(), so the separator is the platform's
+  env: expect.objectContaining({ GIT_INDEX_FILE: join("/tmp/ralphrun-index", "index") }),
 };
 
 describe("git", () => {

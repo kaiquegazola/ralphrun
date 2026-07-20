@@ -283,8 +283,16 @@ npm install
 npm run build       # tsup -> dist/index.js (ESM)
 npm run typecheck    # tsc --noEmit (strict)
 npm run dev          # watch rebuild
+npm test             # vitest
+npm run test:winpaths # same suite, with Windows path semantics, on any OS
 node dist/index.js --help
 ```
+
+`test:winpaths` aliases `node:path` to its win32 flavour, so `join`, `resolve`,
+`relative` and `sep` behave as they do on Windows. Every path bug this project
+has hit lived there, and this turns a CI round trip into a two-second check. It
+does **not** simulate the filesystem (case-insensitivity, drive letters, UNC) or
+process spawning — the `windows-latest` job in CI stays the source of truth.
 
 Layout:
 

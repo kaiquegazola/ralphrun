@@ -1,5 +1,6 @@
 // config.test.ts — parseAgent, loadConfig (incl. global-user-config layering)
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { loadUserConfig, type UserConfig } from "./userconfig.js";
 import { parseAgent, loadConfig, DEFAULTS } from "./config.js";
@@ -61,22 +62,31 @@ describe("loadConfig", () => {
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ task_timeout: 999 }) as unknown as string);
     const cfg = loadConfig("/x/prd.json", "/custom/ralph.config.json", {});
     expect(cfg.task_timeout).toBe(999);
-    expect(vi.mocked(readFileSync).mock.calls[0][0]).toContain("/custom/ralph.config.json");
+    // resolve() adds a drive letter on Windows, so compare the joined TAIL
+    expect(vi.mocked(readFileSync).mock.calls[0][0]).toContain(join("/custom", "ralph.config.json"));
   });
 
   it("uses prd dir default config path when no flag", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ review_after: false }) as unknown as string);
     loadConfig("/proj/prd.json", undefined, {});
-    expect(vi.mocked(existsSync).mock.calls[0][0]).toContain("/proj/ralph.config.json");
+    expect(vi.mocked(existsSync).mock.calls[0][0]).toContain(join("/proj", "ralph.config.json"));
   });
 
   it("malformed config file throws a clean one-line error (no raw stack)", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue("{oops" as unknown as string);
-    expect(() => loadConfig("/x/prd.json", "/custom/ralph.config.json", {})).toThrow(
-      /invalid JSON in .*\/custom\/ralph\.config\.json/,
-    );
+    // substring, not a regex: the path in the message uses the platform
+    // separator, and escaping backslashes into a pattern only obscures that
+    let msg = "";
+    try {
+      loadConfig("/x/prd.json", "/custom/ralph.config.json", {});
+    } catch (e) {
+      msg = e instanceof Error ? e.message : String(e);
+    }
+    expect(msg).toContain("invalid JSON in ");
+    expect(msg).toContain(join("/custom", "ralph.config.json"));
+    expect(msg).not.toContain("\n"); // one line, no raw stack
   });
 
   it("non-Error read failure is stringified into the same message", () => {

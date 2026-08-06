@@ -119,15 +119,40 @@ export async function advisorReview(
   standards: string,
   reviewBase?: string | null,
 ): Promise<AdvisorReviewResult> {
+  // The reviewer is a GATE, so "no verdict" is not a verdict. Each branch below
+  // used to return approved:true, which is how a task reached `done` with
+  // NOTHING having judged it: no diff to read, a dead reviewer, or an answer in
+  // neither format all counted as an approval.
   const diff = captureDiff(workspace, reviewBase);
-  if (!diff.trim()) return { approved: true, changes: "", diff };
+  if (!diff.trim()) {
+    // Actionable, so it goes to the executor as fix-loop feedback: an empty diff
+    // means the task produced no work, which is a failure it can act on.
+    log(progress, t("advisor.reviewNoDiff", { id: task.id }));
+    return {
+      approved: false,
+      changes:
+        "The review found NO changes in the workspace for this task. Implement it: edit the files " +
+        "its acceptance criteria require. If the work was genuinely already present and correct, " +
+        "say so explicitly in your final message instead of finishing silently.",
+      diff,
+    };
+  }
   const prompt = reviewPrompt(task, prd, standards, diff);
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review");
   if (out === null) {
+    // `changes` stays EMPTY on purpose: a reviewer that never answered gives the
+    // executor nothing to fix, so the fix loop breaks out (run.ts) and the task
+    // blocks for a human rather than burning rounds re-running a dead reviewer.
     log(progress, t("advisor.reviewFailed", { id: task.id }));
-    return { approved: true, changes: "", diff };
+    return { approved: false, changes: "", diff };
   }
   const parsed = parseReview(out);
+  // Neither APPROVE nor CHANGES. Same empty-`changes` reasoning as above, but the
+  // reviewer DID say something — log it, or the human deciding on the blocked
+  // task has nothing to go on (review output never reaches progress.md).
+  if (!parsed.approved && !parsed.changes) {
+    log(progress, t("advisor.reviewUnparsed", { id: task.id, out: compactLine(out, 300) }));
+  }
   emit({
     taskId: task.id,
     line: parsed.approved ? "APPROVE" : compactLine(parsed.changes || out),

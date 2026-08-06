@@ -27,7 +27,13 @@ vi.mock("./prd.js", async (importActual) => {
   return { findTask: vi.fn(), nextTask: vi.fn(), sessionRunnableIds: actual.sessionRunnableIds };
 });
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
-vi.mock("./git.js", () => ({ git: vi.fn(), headCommit: vi.fn(() => null), captureReviewBase: vi.fn(() => "base-tree") }));
+vi.mock("./git.js", () => ({
+  git: vi.fn(),
+  headCommit: vi.fn(() => null),
+  captureReviewBase: vi.fn(() => "base-tree"),
+  taskChangedPaths: vi.fn(() => ["src/a.ts"]),
+  commitPaths: vi.fn(() => true),
+}));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
 vi.mock("./plan-cache.js", () => ({ advisorPlanKey: vi.fn(() => "plan-key") }));
 vi.mock("./tui/mount.js", () => ({ mount: vi.fn() }));
@@ -44,7 +50,7 @@ import { loadConfig, parseAgent } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
 import { findTask, nextTask } from "./prd.js";
 import { log, setReporter } from "./log.js";
-import { git, headCommit, captureReviewBase } from "./git.js";
+import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths } from "./git.js";
 import { runTask } from "./run.js";
 import { advisorPlanKey } from "./plan-cache.js";
 import { mount } from "./tui/mount.js";
@@ -76,6 +82,8 @@ const mSetReporter = vi.mocked(setReporter);
 const mGit = vi.mocked(git);
 const mHeadCommit = vi.mocked(headCommit);
 const mCaptureReviewBase = vi.mocked(captureReviewBase);
+const mTaskChangedPaths = vi.mocked(taskChangedPaths);
+const mCommitPaths = vi.mocked(commitPaths);
 const mRunTask = vi.mocked(runTask);
 const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
 const mMount = vi.mocked(mount);
@@ -167,6 +175,8 @@ beforeEach(() => {
   mRunTask.mockResolvedValue({ ok: true });
   mHeadCommit.mockReturnValue(null);
   mCaptureReviewBase.mockReturnValue("base-tree");
+  mTaskChangedPaths.mockReturnValue(["src/a.ts"]);
+  mCommitPaths.mockReturnValue(true);
   mMount.mockReturnValue(makeHandle());
   mSelect.mockResolvedValue("start" as never);
   mPickModel.mockResolvedValue("claude:sonnet");
@@ -469,8 +479,11 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mMount).not.toHaveBeenCalled(); // non-TTY: no dashboard
     expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree", expect.any(Function));
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "init");
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "add", "-A");
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1"));
+    // scoped to the task's own paths, so a file the user already had dirty is
+    // never swept into a commit named after this task
+    expect(mTaskChangedPaths).toHaveBeenCalledWith(expect.any(String), "base-tree");
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], expect.stringContaining("T1"));
+    expect(mGit).not.toHaveBeenCalledWith(expect.any(String), "add", "-A");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
     expect(mSetReporter).toHaveBeenLastCalledWith(null); // cleaned up on exit
   });
@@ -481,7 +494,36 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mRunTask.mockResolvedValueOnce({ ok: true });
     mHeadCommit.mockReturnValueOnce("aaaa").mockReturnValueOnce("bbbb");
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1: Task one"));
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], "T1: Task one");
+  });
+
+  it("skips the commit entirely when the task moved nothing", async () => {
+    fastTimers();
+    mTaskChangedPaths.mockReturnValue([]);
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable" });
+    expect(mCommitPaths).not.toHaveBeenCalled();
+    expect(mGit).not.toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.anything());
+  });
+
+  // the executor staged a rename/deletion despite being told not to, so the
+  // scoped stage cannot resolve the path — commit everything rather than nothing
+  it("falls back to staging everything, loudly, when the scoped commit fails", async () => {
+    fastTimers();
+    mCommitPaths.mockReturnValue(false);
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable" });
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("could not scope"));
+    expect(mGit).toHaveBeenCalledWith(expect.any(String), "add", "-A");
+    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1"));
+  });
+
+  // no baseline (a repo with no commits yet) is not the executor's fault: fall
+  // back silently, exactly as this did before commits were scoped
+  it("falls back quietly when there is no baseline to scope against", async () => {
+    fastTimers();
+    mTaskChangedPaths.mockReturnValue(null);
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable" });
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("could not scope"));
+    expect(mGit).toHaveBeenCalledWith(expect.any(String), "add", "-A");
   });
 
   it("failing task (runTask throws) → retry (todo); parseAgent null skips override", async () => {
@@ -561,7 +603,8 @@ describe("runLoop real run (non-TTY fallback)", () => {
     const saved = JSON.parse(writes[writes.length - 1]);
     expect(saved.tasks[0]).toMatchObject({ status: "done", retries: 0 });
     expect(handle.waitReviewBlocked).toHaveBeenCalledWith(expect.any(String), true);
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1"));
+    // a user-accepted review commits through the same scoped path as a clean pass
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], expect.stringContaining("T1"));
   });
 
   it("does not allow accepting a rejected review when verification failed", async () => {
@@ -822,7 +865,7 @@ describe("runLoop TTY dashboard", () => {
     await runLoop({ prd: "prd.json", task: "T1" });
 
     expect(handle.unmount).toHaveBeenCalled();
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1"));
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], expect.stringContaining("T1"));
   });
 
   it("skip → marks task blocked (skipped by user) and continues", async () => {

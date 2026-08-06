@@ -73,6 +73,7 @@ const en = {
   "loop.log.done": "DONE {id} ({s}s)",
   "loop.log.executorCommit": "  {id}: commit detected during execution — {hash}",
   "loop.log.committed": "  {id}: committed — {hash}",
+  "loop.log.commitUnscoped": "  {id}: could not scope the commit to this task's files — staging everything",
   "loop.log.blocked": "BLOCKED {id} ({s}s) — max retries",
   "loop.log.blockedReview": "BLOCKED {id} ({s}s) — {reason}",
   "loop.log.reviewRetry": "  {id}: user chose to retry review feedback ({reason})",
@@ -94,6 +95,7 @@ const en = {
   "run.reason.repeatedStall": "same verify/review/diff repeated",
   "run.log.exhausted": "  {id}: review/fix rounds exhausted",
   "run.log.neverApproved": "  {id}: review never approved — not marking done",
+  "run.log.unverified": "  {id}: no verify command and no reviewer — 'done' only means the executor exited 0",
   "verify.failed": "  {id}: verify FAILED (exit {status})",
   "verify.timeout": "  {id}: verify command TIMEOUT after {s}s — killed",
   "verify.crashed": "  {id}: verify crashed — {msg}",
@@ -104,7 +106,9 @@ const en = {
   "exec.spawnFailed": "  {tag}: failed to spawn {cli} — {msg}",
   "advisor.failed": "  {id}: advisor failed — continuing without",
   "advisor.advice": "  {id}: advisor {agent} → {n} chars",
-  "advisor.reviewFailed": "  {id}: review failed — treating as APPROVE",
+  "advisor.reviewFailed": "  {id}: review failed to answer — NOT approving",
+  "advisor.reviewNoDiff": "  {id}: review found no changes in the workspace — NOT approving",
+  "advisor.reviewUnparsed": "  {id}: review answered neither APPROVE nor CHANGES — NOT approving. It said: {out}",
 
   // wizard.ts
   "wizard.nontty.exists":
@@ -355,6 +359,7 @@ const ptBr: Record<MsgKey, string> = {
   "loop.log.skipped": "PULADA {id} ({s}s)",
   "loop.log.done": "CONCLUÍDA {id} ({s}s)",
   "loop.log.executorCommit": "  {id}: commit detectado durante a execução — {hash}",
+  "loop.log.commitUnscoped": "  {id}: não foi possível limitar o commit aos arquivos desta task — commitando tudo",
   "loop.log.committed": "  {id}: commitado — {hash}",
   "loop.log.blocked": "BLOQUEADA {id} ({s}s) — máximo de tentativas",
   "loop.log.blockedReview": "BLOQUEADA {id} ({s}s) — {reason}",
@@ -377,6 +382,7 @@ const ptBr: Record<MsgKey, string> = {
   "run.reason.repeatedStall": "mesmo verify/review/diff repetido",
   "run.log.exhausted": "  {id}: rodadas de review/correção esgotadas",
   "run.log.neverApproved": "  {id}: review nunca aprovado — não marcando como concluída",
+  "run.log.unverified": "  {id}: sem comando verify e sem reviewer — 'concluída' só significa que o executor saiu com 0",
   "verify.failed": "  {id}: verify FALHOU (exit {status})",
   "verify.timeout": "  {id}: comando verify TIMEOUT após {s}s — morto",
   "verify.crashed": "  {id}: verify quebrou — {msg}",
@@ -387,7 +393,9 @@ const ptBr: Record<MsgKey, string> = {
   "exec.spawnFailed": "  {tag}: falha ao iniciar {cli} — {msg}",
   "advisor.failed": "  {id}: advisor falhou — continuando sem",
   "advisor.advice": "  {id}: advisor {agent} → {n} caracteres",
-  "advisor.reviewFailed": "  {id}: review falhou — tratando como APPROVE",
+  "advisor.reviewFailed": "  {id}: review não respondeu — NÃO aprovando",
+  "advisor.reviewNoDiff": "  {id}: review não encontrou mudanças no workspace — NÃO aprovando",
+  "advisor.reviewUnparsed": "  {id}: review não respondeu nem APPROVE nem CHANGES — NÃO aprovando. Ele disse: {out}",
 
   "wizard.nontty.exists":
     "ralphrun init: prd.json / ralph.config.json já existem — rode de novo com --force para sobrescrever.",

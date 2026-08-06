@@ -287,6 +287,20 @@ Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
 - **Git isolation**: the workspace gets its own `.git`, so commits/diffs never
   leak into a parent repo (auto-initialized when `commit_per_task` or
   `review_after` is on).
+- **The loop commits, not the executor**: the task prompt tells the executor to
+  leave its work uncommitted. When a task passes, `commit_per_task` stages
+  **only the paths that task changed** — measured against a snapshot taken when
+  it started — so files you already had uncommitted stay yours instead of
+  landing in a commit named after a task that never touched them.
+- **The review gate fails closed**: an empty diff, a reviewer that timed out or
+  crashed, and an answer that is neither `APPROVE` nor `CHANGES` all count as
+  *not approved*. Each used to pass as an approval, which let a task reach
+  `done` with nothing having judged it. A task blocked this way is offered for
+  manual approval in the TUI (only if its tests passed) and the reason is in
+  `progress.md`.
+- **Truncated review diffs say so**: the diff handed to the reviewer is capped,
+  and now carries an explicit marker when it was cut, so an approval is never
+  given over a change the reviewer only half saw.
 
 > **Workspace default is the current directory.** Run ralphrun from inside your
 > project dir (or pass `--workspace`), *not* from the tool dir.

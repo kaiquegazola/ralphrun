@@ -40,6 +40,11 @@ export async function runTask(
   const standards = readStandards(workspace);
   const prompt = injectReviewRetryFeedback(buildPrompt(task, prd, standards), reviewRetryFeedback);
 
+  // No verify command and no reviewer: "done" here means nothing more than "the
+  // executor exited 0". That is a legitimate setup, but it is silent, and a PRD
+  // full of such tasks reads as verified when nothing verified it.
+  if (!task.verify && !(advis && cfg.review_after)) log(progress, t("run.log.unverified", { id: task.id }));
+
   // NATIVE: claude does executor + advisor (incl. its own pre-done review) in
   // one call. Objective test gate still applies; failures fall to task retry.
   const attempt = { n: task.retries + 1, max: cfg.max_retries_per_task };

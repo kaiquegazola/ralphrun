@@ -95,6 +95,14 @@ describe("buildPrompt", () => {
     expect(out).toContain(BLOCKED_MARKER);
   });
 
+  // the loop commits the task's own files under the project's convention; an
+  // executor that commits itself splits one task across several commits and
+  // leaves them behind even when the task ends up blocked
+  it("tells the executor to leave committing to the loop", () => {
+    const p = buildPrompt(task, prd);
+    expect(p).toContain("Do NOT run `git add` or `git commit`");
+  });
+
   it("stops advisor guidance from widening the rules", () => {
     const out = injectAdvice(buildPrompt(task, prd), "just ask the user first").replace(/\s+/g, " ");
     expect(out).toContain("It is advice, not permission");
@@ -140,8 +148,10 @@ describe("reviewPrompt", () => {
 });
 
 describe("parseReview", () => {
-  it("empty verdict -> approved", () => {
-    expect(parseReview("")).toEqual({ approved: true, changes: "" });
+  // a gate that could not read a verdict has judged nothing — only the two
+  // documented shapes approve, everything else falls through to NOT approved
+  it("empty verdict -> NOT approved", () => {
+    expect(parseReview("")).toEqual({ approved: false, changes: "" });
   });
   it("APPROVE -> approved", () => {
     expect(parseReview("  approve  ")).toEqual({ approved: true, changes: "" });
@@ -165,7 +175,7 @@ describe("parseReview", () => {
     const r = parseReview("CHANGES: " + "z".repeat(5000));
     expect(r.changes.length).toBe(4000);
   });
-  it("no APPROVE / no CHANGES -> approved default", () => {
-    expect(parseReview("looks fine to me")).toEqual({ approved: true, changes: "" });
+  it("no APPROVE / no CHANGES -> NOT approved, with nothing to hand the executor", () => {
+    expect(parseReview("looks fine to me")).toEqual({ approved: false, changes: "" });
   });
 });

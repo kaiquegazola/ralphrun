@@ -119,14 +119,15 @@ describe("getAdvice", () => {
 });
 
 describe("advisorReview", () => {
-  it("approves immediately on empty diff without spawning", async () => {
+  // an empty diff means the task produced no work — approving it is how a task
+  // reached `done` with nothing having been written, let alone reviewed
+  it("rejects an empty diff without spawning, with feedback the executor can act on", async () => {
     diffMock.mockReturnValue("   ");
-    expect(await advisorReview(task, prd, advis, cfg, "ws", "prog", "std")).toEqual({
-      approved: true,
-      changes: "",
-      diff: "   ",
-    });
+    const r = await advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    expect(r.approved).toBe(false);
+    expect(r.changes).toContain("NO changes");
     expect(spawnMock).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("no changes"));
   });
 
   it("delegates to parseReview on success", async () => {
@@ -241,28 +242,43 @@ describe("advisorReview", () => {
     expect(diffMock).toHaveBeenCalledWith("ws", "base-commit");
   });
 
-  it("approves and logs when review CLI throws synchronously", async () => {
+  // A reviewer that never answered has judged nothing, so it cannot approve.
+  // `changes` stays empty: there is nothing for the executor to fix, which is
+  // what makes run.ts break out of the fix loop instead of spinning on it.
+  it("does NOT approve and logs when review CLI throws synchronously", async () => {
     diffMock.mockReturnValue("some diff");
     spawnMock.mockImplementationOnce(() => {
       throw new Error("boom");
     });
     expect(await advisorReview(task, prd, advis, cfg, "ws", "prog", "std")).toEqual({
-      approved: true,
+      approved: false,
       changes: "",
       diff: "some diff",
     });
-    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("review failed"));
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("NOT approving"));
   });
 
-  it("approves and logs when review CLI fires error event", async () => {
+  it("does NOT approve and logs when review CLI fires error event", async () => {
     diffMock.mockReturnValue("some diff");
     const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
     errorSpawn();
     expect(await p).toEqual({
-      approved: true,
+      approved: false,
       changes: "",
       diff: "some diff",
     });
-    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("review failed"));
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("NOT approving"));
+  });
+
+  // neither APPROVE nor CHANGES: not an approval, and the raw text has to reach
+  // progress.md or the human deciding on the blocked task has nothing to go on
+  it("logs what an unparseable verdict actually said", async () => {
+    diffMock.mockReturnValue("some diff");
+    vi.mocked(parseReview).mockReturnValueOnce({ approved: false, changes: "" });
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("I would rather not judge this\n");
+    finishSpawn(0);
+    expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("I would rather not judge this"));
   });
 });

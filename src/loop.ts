@@ -13,7 +13,7 @@ import { t } from "./i18n.js";
 import { findTask, nextTask, sessionRunnableIds, type PRD } from "./prd.js";
 import { loadPrdFile, type NormalizePrdOptions } from "./prdload.js";
 import { log, setReporter } from "./log.js";
-import { captureReviewBase, git, headCommit } from "./git.js";
+import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } from "./git.js";
 import { advisorPlanKey } from "./plan-cache.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
@@ -210,7 +210,10 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     tui?.unmount();
   };
   const pendingReviewFeedback = new Map<string, string>();
-  const reviewBaselines = new Map<string, string | null>();
+  // The worktree as it stood when each task STARTED. Two consumers: the review
+  // diffs against it, and the commit stages only what moved since it. Keyed by
+  // task so a retry still measures from the task's own start, not the retry's.
+  const taskBaselines = new Map<string, string | null>();
 
   while (true) {
     if (tui) setElapsedPaused(tui.control.isPaused());
@@ -323,10 +326,11 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
     let taskReviewBase: string | null | undefined;
-    if (cfg.review_after && cfg.advisor) {
-      if (!reviewBaselines.has(task.id)) reviewBaselines.set(task.id, captureReviewBase(workspace));
-      taskReviewBase = reviewBaselines.get(task.id);
+    const reviewOn = cfg.review_after && !!cfg.advisor;
+    if (reviewOn || cfg.commit_per_task) {
+      if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(workspace));
     }
+    if (reviewOn) taskReviewBase = taskBaselines.get(task.id);
     const taskStartCommit = headCommit(workspace);
     const planBeforeRun = task.plan;
     const planKeyBeforeRun = task.planKey;
@@ -387,21 +391,24 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       return;
     }
     if (skipped) {
-      reviewBaselines.delete(task.id);
+      taskBaselines.delete(task.id);
       freshTask.status = "blocked";
       const reason = t("loop.reason.skipped");
       log(progress, t("loop.log.skipped", { id: task.id, s: elapsed }));
       emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
       savePRD(prdPath, fresh);
     } else if (result.ok) {
-      reviewBaselines.delete(task.id);
       freshTask.status = "done";
       log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
       emit({ taskId: task.id, status: "done", elapsedMs });
       savePRD(prdPath, fresh);
+      // AFTER savePRD (the commit is meant to carry the task's new status) and
+      // BEFORE the baseline is dropped — the commit needs it to know which paths
+      // are this task's and which were already dirty.
       if (cfg.commit_per_task) {
-        logTaskCommit(workspace, progress, task.id, task.title, cfg);
+        logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
       }
+      taskBaselines.delete(task.id);
     } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
       const reason =
         result.reason === "review_stalled"
@@ -429,14 +436,14 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           continue;
         }
         if (action === "approve" && allowReviewOverride) {
-          reviewBaselines.delete(task.id);
           freshTask.status = "done";
           log(progress, t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason }));
           emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
           savePRD(prdPath, fresh);
           if (cfg.commit_per_task) {
-            logTaskCommit(workspace, progress, task.id, task.title, cfg);
+            logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
           }
+          taskBaselines.delete(task.id);
           if (opts.task) {
             done();
             return;
@@ -445,7 +452,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           continue;
         }
       }
-      reviewBaselines.delete(task.id);
+      taskBaselines.delete(task.id);
       freshTask.status = "blocked";
       log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: displayReason }));
       emit({ taskId: task.id, status: "blocked", reason: displayReason, elapsedMs });
@@ -453,7 +460,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     } else {
       freshTask.retries += 1;
       if (freshTask.retries >= cfg.max_retries_per_task) {
-        reviewBaselines.delete(task.id);
+        taskBaselines.delete(task.id);
         freshTask.status = "blocked";
         const reason = t("loop.reason.maxRetries");
         log(progress, t("loop.log.blocked", { id: task.id, s: elapsed }));
@@ -493,13 +500,32 @@ function withReviewFeedback(reason: string, changes?: string): string {
   return `${reason}: ${summary}`;
 }
 
-function logTaskCommit(workspace: string, progress: string, id: string, title: string, cfg: Config): void {
+function logTaskCommit(
+  workspace: string,
+  progress: string,
+  id: string,
+  title: string,
+  cfg: Config,
+  base?: string | null,
+): void {
   const before = headCommit(workspace);
-  git(workspace, "add", "-A");
   // function replacers: a literal id/title is used verbatim (a "$&"/"$1" in a
   // task title must not be interpreted as a replacement pattern).
   const msg = (cfg.commit_message_template || "{id}: {title}").replace(/{id}/g, () => id).replace(/{title}/g, () => title);
-  git(workspace, "commit", "-m", msg);
+  // Stage only what THIS task moved. `git add -A` also swept up whatever the
+  // user happened to have uncommitted when the run started, putting their
+  // unrelated work in a commit named after a task that never touched it — and
+  // the review that approved this commit never saw those files either.
+  const paths = taskChangedPaths(workspace, base);
+  if (paths?.length === 0) return; // nothing moved: no empty commit, nothing to log
+  if (!paths || !commitPaths(workspace, paths, msg)) {
+    // null = no baseline to scope against (no repo yet). A FAILED scoped stage is
+    // different: the executor staged a rename or deletion despite being told not
+    // to, so say so — this is the commit that can still swallow unrelated work.
+    if (paths) log(progress, t("loop.log.commitUnscoped", { id }));
+    git(workspace, "add", "-A");
+    git(workspace, "commit", "-m", msg);
+  }
   const after = headCommit(workspace);
   if (after && after !== before) log(progress, t("loop.log.committed", { id, hash: shortHash(after) }));
 }

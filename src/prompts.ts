@@ -52,6 +52,10 @@ ${task.acceptance.map((a) => "- " + a).join("\n")}
 Rules:
 - Do ONLY this task. Do not start, refactor, or "improve" other tasks.
 - Never touch prd.json, progress.md, or ralph.config.json — loop control files.
+- Do NOT run \`git add\` or \`git commit\`. Leave your work as uncommitted changes
+  in the workspace: the loop stages and commits exactly this task's files once it
+  passes, under the project's own commit convention. Committing yourself splits
+  one task across several commits and leaves them behind even when it fails.
 - Explore the existing workspace first, then implement.
 - Run the build/tests yourself to confirm acceptance before finishing.
 - NOBODY is reading your output and NOBODY can reply to you. Asking for
@@ -118,8 +122,16 @@ ${standardsBlock(standards)}
 ${diff}`;
 }
 
+/**
+ * Only the two documented shapes approve. Anything else — empty, prose, a
+ * refusal — is NOT an approval: a gate that could not read the verdict has
+ * judged nothing, and defaulting to APPROVE is how an off-format reply used to
+ * mark a task done. `changes` is empty in that case on purpose (advisor.ts logs
+ * the raw text): there is nothing concrete to hand the executor, so the fix loop
+ * stops instead of spending its rounds on an answer nobody could parse.
+ */
 export function parseReview(verdict: string): { approved: boolean; changes: string } {
-  if (!verdict) return { approved: true, changes: "" };
+  if (!verdict) return { approved: false, changes: "" };
   if (verdict.trim().toUpperCase().startsWith("APPROVE")) {
     return { approved: true, changes: "" };
   }
@@ -131,5 +143,5 @@ export function parseReview(verdict: string): { approved: boolean; changes: stri
     const changes = (colon === -1 ? "" : rest.slice(colon + 1)).trim().slice(0, 4000);
     return { approved: false, changes };
   }
-  return { approved: true, changes: "" };
+  return { approved: false, changes: "" };
 }

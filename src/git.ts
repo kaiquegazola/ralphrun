@@ -7,6 +7,13 @@ import { tmpdir } from "node:os";
 
 const MAX_REVIEW_DIFF_CHARS = 12_000;
 
+// A silently cut diff reads as a whole one: the reviewer approves what it never
+// saw and reports full confidence. Saying so costs a line and is the difference
+// between a partial review and a wrong one.
+const DIFF_TRUNCATED_NOTE =
+  `\n\n[TRUNCATED at ${MAX_REVIEW_DIFF_CHARS} characters — this is a PARTIAL view of the change. ` +
+  "Judge only what is shown above; do NOT treat the omitted part as reviewed.]";
+
 // Lockfiles are often large and ordered before source files. They do not help an
 // acceptance review, but can otherwise consume the complete prompt budget.
 const REVIEW_DIFF_PATHSPEC = [
@@ -23,8 +30,20 @@ const REVIEW_DIFF_PATHSPEC = [
   ":(exclude)bun.lockb",
 ];
 
-export function git(workspace: string, ...args: string[]): void {
-  spawnSync("git", args, { cwd: workspace, stdio: "ignore" });
+export function git(workspace: string, ...args: string[]): number | null {
+  return spawnSync("git", args, { cwd: workspace, stdio: "ignore" }).status;
+}
+
+/**
+ * Same, with the pathspec on stdin. A task can touch more files than an argv
+ * holds, and NUL separation is the only form safe for every filename.
+ */
+function gitWithPathspec(workspace: string, paths: string[], ...args: string[]): number | null {
+  return spawnSync("git", [...args, "--pathspec-from-file=-", "--pathspec-file-nul"], {
+    cwd: workspace,
+    input: paths.map((p) => p + "\0").join(""),
+    stdio: ["pipe", "ignore", "ignore"],
+  }).status;
 }
 
 export function headCommit(workspace: string): string | null {
@@ -57,8 +76,48 @@ export function captureDiff(workspace: string, base?: string | null): string {
     const baseArgs = base ? [base] : [];
     const stat = runWithIndex(workspace, index, ["diff", "--cached", "--stat", ...baseArgs, ...REVIEW_DIFF_PATHSPEC]).stdout;
     const full = runWithIndex(workspace, index, ["diff", "--cached", ...baseArgs, ...REVIEW_DIFF_PATHSPEC]).stdout;
-    return (stat + "\n\n" + full).slice(0, MAX_REVIEW_DIFF_CHARS);
+    const body = stat + "\n\n" + full;
+    return body.length <= MAX_REVIEW_DIFF_CHARS ? body : body.slice(0, MAX_REVIEW_DIFF_CHARS) + DIFF_TRUNCATED_NOTE;
   });
+}
+
+/**
+ * Every path that differs from `base` — the task's OWN footprint, which is what
+ * separates its work from whatever the user already had dirty when it started.
+ *
+ * `null` means "cannot be computed" (no repo, no base, git failed); a caller
+ * must read that as "no scoping possible", never as "nothing changed".
+ *
+ * --no-renames on purpose: rename detection reports only the new path, so the
+ * old path's deletion would never make it into the commit.
+ */
+export function taskChangedPaths(workspace: string, base?: string | null): string[] | null {
+  if (!base || !existsSync(workspace + "/.git")) return null;
+  return withTemporaryIndex(workspace, (index) => {
+    stageWorktree(workspace, index);
+    const res = runWithIndex(workspace, index, ["diff", "--cached", "--name-only", "--no-renames", "-z", base, "--", "."]);
+    if (res.status !== 0 || typeof res.stdout !== "string") return null;
+    return res.stdout.split("\0").filter((p) => p !== "");
+  });
+}
+
+/**
+ * Stage and commit ONLY `paths`. Whatever the user had uncommitted when the task
+ * began is not in that list, so it stays in the worktree instead of being
+ * swallowed by a commit labelled with this task's name.
+ *
+ * false = the scoped stage failed and NOTHING was committed, so the caller can
+ * fall back. It fails when a path is in neither the worktree nor the index —
+ * only reachable if the executor staged a rename or deletion itself, which the
+ * task prompt tells it not to do.
+ */
+export function commitPaths(workspace: string, paths: string[], message: string): boolean {
+  // -A so a path the task DELETED still stages as a removal
+  if (gitWithPathspec(workspace, paths, "add", "-A") !== 0) return false;
+  // scoped again on commit: a path the USER staged before the run must not ride
+  // along just because it was sitting in the index
+  gitWithPathspec(workspace, paths, "commit", "-m", message);
+  return true;
 }
 
 function withTemporaryIndex<T>(workspace: string, fn: (index: string) => T): T {

@@ -230,6 +230,36 @@ describe("runTask CROSS", () => {
     const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
     expect(result.ok).toBe(true);
   });
+
+  // A reviewer that could not answer gives the executor nothing to fix, so the
+  // fix loop must stop on the spot rather than re-running a dead reviewer for
+  // every remaining round — and the task must NOT come back done.
+  it("a not-approved review with no actionable changes fails fast, without more rounds", async () => {
+    mReview.mockResolvedValue({ approved: false, changes: "", diff: "d" });
+    mFeedback.mockReturnValue(""); // exec ok + tests ok + nothing to say about the review
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result).toMatchObject({ ok: false, reason: "review_exhausted" });
+    expect(mExec).toHaveBeenCalledTimes(1); // no fix round was attempted
+    expect(mReview).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runTask unverified warning", () => {
+  // no verify command and no reviewer: "done" means only "the executor exited 0"
+  it("warns when neither gate exists", async () => {
+    await runTask({ ...task, verify: undefined }, prd, cfg({ advisor: null }), "/ws", "/prog");
+    expect(mLog).toHaveBeenCalledWith("/prog", expect.stringContaining("no verify command and no reviewer"));
+  });
+
+  it("stays quiet when a verify command exists", async () => {
+    await runTask({ ...task, verify: "npm test" }, prd, cfg({ advisor: null }), "/ws", "/prog");
+    expect(mLog).not.toHaveBeenCalledWith("/prog", expect.stringContaining("no verify command"));
+  });
+
+  it("stays quiet when a reviewer exists", async () => {
+    await runTask({ ...task, verify: undefined }, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(mLog).not.toHaveBeenCalledWith("/prog", expect.stringContaining("no verify command"));
+  });
 });
 
 describe("runTask RunEvents (spy the bus)", () => {

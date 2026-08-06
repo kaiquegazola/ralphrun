@@ -121,22 +121,13 @@ export async function advisorReview(
 ): Promise<AdvisorReviewResult> {
   // The reviewer is a GATE, so "no verdict" is not a verdict. Each branch below
   // used to return approved:true, which is how a task reached `done` with
-  // NOTHING having judged it: no diff to read, a dead reviewer, or an answer in
-  // neither format all counted as an approval.
+  // NOTHING having judged it: a dead reviewer, or an answer in neither format,
+  // both counted as an approval.
   const diff = captureDiff(workspace, reviewBase);
-  if (!diff.trim()) {
-    // Actionable, so it goes to the executor as fix-loop feedback: an empty diff
-    // means the task produced no work, which is a failure it can act on.
-    log(progress, t("advisor.reviewNoDiff", { id: task.id }));
-    return {
-      approved: false,
-      changes:
-        "The review found NO changes in the workspace for this task. Implement it: edit the files " +
-        "its acceptance criteria require. If the work was genuinely already present and correct, " +
-        "say so explicitly in your final message instead of finishing silently.",
-      diff,
-    };
-  }
+  // An empty diff is NOT decided here: whether a task can be satisfied with no
+  // change is a judgement about that task, so the reviewer makes it (the prompt
+  // says what it is looking at). Only the spawn is unconditional now.
+  if (!diff.trim()) log(progress, t("advisor.reviewNoDiff", { id: task.id }));
   const prompt = reviewPrompt(task, prd, standards, diff);
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review");
   if (out === null) {

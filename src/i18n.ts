@@ -107,7 +107,7 @@ const en = {
   "advisor.failed": "  {id}: advisor failed — continuing without",
   "advisor.advice": "  {id}: advisor {agent} → {n} chars",
   "advisor.reviewFailed": "  {id}: review failed to answer — NOT approving",
-  "advisor.reviewNoDiff": "  {id}: review found no changes in the workspace — NOT approving",
+  "advisor.reviewNoDiff": "  {id}: executor changed nothing — asking the reviewer whether this task needed a change",
   "advisor.reviewUnparsed": "  {id}: review answered neither APPROVE nor CHANGES — NOT approving. It said: {out}",
 
   // wizard.ts
@@ -394,7 +394,7 @@ const ptBr: Record<MsgKey, string> = {
   "advisor.failed": "  {id}: advisor falhou — continuando sem",
   "advisor.advice": "  {id}: advisor {agent} → {n} caracteres",
   "advisor.reviewFailed": "  {id}: review não respondeu — NÃO aprovando",
-  "advisor.reviewNoDiff": "  {id}: review não encontrou mudanças no workspace — NÃO aprovando",
+  "advisor.reviewNoDiff": "  {id}: executor não mudou nada — perguntando ao reviewer se esta task exigia mudança",
   "advisor.reviewUnparsed": "  {id}: review não respondeu nem APPROVE nem CHANGES — NÃO aprovando. Ele disse: {out}",
 
   "wizard.nontty.exists":

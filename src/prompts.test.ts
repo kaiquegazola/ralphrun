@@ -141,9 +141,21 @@ describe("injectAdvice", () => {
 describe("reviewPrompt", () => {
   it("includes diff and acceptance", () => {
     const out = reviewPrompt(task, prd, "STD", "the diff");
+    expect(out).toContain("## Diff");
     expect(out).toContain("the diff");
     expect(out).toContain("- a1");
     expect(out).toContain("Project standards");
+    expect(out).not.toContain("No diff");
+  });
+
+  // the reviewer decides whether "no change" satisfies the task, so it has to be
+  // told that is what it is looking at — an empty ## Diff section reads as a bug
+  it("explains an empty diff instead of showing an empty section", () => {
+    const out = reviewPrompt(task, prd, "STD", "   ");
+    expect(out).toContain("## No diff");
+    expect(out).toContain("made NO changes");
+    expect(out).toContain("is NOT evidence that the work was already done");
+    expect(out).toContain("- a1"); // still judged against the same acceptance
   });
 });
 

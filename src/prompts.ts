@@ -105,21 +105,42 @@ export function injectAdvice(prompt: string, advice: string): string {
   );
 }
 
+/**
+ * What the reviewer sees INSTEAD of a diff when the executor changed nothing.
+ *
+ * The loop used to settle this case by itself — first as an approval (which
+ * marked tasks done with nothing written), then as a rejection (which blocks
+ * every task that legitimately needs no change). Neither is the loop's call:
+ * whether "no change" satisfies the acceptance depends on what the task asked
+ * for, so it goes to the reviewer on the same APPROVE / CHANGES contract as any
+ * other verdict, and the fail-closed handling of a missing or unreadable answer
+ * applies here too.
+ */
+const NO_DIFF_NOTICE = `The executor made NO changes to the workspace — there is no diff to read.
+
+Decide whether that is correct for THIS task. APPROVE only if its acceptance can hold with no
+change at all, which is the case when the task asks to confirm, check or verify something that
+already works. Otherwise reply CHANGES naming what the task still requires.
+
+An unchanged workspace is NOT evidence that the work was already done: if the task asks for
+anything to be built, changed, fixed or removed, no diff means it did not happen.`;
+
 export function reviewPrompt(task: Task, prd: PRD, standards: string, diff: string): string {
   return `You are a senior REVIEWER. Do NOT write code or use tools — reply with text ONLY.
 
-Below is the acceptance criteria for a task and the diff an executor produced.
+Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.
 
 Reply with EXACTLY one of:
   APPROVE
   CHANGES: <short bullet list of the required fixes>
 
+Task ${task.id} — ${task.title}: ${task.description}
+
 Acceptance:
 ${task.acceptance.map((a) => "- " + a).join("\n")}
 ${standardsBlock(standards)}
-## Diff
-${diff}`;
+${diff.trim() ? `## Diff\n${diff}` : `## No diff\n${NO_DIFF_NOTICE}`}`;
 }
 
 /**

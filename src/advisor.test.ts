@@ -119,15 +119,19 @@ describe("getAdvice", () => {
 });
 
 describe("advisorReview", () => {
-  // an empty diff means the task produced no work — approving it is how a task
-  // reached `done` with nothing having been written, let alone reviewed
-  it("rejects an empty diff without spawning, with feedback the executor can act on", async () => {
+  // Whether a task can be satisfied with no change at all is a judgement about
+  // that task, so it goes to the reviewer like any other verdict — the loop
+  // neither approves it (done with nothing written) nor rejects it (blocking
+  // every task that legitimately needs no change).
+  it("still asks the reviewer when the diff is empty, and honours its verdict", async () => {
     diffMock.mockReturnValue("   ");
-    const r = await advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
-    expect(r.approved).toBe(false);
-    expect(r.changes).toContain("NO changes");
-    expect(spawnMock).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("no changes"));
+    vi.mocked(parseReview).mockReturnValueOnce({ approved: true, changes: "" });
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    expect(await p).toEqual({ approved: true, changes: "", diff: "   " });
+    expect(spawnMock).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("changed nothing"));
   });
 
   it("delegates to parseReview on success", async () => {

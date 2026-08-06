@@ -292,12 +292,16 @@ Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
   **only the paths that task changed** — measured against a snapshot taken when
   it started — so files you already had uncommitted stay yours instead of
   landing in a commit named after a task that never touched them.
-- **The review gate fails closed**: an empty diff, a reviewer that timed out or
-  crashed, and an answer that is neither `APPROVE` nor `CHANGES` all count as
-  *not approved*. Each used to pass as an approval, which let a task reach
-  `done` with nothing having judged it. A task blocked this way is offered for
-  manual approval in the TUI (only if its tests passed) and the reason is in
-  `progress.md`.
+- **The review gate fails closed**: a reviewer that timed out or crashed, and an
+  answer that is neither `APPROVE` nor `CHANGES`, both count as *not approved*.
+  Each used to pass as an approval, which let a task reach `done` with nothing
+  having judged it. A task blocked this way is offered for manual approval in
+  the TUI (only if its tests passed) and the reason is in `progress.md`.
+- **An empty diff is the reviewer's call**: when the executor changes nothing,
+  the review still runs — it is told there is no diff and decides whether this
+  task's acceptance can hold without one. A task that only asks to confirm
+  something already works can be approved; one that asks for work to be done
+  cannot.
 - **Truncated review diffs say so**: the diff handed to the reviewer is capped,
   and now carries an explicit marker when it was cut, so an approval is never
   given over a change the reviewer only half saw.

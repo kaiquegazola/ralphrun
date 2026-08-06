@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import { buildCmd, promptViaStdin } from "./adapters.js";
 import { agentDef } from "./agents.js";
 import type { AgentSpec, Config } from "./config.js";
+import { runCursorSdkExecutor } from "./cursor-sdk.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { Task } from "./prd.js";
@@ -33,6 +34,9 @@ export function runExecutor(
   extra: string[] = [],
   signal?: AbortSignal,
 ): Promise<boolean> {
+  // in-process backend: it owns its own heartbeat and marker classification,
+  // because there is no child process to attach readline to
+  if (agentDef(execu.cli)?.sdk) return runCursorSdkExecutor(execu, prompt, cfg, workspace, progress, task, signal);
   return new Promise((resolve) => {
     // Streaming is for the EXECUTOR only. The advisor's stdout IS its answer
     // (advisor.ts parses it), so turning its output into events would feed the

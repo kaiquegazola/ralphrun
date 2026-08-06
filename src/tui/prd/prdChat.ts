@@ -7,6 +7,8 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 
 import { buildCmd, promptViaStdin } from "../../adapters.js";
+import { agentDef } from "../../agents.js";
+import { runCursorSdk } from "../../cursor-sdk.js";
 import { killTree, releasePipes, spawn, writePrompt } from "../../spawn.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
@@ -119,11 +121,34 @@ function parseReply(text: string): PlannerResult {
   return { summary, prd: parsed as PRD, errors: [] };
 }
 
+// An in-process backend has no argv and no child to kill: buildCmd would throw,
+// and a throw here rejects the turn promise, which mount.ts turns into a DEAD
+// wizard (unsaved PRD and all). Its final answer is what the spawn path
+// accumulates from stdout, so the parse below is identical.
+async function runPlannerSdkTurn(args: PlannerTurnArgs, prompt: string): Promise<PlannerResult> {
+  const out = await runCursorSdk({
+    model: args.model,
+    prompt,
+    cwd: args.cwd,
+    timeoutSecs: TIMEOUT_MS / 1000,
+    mode: "plan", // chat-only, same posture as buildCmd(..., autoApprove: false)
+    signal: args.signal,
+    onEvent: (ev) => {
+      if (ev.text) for (const line of ev.text.split("\n")) args.onChunk(line);
+    },
+  });
+  // an abort is a cancellation, not a failed turn — same empty settle as onAbort
+  if (out.status === "aborted") return { summary: "", prd: null, errors: [] };
+  if (out.status === "finished") return parseReply(out.result);
+  return { summary: "", prd: null, errors: [out.error || NO_JSON()] };
+}
+
 export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
+  // planner is chat-only: NO auto-approve flags, so a studio turn can never
+  // grant the agent permission to write to disk.
+  const prompt = buildPrompt(args);
+  if (agentDef(args.cli)?.sdk) return runPlannerSdkTurn(args, prompt);
   return new Promise((resolve) => {
-    // planner is chat-only: NO auto-approve flags, so a studio turn can never
-    // grant the agent permission to write to disk.
-    const prompt = buildPrompt(args);
     const cmd = buildCmd(args.cli, prompt, args.model, args.cwd, false);
     // NOT spawn's own `signal` option: node aborts with a SIGTERM to the direct
     // child, which leaves the agent's descendants running. killTree takes the

@@ -13,6 +13,8 @@ export function buildCmd(
 ): string[] {
   const def = agentDef(cli);
   if (!def) throw new Error(`unknown cli: ${cli}`);
+  // an in-process backend (see cursor-sdk.ts) has no argv at all
+  if (!def.buildCmd) throw new Error(`${cli} has no command line: it runs in-process`);
   // A stdin cli gets an EMPTY prompt in the argv — the caller pipes the real
   // one in. Keeping it out of the command line is what lets a 25k review prompt
   // survive Windows, where a .cmd shim goes through cmd.exe's ~8191 char limit.

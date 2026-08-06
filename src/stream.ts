@@ -41,8 +41,32 @@ export interface StreamEvent {
 // per line would burn CPU for output nobody can read anyway
 const MAX_EVENT_CHARS = 256_000;
 
+/**
+ * The blocks of an assistant turn, rendered and classified. Shared with
+ * cursor-sdk.ts: both harnesses emit the same content shape, and a second copy
+ * of this drifts the moment one of them is fixed.
+ */
+export function assistantEvent(content: unknown): StreamEvent {
+  if (!Array.isArray(content)) return { text: "", activity: true };
+  const out: string[] = [];
+  let prose = false;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue; // a null entry is valid JSON
+    const b = block as Record<string, unknown>;
+    if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
+      out.push(b.text);
+      prose = true;
+    } else if (b.type === "tool_use" && typeof b.name === "string") {
+      out.push(toolSummary(b.name, b.input));
+    }
+    // "thinking" is deliberately dropped: it is long, it is not the
+    // agent's answer, and echoing it would bury the actual work
+  }
+  return { text: out.join("\n"), prose, activity: true };
+}
+
 /** a tool call rendered compactly: the arg that says WHICH thing it touched */
-function toolSummary(name: string, input: unknown): string {
+export function toolSummary(name: string, input: unknown): string {
   const arg = summarizeToolInput(input);
   return arg ? `→ ${name}(${arg})` : `→ ${name}`;
 }
@@ -108,25 +132,8 @@ export function parseClaudeStream(line: string): StreamEvent | null {
   }
 
   switch (ev.type) {
-    case "assistant": {
-      const content = (ev.message as { content?: unknown[] } | undefined)?.content;
-      if (!Array.isArray(content)) return { text: "", activity: true };
-      const out: string[] = [];
-      let prose = false;
-      for (const block of content) {
-        if (!block || typeof block !== "object") continue; // a null entry is valid JSON
-        const b = block as Record<string, unknown>;
-        if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
-          out.push(b.text);
-          prose = true;
-        } else if (b.type === "tool_use" && typeof b.name === "string") {
-          out.push(toolSummary(b.name, b.input));
-        }
-        // "thinking" is deliberately dropped: it is long, it is not the
-        // agent's answer, and echoing it would bury the actual work
-      }
-      return { text: out.join("\n"), prose, activity: true };
-    }
+    case "assistant":
+      return assistantEvent((ev.message as { content?: unknown[] } | undefined)?.content);
     case "result": {
       const final = typeof ev.result === "string" ? ev.result : "";
       // A FAILED result is the only place the reason lives, so it is shown.

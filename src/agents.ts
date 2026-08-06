@@ -30,7 +30,14 @@ export interface AgentDef {
   /** wizard/picker display name */
   label: string;
   /** executable on PATH */
-  bin: string;
+  bin?: string;
+  /**
+   * This backend is driven IN-PROCESS through an SDK: no binary on PATH, no
+   * argv. Set it and `bin`/`buildCmd` are meaningless — executor.ts and
+   * advisor.ts route past the spawn path, diagnostics.ts stops looking for a
+   * binary, and adapters.buildCmd throws instead of calling a missing method.
+   */
+  sdk?: true;
   /** model used when the user names the cli with no model ("claude" -> "sonnet"). "" = let the CLI decide. */
   defaultModel: string;
   /** models offered in the pickers (first-class list; a user can still type any model) */
@@ -38,7 +45,7 @@ export interface AgentDef {
   /** per-role pick highlighted as "recommended" (and sorted first) */
   recommended: Partial<Record<AgentRole, string>>;
   /** headless invocation */
-  buildCmd(a: BuildCmdArgs): string[];
+  buildCmd?(a: BuildCmdArgs): string[];
   /**
    * Server-side advisor: extra args that make THIS cli consult an advisor model
    * mid-task, in one call. Present = the cli supports NATIVE mode. Absent = CROSS.
@@ -194,6 +201,42 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
         const out = execSync(`${bin} status`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
         return !out.includes("Not logged in");
       },
+    },
+  },
+
+  cursorsdk: {
+    label: "Cursor SDK (in-process)",
+    // No binary and no argv: this one is driven through the optional
+    // @cursor/sdk package (see cursor-sdk.ts). The `cursor` CLI entry above is
+    // unaffected — these are siblings, not a replacement.
+    sdk: true,
+    defaultModel: "composer-2",
+    // SDK model ids are NOT the `cursor:` CLI ids (CLI "cursor-grok-4.5-high"
+    // is SDK "grok-4.5"). Only these two have actually been observed working,
+    // so the list stays short: a stale/invented id hard-fails EVERY task with
+    // "Cannot use this model". Any other id can still be typed via the
+    // "custom" picker, and Cursor.models.list() enumerates the real set.
+    //
+    // The bracket suffix is a variant pin parsed by parseCursorModelSpec. With
+    // no params Cursor picks the model's DEFAULT variant, which for grok-4.5 is
+    // the FAST tier at ~2x the standard rate.
+    models: [
+      { value: "composer-2", label: "Composer 2" },
+      { value: "grok-4.5[fast=false,effort=high]", label: "Grok 4.5 (standard tier, high effort)" },
+    ],
+    // All three roles run in-process: executor.ts, advisor.ts and prdChat.ts each
+    // branch on `sdk` before they build a command line.
+    recommended: {
+      planner: "composer-2",
+      executor: "composer-2",
+      advisor: "grok-4.5[fast=false,effort=high]",
+    },
+    auth: {
+      loginCommand: "export CURSOR_API_KEY=<key from cursor.com/dashboard>",
+      // The SDK accepts an API KEY only — a `cursor-agent login` session does
+      // NOT work for it. Reading the env var is the whole probe: no import, no
+      // network. `bin` is ignored (there isn't one).
+      check: () => !!process.env.CURSOR_API_KEY?.trim(),
     },
   },
 

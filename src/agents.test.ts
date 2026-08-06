@@ -21,10 +21,16 @@ describe("registry completeness", () => {
   it.each(agentClis)("%s declares every field a consumer reads", (cli) => {
     const def = AGENTS[cli];
     expect(def.label).toBeTruthy();
-    expect(def.bin).toBeTruthy();
     expect(typeof def.defaultModel).toBe("string"); // "" is valid: let the cli decide
     expect(def.models.length).toBeGreaterThan(0);
-    expect(typeof def.buildCmd).toBe("function");
+    if (def.sdk) {
+      // an in-process backend has no binary and no argv — cursor-sdk.ts drives it
+      expect(def.bin).toBeUndefined();
+      expect(def.buildCmd).toBeUndefined();
+    } else {
+      expect(def.bin).toBeTruthy();
+      expect(typeof def.buildCmd).toBe("function");
+    }
   });
 
   it.each(agentClis)("%s recommends a REAL model for every role", (cli) => {
@@ -44,7 +50,8 @@ describe("registry completeness", () => {
   });
 
   it.each(agentClis)("%s buildCmd starts with its binary and carries the prompt", (cli) => {
-    const cmd = AGENTS[cli].buildCmd({
+    if (AGENTS[cli].sdk) return; // no argv to build (adapters.test.ts pins the throw instead)
+    const cmd = AGENTS[cli].buildCmd!({
       bin: binOf(cli),
       prompt: "P",
       model: "M",
@@ -68,7 +75,7 @@ describe("model names containing spaces", () => {
   });
 
   it.each(spaced)("%s passes %s to the cli as a single argument", (cli, model) => {
-    const cmd = AGENTS[cli].buildCmd({ bin: binOf(cli), prompt: "P", model, cwd: "/w", autoApprove: true });
+    const cmd = AGENTS[cli].buildCmd!({ bin: binOf(cli), prompt: "P", model, cwd: "/w", autoApprove: true });
     expect(cmd).toContain(model);
     expect(cmd.filter((a) => a.includes("Gemini") || a.includes("Claude") || a.includes("GPT-OSS"))).toHaveLength(1);
   });
@@ -106,6 +113,7 @@ describe("native advisor is a capability, not a hardcoded cli name", () => {
     expect(supportsNativeAdvisor("claude", "claude")).toBe(true);
     expect(supportsNativeAdvisor("claude", "codex")).toBe(false); // different clis → CROSS
     expect(supportsNativeAdvisor("cursor", "cursor")).toBe(false); // same cli, no server-side advisor
+    expect(supportsNativeAdvisor("cursorsdk", "cursorsdk")).toBe(false);
     expect(supportsNativeAdvisor("claude", null)).toBe(false); // no advisor at all
     expect(supportsNativeAdvisor("claude", undefined)).toBe(false);
     expect(supportsNativeAdvisor("nope", "nope")).toBe(false); // unknown cli

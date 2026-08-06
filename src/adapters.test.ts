@@ -54,6 +54,11 @@ describe("buildCmd", () => {
   it("unknown cli throws", () => {
     expect(() => buildCmd("nope", "P", "", "/w", false)).toThrow("unknown cli: nope");
   });
+  // a registered cli with no argv is a DIFFERENT problem than a typo, so it must
+  // not be reported as "unknown cli"
+  it("an in-process backend throws its own error", () => {
+    expect(() => buildCmd("cursorsdk", "P", "composer-2", "/w", false)).toThrow("has no command line");
+  });
 });
 
 describe("promptViaStdin", () => {
@@ -64,7 +69,7 @@ describe("promptViaStdin", () => {
     expect(promptViaStdin("codex")).toBe(true);
   });
   it("is false for clis that only take a positional prompt", () => {
-    for (const cli of ["grok", "cursor", "opencode", "agy"]) expect(promptViaStdin(cli)).toBe(false);
+    for (const cli of ["grok", "cursor", "cursorsdk", "opencode", "agy"]) expect(promptViaStdin(cli)).toBe(false);
   });
   it("is false for an unknown cli", () => {
     expect(promptViaStdin("nope")).toBe(false);

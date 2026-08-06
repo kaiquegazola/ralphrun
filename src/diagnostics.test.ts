@@ -1,17 +1,30 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("which", () => ({ default: { sync: vi.fn() } }));
 vi.mock("node:child_process", () => ({ execSync: vi.fn() }));
+// the optional @cursor/sdk is deliberately not installed here, so the real
+// resolve() would answer "no" for every case
+vi.mock("./cursor-sdk.js", () => ({ cursorSdkInstalled: vi.fn(() => true) }));
 
 import which from "which";
 import { execSync } from "node:child_process";
+import { cursorSdkInstalled } from "./cursor-sdk.js";
 import { checkAgent, checkAllAgents } from "./diagnostics.js";
 
 const whichSync = vi.mocked(which.sync);
 const exec = vi.mocked(execSync);
+const sdkInstalled = vi.mocked(cursorSdkInstalled);
+
+const origKey = process.env.CURSOR_API_KEY;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sdkInstalled.mockReturnValue(true);
+});
+
+afterEach(() => {
+  if (origKey === undefined) delete process.env.CURSOR_API_KEY;
+  else process.env.CURSOR_API_KEY = origKey;
 });
 
 describe("checkAgent", () => {
@@ -76,6 +89,33 @@ describe("checkAgent", () => {
     expect(d.loggedIn).toBe(false);
   });
 
+  // an in-process backend has no binary: probing PATH for it would report every
+  // install as broken
+  it("cursorsdk: installed without any binary on PATH", () => {
+    whichSync.mockReturnValue(null as any);
+    process.env.CURSOR_API_KEY = "k";
+    expect(checkAgent("cursorsdk")).toEqual({
+      cli: "cursorsdk",
+      installed: true,
+      loggedIn: true,
+      loginCommand: "export CURSOR_API_KEY=<key from cursor.com/dashboard>",
+    });
+    expect(whichSync).not.toHaveBeenCalled();
+  });
+
+  it("cursorsdk: not logged in without CURSOR_API_KEY", () => {
+    delete process.env.CURSOR_API_KEY;
+    expect(checkAgent("cursorsdk").loggedIn).toBe(false);
+  });
+
+  // preflight has to fail here, or every task in the PRD burns its full retry
+  // budget on the same missing import
+  it("cursorsdk: not installed when the optional package is missing", () => {
+    sdkInstalled.mockReturnValue(false);
+    process.env.CURSOR_API_KEY = "k";
+    expect(checkAgent("cursorsdk")).toEqual({ cli: "cursorsdk", installed: false, loggedIn: "unknown" });
+  });
+
   it("grok: installed but auth unknown (no status probe)", () => {
     whichSync.mockReturnValue("/bin/grok" as any);
     const d = checkAgent("grok");
@@ -90,6 +130,8 @@ describe("checkAllAgents", () => {
     whichSync.mockReturnValue("/bin/x" as any);
     exec.mockReturnValue("" as any);
     const all = checkAllAgents();
-    expect(all.map((a) => a.cli)).toEqual(["agy", "claude", "grok", "cursor", "codex", "opencode"]);
+    expect(all.map((a) => a.cli)).toEqual([
+      "agy", "claude", "grok", "cursor", "cursorsdk", "codex", "opencode",
+    ]);
   });
 });

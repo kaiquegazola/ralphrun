@@ -134,10 +134,11 @@ ralphrun config edit        # Clack wizard over the key knobs
 ```
 
 - Flags override the file: `--executor cli:model`, `--advisor cli:model|none`.
-- `cli` is `claude`, `grok`, `cursor`, `codex`, `agy`, or `opencode`. **To add
-  another, add one entry to `AGENTS` in `src/agents.ts`** — the registry is the
-  single source of truth, and the adapters, preflight, pickers and NATIVE/CROSS
-  routing all derive from it.
+- `cli` is `claude`, `grok`, `cursor`, `cursorsdk`, `codex`, `agy`, or
+  `opencode`. **To add another, add one entry to `AGENTS` in `src/agents.ts`** —
+  the registry is the single source of truth, and the adapters, preflight,
+  pickers and NATIVE/CROSS routing all derive from it. (An in-process backend
+  like `cursorsdk` also needs a runner module: it has no argv to build.)
 - Model shorthand: `--executor grok` → `grok:grok-4.5`, `--executor claude` →
   `claude:sonnet`. `--executor cursor` / `codex` / `agy` / `opencode` (no model)
   lets that CLI pick its own default.
@@ -169,6 +170,10 @@ The CLIs you name must be installed and logged in:
   with a NATIVE advisor today.
 - `grok` — Grok CLI (`x.ai/cli`), browser login.
 - `cursor` — Cursor CLI (`cursor-agent` via `cursor.com/install`). Router CLI.
+- `cursorsdk` — the same Cursor agent, but driven **in-process** through the
+  optional [`@cursor/sdk`](https://www.npmjs.com/package/@cursor/sdk) package
+  instead of spawning `cursor-agent`. See below; it is not a drop-in for
+  `cursor` and needs its own setup.
 - `codex` — Codex CLI (`codex exec`).
 - `agy` — Antigravity CLI. Model names contain spaces — quote them
   (`--advisor "agy:Claude Opus 4.6 (Thinking)"`).
@@ -177,9 +182,45 @@ The CLIs you name must be installed and logged in:
   Auth is per-provider, so login is reported "unknown" like grok/agy/codex.
 
 Preflight fails fast if a named CLI isn't on PATH, with a clear message instead
-of burning every task's retry budget. Login is only *verified* for `claude` and
-`cursor` — the others have no reliable headless auth probe, so they report
+of burning every task's retry budget. `cursorsdk` has no binary, so preflight
+checks that its package resolves instead (by resolution only — it is never
+imported or run there). Login is only *verified* for `claude`, `cursor` and
+`cursorsdk` — the others have no reliable headless auth probe, so they report
 "unknown" and are never blocked on it.
+
+### `cursorsdk` — Cursor in-process (optional)
+
+Same agent as `cursor`, no per-call process boot, native cancel and typed
+events. **There is no benchmark of this backend yet** — the only measured number
+is that `cursor-agent --version` alone costs 1.07s per invocation, and ralphrun
+calls the executor up to `max_review_rounds + 1` times per task. Treat the
+speedup as unproven.
+
+Setup, all three parts required:
+
+```bash
+npm i -g @cursor/sdk          # drop the -g for a local checkout of ralphrun
+export CURSOR_API_KEY=<key from cursor.com/dashboard → Integrations>
+```
+
+- The package is an **optional peer dependency**: it is never installed for you
+  (~7.6MB of platform binaries plus a telemetry client), and it requires
+  **Node >= 22.13** while ralphrun itself runs on Node >= 20. Both problems
+  surface as the same error naming your Node version.
+- Auth is the **API key only**. An existing `cursor-agent login` session does
+  **not** work for the SDK.
+- **SDK model ids are not the `cursor:` CLI ids** — CLI `cursor-grok-4.5-high`
+  is SDK `grok-4.5`. A wrong id fails every task with "Cannot use this model".
+  `Cursor.models.list()` enumerates the real set.
+- Models take an optional variant pin: `cursorsdk:grok-4.5[fast=false,effort=high]`.
+  This is a **billing** knob — with no params Cursor picks the model's default
+  variant, which for some models (grok-4.5 among them) is the FAST tier at about
+  twice the standard rate. Running without one prints a warning once.
+
+Deferred: a fix round still sends a whole new prompt to a fresh agent, exactly
+like the CLI path. Reusing one conversation across rounds is the real win here,
+but the prompt for a fix round is built the same way for every cli, so it is not
+a `cursorsdk`-only change.
 
 ## Browser validation (optional)
 

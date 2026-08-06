@@ -5,6 +5,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 vi.mock("../../adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]), promptViaStdin: vi.fn(() => false) }));
+vi.mock("../../cursor-sdk.js", () => ({ runCursorSdk: vi.fn() }));
 // releasePipes stays REAL: it operates on the fake child's actual streams
 vi.mock("../../spawn.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../spawn.js")>()),
@@ -15,6 +16,7 @@ vi.mock("../../spawn.js", async (importOriginal) => ({
 import { promptViaStdin } from "../../adapters.js";
 import { killTree, spawn } from "../../spawn.js";
 import { buildCmd } from "../../adapters.js";
+import { runCursorSdk } from "../../cursor-sdk.js";
 import { runPlannerTurn, type PlannerTurnArgs } from "./prdChat.js";
 import type { PRD } from "../../prd.js";
 
@@ -323,4 +325,55 @@ it("spawn error -> prd null; a later close is a no-op (single-settle)", async ()
   proc.emit("close", 0); // settled guard: no-op
   const res = await p;
   expect(res).toEqual({ summary: "", prd: null, errors: ["failed to spawn planner"] });
+});
+
+// An in-process planner has no argv: buildCmd would throw, and a throw here
+// rejects the turn promise, which mount.ts turns into a DEAD wizard — taking
+// the unsaved PRD with it.
+describe("in-process planner", () => {
+  const sdkRun = runCursorSdk as unknown as Mock;
+  const turn = (onChunk = vi.fn()) =>
+    runPlannerTurn({
+      cli: "cursorsdk",
+      model: "composer-2",
+      cwd: "/w",
+      currentPrd: null,
+      history: [],
+      instruction: "x",
+      attachments: [],
+      onChunk,
+    });
+
+  it("parses the run result and never spawns", async () => {
+    sdkRun.mockImplementation(async (a: { onEvent: (e: { text: string }) => void }) => {
+      a.onEvent({ text: "" }); // renders nothing: not a chat chunk
+      a.onEvent({ text: "thinking out loud" });
+      return { status: "finished", result: "sum\n\n```json\n" + VALID_JSON + "\n```", error: "" };
+    });
+    const onChunk = vi.fn();
+    const res = await turn(onChunk);
+    expect(res.prd).toEqual(VALID);
+    expect(res.summary).toBe("sum");
+    expect(onChunk).toHaveBeenCalledExactlyOnceWith("thinking out loud");
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(buildCmdMock).not.toHaveBeenCalled();
+    expect(sdkRun.mock.calls[0][0]).toMatchObject({ model: "composer-2", cwd: "/w", mode: "plan" });
+  });
+
+  it("turns a failed run into a failed TURN, not a rejection", async () => {
+    sdkRun.mockResolvedValue({ status: "error", result: "", error: "boom" });
+    expect(await turn()).toEqual({ summary: "", prd: null, errors: ["boom"] });
+  });
+
+  it("reports a timeout (which carries no message) like unparseable output", async () => {
+    sdkRun.mockResolvedValue({ status: "timeout", result: "", error: "" });
+    const res = await turn();
+    expect(res.prd).toBeNull();
+    expect(res.errors).toHaveLength(1);
+  });
+
+  it("settles an aborted turn empty, same as a killed child", async () => {
+    sdkRun.mockResolvedValue({ status: "aborted", result: "", error: "" });
+    expect(await turn()).toEqual({ summary: "", prd: null, errors: [] });
+  });
 });

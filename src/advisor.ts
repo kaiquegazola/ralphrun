@@ -3,7 +3,9 @@
 import { createInterface } from "node:readline";
 
 import { buildCmd, promptViaStdin } from "./adapters.js";
+import { agentDef } from "./agents.js";
 import type { AgentSpec, Config } from "./config.js";
+import { runCursorSdkText } from "./cursor-sdk.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
@@ -24,13 +26,16 @@ export interface AdvisorReviewResult {
 
 function runAdvisorCli(
   advis: AgentSpec,
-  cmd: string[],
   prompt: string,
   cfg: Config,
   workspace: string,
   taskId: string,
   source: "advisor" | "review",
 ): Promise<string | null> {
+  // An in-process backend has no command line, and its RunResult IS the stdout
+  // the spawn path below accumulates — same contract, same return type.
+  if (agentDef(advis.cli)?.sdk) return runCursorSdkText(advis, prompt, cfg, workspace, taskId, source);
+  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false);
   return new Promise((resolve) => {
     try {
       const viaStdin = promptViaStdin(advis.cli);
@@ -94,8 +99,7 @@ export async function getAdvice(
   standards: string,
 ): Promise<string | null> {
   const prompt = advisorPrompt(task, prd, standards);
-  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false);
-  const advice = await runAdvisorCli(advis, cmd, prompt, cfg, workspace, task.id, "advisor");
+  const advice = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "advisor");
   if (advice === null) {
     log(progress, t("advisor.failed", { id: task.id }));
     return null;
@@ -118,8 +122,7 @@ export async function advisorReview(
   const diff = captureDiff(workspace, reviewBase);
   if (!diff.trim()) return { approved: true, changes: "", diff };
   const prompt = reviewPrompt(task, prd, standards, diff);
-  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false);
-  const out = await runAdvisorCli(advis, cmd, prompt, cfg, workspace, task.id, "review");
+  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review");
   if (out === null) {
     log(progress, t("advisor.reviewFailed", { id: task.id }));
     return { approved: true, changes: "", diff };

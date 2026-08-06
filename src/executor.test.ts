@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]), promptViaStdin: vi.fn(() => false) }));
 vi.mock("./log.js", () => ({ log: vi.fn() }));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
+vi.mock("./cursor-sdk.js", () => ({ runCursorSdkExecutor: vi.fn(async () => true) }));
 // releasePipes keeps its REAL implementation (it operates on the fake child's
 // actual streams) but is wrapped in a spy: "did we release?" cannot be probed
 // via stream.destroyed, because ending a PassThrough destroys it on its own.
@@ -19,6 +20,7 @@ import { promptViaStdin } from "./adapters.js";
 import { killTree, releasePipes, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { emit } from "./tui/events.js";
+import { runCursorSdkExecutor } from "./cursor-sdk.js";
 import { runExecutor } from "./executor.js";
 import type { AgentSpec, Config } from "./config.js";
 import type { Task } from "./prd.js";
@@ -568,4 +570,18 @@ describe("streaming mode", () => {
 
 
 
+});
+
+// there is no child process to attach readline to, so the whole spawn path is
+// bypassed — cursor-sdk.ts owns the heartbeat and the marker classification
+describe("in-process backend", () => {
+  it("routes a cursorsdk spec to the SDK runner and never spawns", async () => {
+    const sdkSpec: AgentSpec = { cli: "cursorsdk", model: "composer-2" };
+    const c = cfg();
+    const signal = new AbortController().signal;
+    expect(await runExecutor(sdkSpec, "prompt", c, "ws", "prog", task, [], signal)).toBe(true);
+    expect(runCursorSdkExecutor).toHaveBeenCalledTimes(1);
+    expect(runCursorSdkExecutor).toHaveBeenCalledWith(sdkSpec, "prompt", c, "ws", "prog", task, signal);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
 });

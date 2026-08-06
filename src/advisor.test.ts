@@ -6,6 +6,7 @@ vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["bin", "-p", "x"]), pro
 vi.mock("./log.js", () => ({ log: vi.fn() }));
 vi.mock("./git.js", () => ({ captureDiff: vi.fn() }));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
+vi.mock("./cursor-sdk.js", () => ({ runCursorSdkText: vi.fn(async () => "ADVICE") }));
 vi.mock("./prompts.js", () => ({
   advisorPrompt: vi.fn(() => "ap"),
   reviewPrompt: vi.fn(() => "rp"),
@@ -31,6 +32,7 @@ import { killTree, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { captureDiff } from "./git.js";
 import { parseReview } from "./prompts.js";
+import { runCursorSdkText } from "./cursor-sdk.js";
 import { getAdvice, advisorReview } from "./advisor.js";
 import { emit } from "./tui/events.js";
 import type { AgentSpec, Config } from "./config.js";
@@ -104,6 +106,15 @@ describe("getAdvice", () => {
     const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
     errorSpawn();
     expect(await p).toBeNull();
+  });
+
+  // an in-process advisor has no command line; its RunResult IS the string the
+  // spawn path would have accumulated from stdout
+  it("routes an sdk advisor to the SDK runner instead of spawning", async () => {
+    const sdk: AgentSpec = { cli: "cursorsdk", model: "composer-2" };
+    expect(await getAdvice(task, prd, sdk, cfg, "ws", "prog", "std")).toBe("ADVICE");
+    expect(runCursorSdkText).toHaveBeenCalledWith(sdk, "ap", cfg, "ws", "T1", "advisor");
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });
 

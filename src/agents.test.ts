@@ -61,6 +61,32 @@ describe("registry completeness", () => {
     expect(cmd[0]).toBe(AGENTS[cli].bin);
     expect(cmd).toContain("P");
   });
+
+  // Declaring reviewArgs and not placing them in the argv is the same half-entry
+  // bug this file exists for: the field reads as "this cli reviews with tools"
+  // while the spawned command still has none.
+  it.each(agentClis)("%s buildCmd emits the reviewArgs it declares", (cli) => {
+    const def = AGENTS[cli];
+    if (!def.reviewArgs) return; // no tool grant: reviews the diff text alone
+    const cmd = def.buildCmd!({
+      bin: binOf(cli),
+      prompt: "P",
+      model: "M",
+      cwd: "/w",
+      autoApprove: false,
+      reviewArgs: def.reviewArgs,
+    });
+    for (const arg of def.reviewArgs) expect(cmd).toContain(arg);
+  });
+
+  // The review deliberately runs at autoApprove:false so the advisor cannot write.
+  // A grant that turns permissions off wholesale would hand back exactly what that
+  // posture is there to withhold, so read-only has to mean an explicit allowlist.
+  it.each(agentClis)("%s never grants review tools through a blanket approve flag", (cli) => {
+    for (const arg of AGENTS[cli].reviewArgs ?? []) {
+      expect(arg).not.toMatch(/skip-permissions|bypass|always-approve|--force|--auto\b/);
+    }
+  });
 });
 
 describe("model names containing spaces", () => {

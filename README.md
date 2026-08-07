@@ -287,6 +287,23 @@ The executor runs with auto-approve (`--dangerously-skip-permissions` /
 **Not sandboxed.** Run in a throwaway dir or a VM/container. The advisor call
 runs *without* auto-approve (guidance text only).
 
+**The review call gets read-only tools.** The reviewer used to judge a diff
+truncated at 12k chars — and, when the executor changed nothing, no evidence at
+all. It now runs with an explicit per-CLI allowlist so it can open the files that
+view left out. Today that is `claude` only (`--allowedTools Read,Grep,Glob`);
+every other CLI reviews the diff text alone, unchanged, because a guessed flag
+would fail the whole review on an unknown argument. Auto-approve stays **off** on
+this call, and the allowlist is never a blanket approve flag — that is what keeps
+the reviewer from writing.
+
+> **The "read-only" is the target CLI's, not ralphrun's.** ralphrun spawns
+> `claude -p`; the agent's tool calls happen inside that process and never pass
+> through ralphrun, so there is nothing here that could inspect or refuse them.
+> If the CLI's allowlist leaks, ralphrun cannot tell and cannot stop it. Adding a
+> CLI to this list means verifying its flag grants reads *without* writes and
+> *without* prompting — nobody is on the other end of a review to answer a
+> permission prompt, so a CLI that asks just burns `advisor_timeout`.
+
 ## Live feedback
 
 On a TTY the run loop mounts a fullscreen Ink dashboard: task sidebar with
@@ -333,7 +350,9 @@ Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
   cannot.
 - **Truncated review diffs say so**: the diff handed to the reviewer is capped,
   and now carries an explicit marker when it was cut, so an approval is never
-  given over a change the reviewer only half saw.
+  given over a change the reviewer only half saw. Where the CLI supports it (see
+  [Permissions](#permissions)) the reviewer can also open the real files instead
+  of judging the cut view.
 
 > **Workspace default is the current directory.** Run ralphrun from inside your
 > project dir (or pass `--workspace`), *not* from the tool dir.

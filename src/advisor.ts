@@ -35,7 +35,12 @@ function runAdvisorCli(
   // An in-process backend has no command line, and its RunResult IS the stdout
   // the spawn path below accumulates — same contract, same return type.
   if (agentDef(advis.cli)?.sdk) return runCursorSdkText(advis, prompt, cfg, workspace, taskId, source);
-  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false);
+  // autoApprove stays FALSE on both calls — the advisor must not be able to write.
+  // The review additionally asks for the cli's read-only tools: the diff it judges
+  // is cut at 12k chars and can be empty, and a reviewer with no way to open a file
+  // has nothing but that text to go on. Guidance runs before any code exists, so
+  // there is nothing to inspect and it stays text-only.
+  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false, source === "review");
   return new Promise((resolve) => {
     try {
       const viaStdin = promptViaStdin(advis.cli);

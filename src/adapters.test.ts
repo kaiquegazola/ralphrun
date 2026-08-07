@@ -51,6 +51,22 @@ describe("buildCmd", () => {
   it("opencode without model, no autoApprove", () => {
     expect(buildCmd("opencode", "P", "", "/w", false)).toEqual(["opencode", "run", "P"]);
   });
+  // The reviewer judges a diff cut at 12k chars that can also be empty; the
+  // allowlist is what lets it open the files that view left out. It is an
+  // allowlist and not an approve-all, so the advisor still cannot write.
+  it("claude gets read-only tools on the review call only", () => {
+    expect(buildCmd("claude", "P", "fable", "/w", false, true)).toEqual([
+      "claude", "-p", "--model", "fable", "--allowedTools", "Read,Grep,Glob",
+    ]);
+    expect(buildCmd("claude", "P", "fable", "/w", false)).toEqual(["claude", "-p", "--model", "fable"]);
+  });
+  // asking for tools from a cli with no verified read-only flag must be a no-op,
+  // not a guessed flag that makes every review fail on an unknown argument
+  it("a cli that declares no reviewArgs is unchanged by the request", () => {
+    for (const cli of ["grok", "cursor", "codex", "opencode", "agy"]) {
+      expect(buildCmd(cli, "P", "", "/w", false, true)).toEqual(buildCmd(cli, "P", "", "/w", false));
+    }
+  });
   it("unknown cli throws", () => {
     expect(() => buildCmd("nope", "P", "", "/w", false)).toThrow("unknown cli: nope");
   });

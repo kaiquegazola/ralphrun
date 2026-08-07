@@ -10,6 +10,8 @@ export function buildCmd(
   model: string,
   cwd: string,
   autoApprove: boolean,
+  /** review call: hand the cli its read-only tool flags, if it declares any */
+  readOnlyTools = false,
 ): string[] {
   const def = agentDef(cli);
   if (!def) throw new Error(`unknown cli: ${cli}`);
@@ -19,7 +21,14 @@ export function buildCmd(
   // one in. Keeping it out of the command line is what lets a 25k review prompt
   // survive Windows, where a .cmd shim goes through cmd.exe's ~8191 char limit.
   const argvPrompt = def.promptVia === "stdin" ? "" : prompt;
-  return def.buildCmd({ bin: binOf(cli), prompt: argvPrompt, model, cwd, autoApprove });
+  return def.buildCmd({
+    bin: binOf(cli),
+    prompt: argvPrompt,
+    model,
+    cwd,
+    autoApprove,
+    reviewArgs: readOnlyTools ? def.reviewArgs : undefined,
+  });
 }
 
 /** does this cli expect its prompt piped in rather than passed as an argument? */

@@ -24,6 +24,13 @@ export interface BuildCmdArgs {
   model: string; // "" = let the CLI pick its own default
   cwd: string;
   autoApprove: boolean;
+  /**
+   * The def's own `reviewArgs`, handed back only on the review call (see
+   * adapters.buildCmd) and absent everywhere else. It comes through here rather
+   * than being appended by adapters because only the def knows where in its own
+   * argv a flag may sit — several clis take the prompt as the LAST element.
+   */
+  reviewArgs?: string[];
 }
 
 export interface AgentDef {
@@ -46,6 +53,23 @@ export interface AgentDef {
   recommended: Partial<Record<AgentRole, string>>;
   /** headless invocation */
   buildCmd?(a: BuildCmdArgs): string[];
+  /**
+   * READ-ONLY tool grant for the review call: the flags that let this cli open
+   * the files the truncated diff left out. Absent = this cli reviews the diff
+   * text alone, which is what all of them did before.
+   *
+   * Two conditions before adding one, both load-bearing:
+   *  - the flag must grant reads WITHOUT granting writes. The review runs at
+   *    autoApprove:false precisely so the advisor cannot touch the workspace;
+   *    a blanket "approve everything" flag would trade the whole reason for it.
+   *  - it must not be able to PROMPT. Nobody is on the other end of a review,
+   *    so a cli that stops to ask does not review, it burns advisor_timeout.
+   *
+   * The read-only part is enforced by the target cli, never by ralphrun: we
+   * spawn the cli, and its tool calls never pass through spawn.ts for us to
+   * see, let alone refuse.
+   */
+  reviewArgs?: string[];
   /**
    * Server-side advisor: extra args that make THIS cli consult an advisor model
    * mid-task, in one call. Present = the cli supports NATIVE mode. Absent = CROSS.
@@ -128,10 +152,18 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     recommended: { planner: "opus", executor: "sonnet", advisor: "fable" },
     // verified: `echo "<prompt>" | claude -p` answers the piped prompt
     promptVia: "stdin",
-    buildCmd: ({ bin, prompt, model, autoApprove }) => {
+    // `claude --help`: `--allowedTools <tools...>` takes a comma or space
+    // separated list of tools to allow. It is an ALLOWLIST — Edit/Write/Bash
+    // stay out — and under `-p` there is no interactive prompt to hang on:
+    // anything off the list is refused, not asked about.
+    reviewArgs: ["--allowedTools", "Read,Grep,Glob"],
+    buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs }) => {
       const cmd = [bin, "-p", ...(prompt ? [prompt] : [])];
       if (model) cmd.push("--model", model);
       if (autoApprove) cmd.push("--dangerously-skip-permissions");
+      // last on purpose: the option is variadic, so it must not be followed by
+      // a value of its own that it would swallow as another tool name
+      if (reviewArgs) cmd.push(...reviewArgs);
       return cmd;
     },
     // verified against a real captured stream; see stream.ts

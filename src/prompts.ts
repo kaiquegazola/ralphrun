@@ -123,7 +123,10 @@ change at all, which is the case when the task asks to confirm, check or verify 
 already works. Otherwise reply CHANGES naming what the task still requires.
 
 An unchanged workspace is NOT evidence that the work was already done: if the task asks for
-anything to be built, changed, fixed or removed, no diff means it did not happen.`;
+anything to be built, changed, fixed or removed, no diff means it did not happen.
+
+Read the files this task names before you answer. With no diff they are the only evidence there
+is, and "the acceptance already holds" is a claim about them — check it instead of assuming it.`;
 
 /** What the objective verify gate found on this attempt, as the reviewer sees it. */
 export interface VerificationEvidence {
@@ -181,7 +184,11 @@ export function reviewPrompt(
   diff: string,
   verification?: VerificationEvidence,
 ): string {
-  return `You are a senior REVIEWER. Do NOT write code or use tools — reply with text ONLY.
+  return `You are a senior REVIEWER. Do NOT write, edit, delete or run anything: your reply IS your
+whole output. You MAY read the workspace — open files, grep, glob — and you should whenever the
+text below is not enough to judge. The diff is CUT at a fixed size and shows only changed lines,
+never the code around them that still has to work, so "the diff looks fine" is not the same
+answer as "the code is fine". When it is cut (it says so where it was), read the real files.
 
 Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.

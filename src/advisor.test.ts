@@ -27,7 +27,7 @@ vi.mock("./spawn.js", async (importOriginal) => ({
   killTree: vi.fn(),
 }));
 
-import { promptViaStdin } from "./adapters.js";
+import { buildCmd, promptViaStdin } from "./adapters.js";
 import { killTree, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { captureDiff } from "./git.js";
@@ -250,6 +250,28 @@ describe("advisorReview", () => {
       vi.useRealTimers();
     }
   });
+  // The review is the call with something to inspect: its diff is truncated and
+  // can be empty. Guidance runs before any code exists, so it stays text-only —
+  // and autoApprove is false on BOTH, or the advisor could write to the workspace.
+  it("asks for read-only tools on the review call and not on the advice call", async () => {
+    diffMock.mockReturnValue("some diff");
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
+    expect(buildCmd).toHaveBeenCalledWith("claude", "rp", "fable", "ws", false, true);
+
+    mockChild.stdout = new PassThrough();
+    mockChild.stderr = new PassThrough();
+    mockChild.on.mockReset();
+
+    const a = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("advice\n");
+    finishSpawn(0);
+    await a;
+    expect(buildCmd).toHaveBeenLastCalledWith("claude", "ap", "fable", "ws", false, false);
+  });
+
   it("passes the task baseline to the diff capture", async () => {
     diffMock.mockReturnValue("some diff");
     const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std", "base-commit");

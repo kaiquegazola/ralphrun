@@ -158,6 +158,25 @@ describe("reviewPrompt", () => {
     expect(out).toContain("- a1"); // still judged against the same acceptance
   });
 
+  // The reviewer used to be told "do NOT use tools", so a diff cut at 12k chars
+  // was the whole evidence it was allowed to have. It may read now — but reading
+  // is all it may do: the review runs without auto-approve for that reason.
+  it("lets the reviewer read the workspace while still forbidding any change", () => {
+    const out = reviewPrompt(task, prd, "STD", "the diff").replace(/\s+/g, " ");
+    expect(out).toContain("Do NOT write, edit, delete or run anything");
+    expect(out).toContain("You MAY read the workspace");
+    expect(out).toContain("CUT at a fixed size");
+    expect(out).toContain("read the real files");
+  });
+
+  // With no diff there is nothing to read in the prompt at all, so the files are
+  // the only evidence — "it already works" has to be checked, not assumed.
+  it("sends the reviewer to the files when there is no diff", () => {
+    const out = reviewPrompt(task, prd, "STD", "   ").replace(/\s+/g, " ");
+    expect(out).toContain("Read the files this task names");
+    expect(out).toContain("check it instead of assuming it");
+  });
+
   it("says nothing about verification when the caller has no verdict to give", () => {
     expect(reviewPrompt(task, prd, "STD", "the diff")).not.toContain("## Verification");
   });

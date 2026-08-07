@@ -124,8 +124,10 @@ export function App({ store, header, project }: AppProps): React.ReactElement {
 
         {/* live pane */}
         <Box flexDirection="column" borderStyle="round" borderDimColor flexGrow={1} paddingX={1}>
+          {/* a wave has no single current task — the sidebar's ◐ rows are the
+              per-task view, and each pane line carries its own [id] tag */}
           <Text bold color="cyan" wrap="truncate-end">
-            {current.title ?? "—"}
+            {counts.doing > 1 ? t("run.paneWave", { n: counts.doing }) : (current.title ?? "—")}
           </Text>
           <Box gap={2}>
             <Text>

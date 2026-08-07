@@ -35,7 +35,12 @@ export function mount(
   if (startPaused) initialStateWithTasks.paused = true;
   let state: UiState = reducer(initialStateWithTasks, { type: "seedTasks", tasks: seedTasks });
   const subs = new Set<() => void>();
-  let ac: AbortController | null = null;
+  // one controller per IN-FLIGHT task: a wave runs several executors at once, so
+  // a single slot would leave every task but the last one un-killable.
+  // ponytail: never pruned — a finished task's controller is an empty object and
+  // aborting it again is a no-op; add an endTask() if a run's task count ever
+  // makes that memory matter.
+  const acs = new Set<AbortController>();
 
   const store = {
     subscribe(cb: () => void): () => void {
@@ -51,9 +56,11 @@ export function mount(
       const wasPaused = state.paused;
       state = reducer(state, a);
       if (state.paused !== wasPaused) onPausedChange?.(state.paused);
-      // side-effect: a confirmed skip OR quit aborts the running task's executor
-      // child so the control takes effect now, not after the task finishes.
-      if (state.skipRequested || state.quit) ac?.abort();
+      // side-effect: a confirmed skip OR quit aborts the running tasks' executor
+      // children so the control takes effect now, not after the task finishes.
+      // Deliberately coarse: it kills the WHOLE wave, because the dashboard has
+      // no per-task selection to aim a skip at.
+      if (state.skipRequested || state.quit) for (const ac of acs) ac.abort();
       for (const cb of subs) cb();
     },
   };
@@ -72,7 +79,8 @@ export function mount(
         return s;
       },
       beginTask: () => {
-        ac = new AbortController();
+        const ac = new AbortController();
+        acs.add(ac);
         return ac.signal;
       },
     },

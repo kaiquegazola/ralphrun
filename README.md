@@ -118,6 +118,7 @@ tail -f ralph.out
   "review_timeout": 900,
   "worktree_per_task": false,
   "worktree_link": ["node_modules"],
+  "max_parallel_tasks": 1,
   "extra_executor_args": []
 }
 ```
@@ -234,6 +235,45 @@ tail -f ralph.out
 
 - **Worktrees isolate the filesystem, not the machine.** Ports, dev databases
   and code generators are shared no matter what this setting says.
+
+- `max_parallel_tasks` is how many tasks may execute at once. It is `1` by
+  default — the serial loop, unchanged — and clamped to `[1, 8]`, because the
+  binding constraint is agent spend and provider rate limits, not cores. Above
+  `1` it is **refused unless `worktree_per_task` is on**: two executors editing
+  one checkout is data loss, not a configuration. So parallelism is opted into
+  twice, on purpose.
+
+- **What actually runs together.** Every task whose dependencies are all `done`
+  is eligible; the loop takes up to `max_parallel_tasks` of them, waits for the
+  whole wave, then picks the next one. Tasks in a wave are unordered by
+  construction, and the plan compiler already refused any unordered pair with
+  overlapping `scope`, so they provably cannot collide on a file. A task that
+  declares **no** `scope` runs alone — a backlog written before `scope` existed
+  has nothing protecting it, so it behaves exactly as it does today.
+
+- **The speedup is bounded by the plan, not by this number.** A chain-shaped
+  backlog, or one whose planner declared dependencies it did not need, gets
+  exactly zero benefit from raising it. That is a planner problem, not a bug.
+
+- **Semantic conflicts still merge cleanly.** Two tasks can each pass their own
+  gate and break the build together — filesystem isolation cannot see that.
+  Integration tasks whose `verify` runs the whole suite are the fix, and they
+  come from the plan. Do not raise this knob far before your backlog has them.
+
+- **`scope` is checked at runtime as a WARNING, never a gate.** If a task edits
+  paths its declared `scope` does not cover, the run says so in `progress.md`
+  and carries on. Failing the task would enforce the planner's guess instead of
+  the merge's fact, and in a typical repo a shared file every task must touch
+  would block essentially everything.
+
+- **What parallelism costs you.** The budget is checked *between* waves, so
+  `max_cost_usd` can be overshot by up to one wave's worth of tasks — killing
+  work already paid for does not refund it. `s`kip and `q`uit abort **every**
+  task in flight, because the dashboard has no per-task selection. And the
+  interactive "review blocked" prompt is skipped during a wave (it would freeze
+  every sibling behind one human answer), so those tasks fall through to
+  `review_blocked_policy` — default `block`. Nothing unverified is ever
+  accepted either way.
 
 There is deliberately **no** idle timeout. A silence-based kill sounds obvious
 but measurement says otherwise: a buffered CLI is silent for the entire task, and

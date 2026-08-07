@@ -21,11 +21,11 @@ vi.mock("which", () => ({ default: { sync: vi.fn() } }));
 vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 // prdload is NOT mocked: the intake pipeline runs REAL against the fs mock,
 // so every test's mRead must return a parseable+valid PRD for the preflight.
-// findTask/nextTask are driven per-test; sessionRunnableIds (pure) runs REAL so
-// the browser-preflight scope reflects the actual dependency closure.
+// findTask/nextTask/readyTasks are driven per-test; sessionRunnableIds (pure)
+// runs REAL so the browser-preflight scope reflects the actual dependency closure.
 vi.mock("./prd.js", async (importActual) => {
   const actual = await importActual<typeof import("./prd.js")>();
-  return { findTask: vi.fn(), nextTask: vi.fn(), sessionRunnableIds: actual.sessionRunnableIds };
+  return { findTask: vi.fn(), nextTask: vi.fn(), readyTasks: vi.fn(), sessionRunnableIds: actual.sessionRunnableIds };
 });
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
 vi.mock("./git.js", () => ({
@@ -65,7 +65,7 @@ import { runLoop } from "./loop.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { loadConfig, parseAgent } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
-import { findTask, nextTask } from "./prd.js";
+import { findTask, nextTask, readyTasks } from "./prd.js";
 import { log, setReporter } from "./log.js";
 import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths } from "./git.js";
 import {
@@ -101,6 +101,7 @@ const mParseAgent = vi.mocked(parseAgent);
 const mCheckAgent = vi.mocked(checkAgent);
 const mFindTask = vi.mocked(findTask);
 const mNextTask = vi.mocked(nextTask);
+const mReadyTasks = vi.mocked(readyTasks);
 const mLog = vi.mocked(log);
 const mSetReporter = vi.mocked(setReporter);
 const mGit = vi.mocked(git);
@@ -203,6 +204,13 @@ beforeEach(() => {
   mParseAgent.mockReturnValue({ cli: "claude", model: "sonnet" });
   mCheckAgent.mockReturnValue({ cli: "claude", installed: true, loggedIn: true, loginCommand: "claude auth login" });
   mNextTask.mockReturnValueOnce(TASK as never).mockReturnValue(null);
+  // The loop schedules off readyTasks now. Every pre-existing test drives ONE
+  // task at a time through mNextTask, so keep that seam and let the set-returning
+  // picker delegate to it; the wave tests below override mReadyTasks directly.
+  mReadyTasks.mockImplementation(((p: never) => {
+    const one = mNextTask(p);
+    return one ? [one] : [];
+  }) as never);
   mFindTask.mockReturnValue(TASK as never);
   mRunTask.mockResolvedValue({ ok: true, cost: NO_COST });
   mHeadCommit.mockReturnValue(null);
@@ -1208,5 +1216,159 @@ describe("runLoop TTY dashboard", () => {
     expect(mockSetInterval.mock.calls[0][0]).toBe(mockSetInterval.mock.calls[1][0]);
     mockSetInterval.mockRestore();
     mockClearInterval.mockRestore();
+  });
+});
+
+describe("runLoop parallel waves", () => {
+  const wtTask = (id: string, scope?: string[]) => ({
+    id,
+    title: id,
+    status: "todo",
+    deps: [],
+    retries: 0,
+    description: "d",
+    acceptance: [],
+    ...(scope ? { scope } : {}),
+  });
+
+  // prd.json as a real file rather than a constant: reads return whatever was
+  // last written, which is the only way two tasks settling at once can actually
+  // clobber each other's status if a read-modify-write ever stops being atomic.
+  function livePrd(tasks: unknown[]): () => Record<string, { status: string; retries: number }> {
+    let content = prdWith(tasks);
+    mRead.mockImplementation(() => content);
+    mWrite.mockImplementation((p, data) => {
+      if (String(p).endsWith("prd.json")) content = String(data);
+    });
+    return () =>
+      Object.fromEntries(JSON.parse(content).tasks.map((t: { id: string }) => [t.id, t])) as ReturnType<
+        ReturnType<typeof livePrd>
+      >;
+  }
+
+  // one wave, then nothing — readyTasks reads the LIVE prd so the tasks the loop
+  // dispatches are the objects it later persists
+  function dispatchOnce(): void {
+    mReadyTasks.mockReset();
+    mReadyTasks
+      .mockImplementationOnce(((p: { tasks: { status: string }[] }) => p.tasks.filter((x) => x.status === "todo")) as never)
+      .mockReturnValue([] as never);
+  }
+
+  // counts how many executors were alive at the same moment
+  function trackConcurrency(): { peak: () => number } {
+    let live = 0;
+    let peak = 0;
+    mRunTask.mockImplementation(async () => {
+      live += 1;
+      peak = Math.max(peak, live);
+      await new Promise((r) => setImmediate(r));
+      live -= 1;
+      return { ok: true, cost: NO_COST };
+    });
+    return { peak: () => peak };
+  }
+
+  beforeEach(() => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, max_parallel_tasks: 2 }));
+    mHeadCommit.mockReturnValue("base-sha");
+  });
+
+  it("runs two ready tasks at the same time and both reach done", async () => {
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+    const conc = trackConcurrency();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(conc.peak()).toBe(2);
+    expect(read().A.status).toBe("done");
+    expect(read().B.status).toBe("done");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE of 2"));
+  });
+
+  it("gives each task its own worktree, and removes both", async () => {
+    // the isolation is what makes the wave safe: two executors must never share
+    // a checkout, and neither cell may outlive its task
+    livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+    mCreateWorktree.mockImplementation((_ws, id) => `/ws/.ralphrun/worktrees/${id}`);
+    trackConcurrency();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask.mock.calls.map((c) => c[3]).sort()).toEqual([
+      "/ws/.ralphrun/worktrees/A",
+      "/ws/.ralphrun/worktrees/B",
+    ]);
+    expect(mRemoveWorktree).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs a task with no declared scope alone", async () => {
+    // prdload skips the overlap check when either scope is empty, so a backlog
+    // written before `scope` existed is unprotected — it must behave like today
+    const read = livePrd([wtTask("U"), wtTask("A", ["src/a/**"])]);
+    dispatchOnce();
+    const conc = trackConcurrency();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(conc.peak()).toBe(1);
+    expect(read().U.status).toBe("done");
+    expect(read().A.status).toBe("todo"); // never dispatched: the wave was full at one
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE"));
+  });
+
+  it("keeps a sibling's status when a task settles through the async review gate", async () => {
+    // THE prd.json write rule. The review gate awaits, so A reads the file
+    // BEFORE B saves and writes AFTER it. Saving A's whole copy would roll B
+    // back to `doing`; re-reading and copying only A's own fields cannot.
+    mLoadConfig.mockReturnValue(
+      cfg({ worktree_per_task: true, max_parallel_tasks: 2, review_blocked_policy: "accept" }),
+    );
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+    mRunTask
+      .mockResolvedValueOnce({ ok: false, reason: "review_changes", verificationPassed: true, cost: NO_COST })
+      .mockResolvedValueOnce({ ok: true, cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().A.status).toBe("done");
+    expect(read().B.status).toBe("done");
+  });
+
+  it("stops on the cost ceiling between waves, never inside one", async () => {
+    // killing a task that is already paid for throws the result away and still
+    // leaves the bill, so the ceiling can be overshot by up to one wave
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, max_parallel_tasks: 2, max_cost_usd: 1 }));
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    mReadyTasks.mockReset();
+    mReadyTasks.mockImplementation(((p: { tasks: { status: string }[] }) =>
+      p.tasks.filter((x) => x.status === "todo")) as never);
+    mRunTask.mockResolvedValue({ ok: true, cost: { usd: 0.6, unknown: false } });
+
+    await runLoop({ prd: "prd.json" });
+
+    // both of the first wave completed — neither was cut off mid-flight
+    expect(read().A.status).toBe("done");
+    expect(read().B.status).toBe("done");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("stopping on cost budget"));
+  });
+
+  it("warns about paths outside a task's declared scope without failing it", async () => {
+    // scope is the planner's GUESS; the cherry-pick enforces the fact. Failing
+    // on the guess would block nearly every task in this very repo.
+    mLoadConfig.mockReturnValue(cfg());
+    const read = livePrd([wtTask("A", ["src/api/**"])]);
+    dispatchOnce();
+    mTaskChangedPaths.mockReturnValue(["src/api/h.ts", "src/i18n.ts"]);
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("src/i18n.ts"));
+    expect(read().A.status).toBe("done");
   });
 });

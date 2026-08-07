@@ -8,10 +8,10 @@ import { supportsNativeAdvisor } from "./agents.js";
 import { anyTaskUsesBrowser, BROWSER_INSTALL_HINT, BROWSER_TOOL, BROWSER_UPDATE_HINT, browserStatus } from "./browser.js";
 import { loadConfig, parseAgent, type AgentSpec, type Config, type ReviewBlockedPolicy } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
-import { createElapsedTracker } from "./elapsed.js";
+import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
 import { t } from "./i18n.js";
-import { findTask, nextTask, sessionRunnableIds, type PRD } from "./prd.js";
-import { loadPrdFile, type NormalizePrdOptions } from "./prdload.js";
+import { findTask, readyTasks, sessionRunnableIds, type PRD, type Task } from "./prd.js";
+import { loadPrdFile, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
 import { log, setReporter } from "./log.js";
 import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } from "./git.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
@@ -35,6 +35,15 @@ export interface RunOptions {
   onReviewBlocked?: ReviewBlockedPolicy;
 }
 
+/**
+ * THE prd.json rule, and the only serialization a parallel run needs: every
+ * read-modify-write of this file must stay SYNCHRONOUS. runLoop is one process
+ * on one thread — N parallel tasks are N child *processes* collected at `await`
+ * points — so a reload → mutate → save with no await between them is atomic
+ * with respect to the event loop and no mutex can improve on it. Put an `await`
+ * in the middle and a task's stale copy silently rolls a sibling's status back.
+ * See runOneTask's persist().
+ */
 function savePRD(path: string, prd: PRD): void {
   writeFileSync(path, JSON.stringify(prd, null, 2));
 }
@@ -199,8 +208,13 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   let tui: TuiHandle | null = null;
   let curTaskId = "";
   const elapsedTracker = createElapsedTracker(performance.now());
+  // A tracker holds ONE task slot, so a wave needs one tracker per in-flight
+  // task or they overwrite each other's start time. Pause has to reach all of
+  // them: a run paused mid-wave must not bill that wall clock to any task.
+  const trackers = new Set<ElapsedTracker>([elapsedTracker]);
   const setElapsedPaused = (paused: boolean): void => {
-    elapsedTracker.setPaused(paused, performance.now());
+    const now = performance.now();
+    for (const tr of trackers) tr.setPaused(paused, now);
   };
   let timeTicker: NodeJS.Timeout | null = null;
   const tickElapsed = (): void => {
@@ -254,6 +268,408 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   // task so a retry still measures from the task's own start, not the retry's.
   const taskBaselines = new Map<string, string | null>();
 
+  /**
+   * One task, from START to a settled status in prd.json. "stop" means the whole
+   * run is over and `done()` has already been called; "next" means keep looping.
+   *
+   * `solo` is the serial path — one task at a time, byte for byte what the loop
+   * did before waves existed. In a wave several of these are in flight at once,
+   * so nothing here may assume it owns the elapsed tracker, the pane, or the
+   * copy of prd.json it last read.
+   */
+  const runOneTask = async (task: Task, prd: PRD, solo: boolean): Promise<"stop" | "next"> => {
+    log(progress, t("loop.log.start", { id: task.id, title: task.title, n: task.retries + 1 }));
+    task.status = "doing";
+    // A wave has no single current task, and the reporter would otherwise stamp
+    // every loop-level line with whichever task started last. Those lines carry
+    // their own {id}; executor lines carry the real one on the event.
+    curTaskId = solo ? task.id : "";
+    const taskStartMs = performance.now();
+    const tracker = solo ? elapsedTracker : createElapsedTracker(taskStartMs);
+    if (!solo) trackers.add(tracker);
+    if (tui) tracker.setPaused(tui.control.isPaused(), taskStartMs);
+    tracker.startTask(taskStartMs);
+    savePRD(prdPath, prd);
+    emit({ taskId: task.id, title: task.title, status: "doing" });
+
+    // per-task AbortController from the mount handle: the TUI skip control aborts
+    // this signal → runExecutor SIGKILLs the child. No TUI → no cancellation.
+    const signal = tui ? tui.control.beginTask() : undefined;
+    const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
+    pendingReviewFeedback.delete(task.id);
+
+    // Worktree mode changes WHERE a task runs. null = no isolation available, so
+    // degrade to the main workspace with a line rather than failing the task:
+    // infrastructure trouble is not something a retry of the task can fix. A
+    // WAVE is never admitted without a usable repo (see pickWave), so this only
+    // degrades a solo task.
+    const wt = cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, cfg.worktree_link ?? []) : null;
+    if (cfg.worktree_per_task && !wt) log(progress, t("loop.log.worktreeUnavailable", { id: task.id }));
+    const taskWorkspace = wt ?? workspace;
+
+    let taskReviewBase: string | null | undefined;
+    const reviewOn = cfg.review_after && !!cfg.advisor;
+    if (reviewOn || cfg.commit_per_task) {
+      if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(taskWorkspace));
+    }
+    if (reviewOn) taskReviewBase = taskBaselines.get(task.id);
+    // in worktree mode this IS the base the worktree was cut from, so it doubles
+    // as the left end of the cherry-pick range
+    const taskStartCommit = headCommit(taskWorkspace);
+    const planBeforeRun = task.plan;
+    const planKeyBeforeRun = task.planKey;
+
+    // In worktree mode the commit is the TRANSPORT: it is how the work leaves
+    // the cell, so both it and the cherry-pick have to succeed before the task
+    // may be called done. The serial path is untouched and still commits after
+    // savePRD, where the commit carries the task's new status.
+    //
+    // Merge-back is serialized BY CONSTRUCTION, not by a lock: it runs after the
+    // task's own await points on the orchestrator's single thread, and every
+    // step of it is synchronous git, so two cherry-picks can never share an
+    // index. The cost is a sub-second git call against minutes of agent time.
+    // Consequence: the first task in a wave to finish defines the base the rest
+    // land on, so history order inside a wave is nondeterministic. Fine — a wave
+    // only ever holds tasks the graph does not order.
+    //
+    // ponytail: an executor that rewrites prd.json rewrites the WORKTREE's copy,
+    // which is frozen at the base commit while the live one keeps moving. That
+    // fails closed rather than silently — the live file is dirty, so the pick is
+    // refused and the task blocks — but it does mean mid-run backlog edits do
+    // not work in worktree mode. Give the worktree a symlink to the real file if
+    // that ever needs to work.
+    //
+    // "someone already said, with a sha, what happened to this worktree's work" —
+    // so the discard notice below does not repeat a line the merge already wrote.
+    let worktreeAccounted = false;
+    const landWorktreeWork = (): "ok" | "conflict" | "dirty" => {
+      if (!wt) return "ok";
+      logTaskCommit(taskWorkspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+      const m = mergeBackTaskWork(workspace, wt, taskStartCommit);
+      if (m.status === "conflict" || m.status === "dirty") {
+        log(
+          progress,
+          t(m.status === "dirty" ? "loop.log.worktreeDirty" : "loop.log.worktreeConflict", {
+            id: task.id,
+            hash: shortHash(m.head ?? ""),
+          }),
+        );
+        worktreeAccounted = true;
+        return m.status;
+      }
+      worktreeAccounted = true;
+      return "ok";
+    };
+
+    // unknown, not 0: if runTask throws before any executor settles, whatever it
+    // already spent was never reported to us
+    try {
+      let result: RunTaskResult = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
+      try {
+        result = await runTask(task, prd, cfg, taskWorkspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
+          // Read-modify-write of prd.json, and it fires MID-task while siblings
+          // are running. It must stay SYNCHRONOUS end to end — an await between
+          // the reload and the save is exactly what lets a stale copy clobber a
+          // sibling's status. See persist() below, same rule.
+          const currentPrd = reload({ keepDoing: true });
+          if (currentPrd) {
+            const currentTask = currentPrd.tasks.find((x) => x.id === task.id);
+            const advisor = cfg.advisor;
+            const controlFileCacheUnchanged = currentTask?.plan === planBeforeRun && currentTask?.planKey === planKeyBeforeRun;
+            if (
+              currentTask &&
+              advisor &&
+              controlFileCacheUnchanged &&
+              advisorPlanKey(currentTask, currentPrd, advisor, readStandards(taskWorkspace)) === planKey
+            ) {
+              currentTask.status = "doing";
+              currentTask.plan = plan;
+              currentTask.planKey = planKey;
+              savePRD(prdPath, currentPrd);
+            }
+          }
+        });
+      } catch (e) {
+        log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
+        result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
+      }
+      const taskStopMs = performance.now();
+      if (tui) tracker.setPaused(tui.control.isPaused(), taskStopMs);
+      const elapsedMs = tracker.stopTask(taskStopMs);
+      const elapsed = Math.round(elapsedMs / 1000);
+      tasksRun += 1;
+      const spent = taskCost.get(task.id) ?? { usd: 0, unknown: false };
+      mergeCost(spent, result.cost);
+      taskCost.set(task.id, spent);
+      mergeCost(runCost, result.cost);
+      // Silent when nothing was measured AND no budget is set: a line that says
+      // "unknown" on every task of every cli that does not report cost is noise.
+      if (spent.usd > 0 || maxCostUsd > 0) {
+        log(progress, t("loop.log.cost", { id: task.id, cost: formatCost(spent), total: formatCost(runCost) }));
+      }
+      const taskEndCommit = headCommit(taskWorkspace);
+      if (taskEndCommit && taskEndCommit !== taskStartCommit) {
+        log(progress, t("loop.log.executorCommit", { id: task.id, hash: shortHash(taskEndCommit) }));
+      }
+
+      // quit pressed mid-task: the child was aborted, runTask returned. Exit now
+      // without munging status — the task stays "doing" and recovery resets it next run.
+      if (tui?.control.shouldQuit()) {
+        done();
+        log(progress, t("loop.log.quit"));
+        return "stop";
+      }
+      const skipped = tui?.control.takeSkip() ?? false;
+
+      // A WARNING, never a gate — see pathsOutsideScope. `scope` is what makes a
+      // wave safe, but it is the planner's guess, and the cherry-pick already
+      // refuses the collisions that actually happen. Recorded because progress.md
+      // is all an unattended run leaves behind, and a backlog whose tasks keep
+      // escaping their scope has a PLANNER problem worth seeing.
+      const declaredScope = task.scope ?? [];
+      if (!skipped && result.ok && declaredScope.length > 0) {
+        const moved = taskChangedPaths(taskWorkspace, taskBaselines.get(task.id)) ?? [];
+        const escaped = pathsOutsideScope(moved, declaredScope);
+        if (escaped.length > 0) {
+          log(
+            progress,
+            t("loop.log.scopeEscape", {
+              id: task.id,
+              n: escaped.length,
+              paths: escaped.slice(0, 3).join(", ") + (escaped.length > 3 ? ", …" : ""),
+            }),
+          );
+        }
+      }
+
+      const fresh = reload({ keepDoing: true });
+      if (!fresh) {
+        done();
+        return "stop";
+      }
+      // the just-run task can vanish if prd.json was rewritten mid-run — stop
+      // gracefully instead of throwing on the status write.
+      const freshTask = fresh.tasks.find((x) => x.id === task.id);
+      if (!freshTask) {
+        done();
+        log(progress, t("loop.log.taskVanished", { id: task.id }));
+        return "stop";
+      }
+      // THE prd.json write rule: re-read, copy only what this task settled, save
+      // — all synchronously, so the whole read-modify-write is atomic w.r.t. the
+      // event loop and no lock is needed. `fresh` above was read before the
+      // review gate, which awaits; saving it wholesale would roll a sibling that
+      // finished during that await back to its pre-settle status.
+      const persist = (): void => {
+        const cur = reload({ keepDoing: true });
+        const ct = cur?.tasks.find((x) => x.id === task.id);
+        if (!cur || !ct) return;
+        ct.status = freshTask.status;
+        ct.retries = freshTask.retries;
+        ct.plan = freshTask.plan;
+        ct.planKey = freshTask.planKey;
+        savePRD(prdPath, cur);
+      };
+      // Worktree mode lands the work BEFORE the status write: a task whose
+      // commits cannot be cherry-picked back must never be recorded as done
+      // with nothing in the main workspace to show for it. No-op serially.
+      const landed = !skipped && result.ok ? landWorktreeWork() : "ok";
+
+      if (skipped) {
+        taskBaselines.delete(task.id);
+        freshTask.status = "blocked";
+        const reason = t("loop.reason.skipped");
+        log(progress, t("loop.log.skipped", { id: task.id, s: elapsed }));
+        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        persist();
+      } else if (result.ok && landed === "ok") {
+        freshTask.status = "done";
+        accepted += 1;
+        log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
+        emit({ taskId: task.id, status: "done", elapsedMs });
+        persist();
+        // AFTER persist (the commit is meant to carry the task's new status) and
+        // BEFORE the baseline is dropped — the commit needs it to know which paths
+        // are this task's and which were already dirty. In worktree mode
+        // landWorktreeWork already committed, because there the commit is the
+        // only way the work gets out.
+        if (cfg.commit_per_task && !wt) {
+          logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+        }
+        taskBaselines.delete(task.id);
+      } else if (landed === "dirty") {
+        // A retry cannot help here: the user's own uncommitted edit to that file
+        // will still be in the way next time, so blocking now saves a full
+        // agent run's spend.
+        taskBaselines.delete(task.id);
+        freshTask.status = "blocked";
+        const reason = t("loop.reason.mergeDirty");
+        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
+        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        persist();
+      } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
+        const reason =
+          result.reason === "review_stalled"
+            ? t("loop.reason.reviewStalled")
+            : result.reason === "review_changes"
+              ? t("loop.reason.reviewChanges")
+              : t("loop.reason.reviewExhausted");
+        const displayReason = withReviewFeedback(reason, result.reviewChanges);
+        // Replan rung of the recovery ladder. A stall means every fix round landed
+        // on the identical failure, and the plan the executor was following is part
+        // of that evidence — so it must not be replayed. Only on a stall: an
+        // ordinary retry is what the cache exists for, and there the plan is not
+        // the suspect. run.ts detects the stall, this owns prd.json, and each exit
+        // below persists `freshTask`.
+        if (result.reason === "review_stalled") {
+          invalidatePlan(freshTask);
+          log(progress, t("loop.log.planInvalidated", { id: task.id }));
+        }
+        const allowReviewOverride = result.verificationPassed === true;
+        // A wave passes tui=null on purpose: the modal asks ONE human about ONE
+        // task and would freeze every sibling behind that answer. The headless
+        // POLICY path already exists and keeps the same safety property —
+        // `verified` is still the only door to approve.
+        const action = await reviewBlockedGate(solo ? tui : null, cfg, progress, task.id, displayReason, allowReviewOverride);
+        if (action === "quit") {
+          done();
+          log(progress, t("loop.log.quit"));
+          return "stop";
+        }
+        if (action === "retry") {
+          freshTask.status = "todo";
+          const feedback = result.reviewChanges?.trim() || reason;
+          pendingReviewFeedback.set(task.id, feedback);
+          log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
+          emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
+          persist();
+          return "next";
+        }
+        if (action === "approve" && allowReviewOverride) {
+          const approveLanded = landWorktreeWork();
+          if (approveLanded !== "ok") {
+            // Approved but unlandable. Blocking beats recording a done task the
+            // main workspace never received; the sha to recover it is already
+            // in the log line landWorktreeWork wrote.
+            taskBaselines.delete(task.id);
+            freshTask.status = "blocked";
+            const blockReason = approveLanded === "dirty" ? t("loop.reason.mergeDirty") : t("loop.reason.mergeConflict");
+            log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: blockReason }));
+            emit({ taskId: task.id, status: "blocked", reason: blockReason, elapsedMs });
+            persist();
+            if (opts.task) {
+              done();
+              return "stop";
+            }
+            return "next";
+          }
+          freshTask.status = "done";
+          accepted += 1; // accepted change, whoever accepted it: same denominator as an auto-pass
+          log(
+            progress,
+            tui && solo
+              ? t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason })
+              : t("loop.log.headlessAccepted", { id: task.id, s: elapsed, reason: displayReason }),
+          );
+          emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
+          persist();
+          if (cfg.commit_per_task && !wt) {
+            logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+          }
+          taskBaselines.delete(task.id);
+          if (opts.task) {
+            done();
+            return "stop";
+          }
+          return "next";
+        }
+        taskBaselines.delete(task.id);
+        freshTask.status = "blocked";
+        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: displayReason }));
+        emit({ taskId: task.id, status: "blocked", reason: displayReason, elapsedMs });
+        persist();
+      } else {
+        // Also where a merge-back CONFLICT lands, deliberately: the next
+        // attempt's worktree is cut from the new HEAD, which already contains
+        // whatever won, so "re-execute on top of the result" is what already
+        // happens and max_retries_per_task is already the attempt ceiling.
+        // No second ladder, no separate block reason.
+        freshTask.retries += 1;
+        if (freshTask.retries >= cfg.max_retries_per_task) {
+          taskBaselines.delete(task.id);
+          freshTask.status = "blocked";
+          const reason = t("loop.reason.maxRetries");
+          log(progress, t("loop.log.blocked", { id: task.id, s: elapsed }));
+          emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        } else {
+          freshTask.status = "todo";
+          log(progress, t("loop.log.retry", { id: task.id, s: elapsed, n: freshTask.retries }));
+          emit({ taskId: task.id, status: "retry", elapsedMs });
+        }
+        persist();
+      }
+
+      if (opts.task) {
+        done();
+        return "stop";
+      }
+      // a manual skip marks the task blocked too, but the user asked to move ON —
+      // only an automatic (max-retries) block honors stop_on_blocked.
+      if (!skipped && freshTask.status === "blocked" && cfg.stop_on_blocked) {
+        done();
+        log(progress, t("loop.log.stopBlocked"));
+        return "stop";
+      }
+      return "next";
+    } finally {
+      if (!solo) trackers.delete(tracker);
+      // Every exit path — done, blocked, skipped, retry, quit, crash — drops the
+      // cell. That discard IS the rollback the serial loop never had, where a
+      // blocked task leaves its mess smeared across the main workspace.
+      if (wt) {
+        // The baseline is a tree of THIS worktree's start. The next attempt gets
+        // a fresh worktree cut from a newer HEAD, so keeping it would make that
+        // attempt stage whatever landed in between as its own work.
+        taskBaselines.delete(task.id);
+        if (!worktreeAccounted) {
+          const lost = worktreeLoss(wt, taskStartCommit);
+          if (lost.head) log(progress, t("loop.log.worktreeDiscarded", { id: task.id, hash: shortHash(lost.head) }));
+          else if (lost.dirty) log(progress, t("loop.log.worktreeDiscardedDirty", { id: task.id }));
+        }
+        removeTaskWorktree(workspace, wt);
+      }
+    }
+  };
+
+  /**
+   * The tasks to dispatch together. One is the serial loop; more is a wave.
+   *
+   * The safety proof, and why no runtime check is needed to back it up: members
+   * of `readyTasks` are pairwise UNORDERED (if A deps B then A is not ready
+   * until B is done, and a done B is not ready), and overlappingScopePairs
+   * already refused, at LOAD, every unordered pair whose declared scopes
+   * overlap. So a wave of SCOPED tasks provably cannot collide on a file.
+   *
+   * That proof has a hole and this is the patch: prdload skips the overlap check
+   * whenever either scope is empty, so a backlog written before `scope` existed
+   * is unprotected. A task with no scope therefore takes the wave alone, which
+   * makes a legacy PRD behave exactly like today with nothing to configure.
+   */
+  const pickWave = (prd: PRD): Task[] => {
+    const ready = readyTasks(prd);
+    const cap = Math.min(cfg.max_parallel_tasks ?? 1, ready.length);
+    // No repo (or no commit yet) means no worktrees, and a wave without them
+    // would put N executors in one checkout — the thing config load refuses.
+    if (cap <= 1 || !headCommit(workspace)) return ready.slice(0, 1);
+    const wave: Task[] = [];
+    for (const tk of ready.slice(0, cap)) {
+      if (tk.scope?.length) wave.push(tk);
+      else if (wave.length === 0) return [tk];
+      else break;
+    }
+    return wave;
+  };
+
   while (true) {
     if (tui) setElapsedPaused(tui.control.isPaused());
     const tuiAction = tui ? await tui.waitConfigOrResume() : "resume";
@@ -264,12 +680,14 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       return;
     }
 
-    // Money is a run-level ceiling and it is checked BETWEEN tasks, never
+    // Money is a run-level ceiling and it is checked BETWEEN waves, never
     // mid-task: killing a task that is already paid for throws the result away
     // and still leaves the bill. Checked at the TOP so every path that loops
-    // back — including the review retry/approve `continue`s — passes through it.
+    // back — including the review retry/approve ones — passes through it.
     // Logged BEFORE done() so the reason lands in the TUI pane, not only in
-    // progress.md.
+    // progress.md. With a wave in flight the ceiling can be overshot by up to
+    // max_parallel_tasks tasks; that bound is the price of not killing paid
+    // work, and it is documented next to the knob.
     if (maxCostUsd > 0 && runCost.usd >= maxCostUsd) {
       log(progress, t("loop.log.stopBudget", { spent: formatCost(runCost), max: maxCostUsd.toFixed(2) }));
       done();
@@ -297,24 +715,30 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       continue;
     }
 
+    // Reloaded here and only here, which is exactly "when nothing is in flight":
+    // the wave below is fully awaited before the loop comes back around. A
+    // reload mid-wave would return a file that predates the siblings' status.
+    // Named regression: an executor that rewrites prd.json MID-WAVE now loses
+    // that edit at the next settle, where serially it wins.
     const prd = reload();
     if (!prd) {
       done();
       return;
     }
-    let task;
+    let batch: Task[];
     if (opts.task) {
-      task = findTask(prd, opts.task) ?? undefined;
-      if (!task) {
+      const only = findTask(prd, opts.task);
+      if (!only) {
         done();
         console.error(t("loop.err.noTask", { id: opts.task }));
         process.exit(1);
       }
+      batch = [only!];
     } else {
-      task = nextTask(prd) ?? undefined;
+      batch = pickWave(prd);
     }
 
-    if (!task) {
+    if (batch.length === 0) {
       const remain = prd.tasks.filter((t) => t.status !== "done").length;
       if (remain === 0) {
         done();
@@ -355,318 +779,26 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           : cfg.advisor && cfg.review_after
             ? t("loop.dry.reviewOn", { n: cfg.max_review_rounds })
             : t("loop.dry.reviewOff");
-      console.log(t("loop.dry.next", { id: task.id, title: task.title }));
+      console.log(t("loop.dry.next", { id: batch[0].id, title: batch[0].title }));
       console.log(t("loop.dry.mode", { mode, executor: exe, advisor: adv }));
       console.log(t("loop.dry.review", { review }));
       return;
     }
 
-    log(progress, t("loop.log.start", { id: task.id, title: task.title, n: task.retries + 1 }));
-    task.status = "doing";
-    curTaskId = task.id;
-    const taskStartMs = performance.now();
-    if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStartMs);
-    elapsedTracker.startTask(taskStartMs);
-    savePRD(prdPath, prd);
-    emit({ taskId: task.id, title: task.title, status: "doing" });
-
-    // per-task AbortController from the mount handle: the TUI skip control aborts
-    // this signal → runExecutor SIGKILLs the child. No TUI → no cancellation.
-    const signal = tui ? tui.control.beginTask() : undefined;
-    const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
-    pendingReviewFeedback.delete(task.id);
-
-    // Worktree mode changes WHERE a task runs, never which task runs — the
-    // scheduler still hands out exactly one. null = no isolation available, so
-    // degrade to the main workspace with a line rather than failing the task:
-    // infrastructure trouble is not something a retry of the task can fix.
-    const wt = cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, cfg.worktree_link ?? []) : null;
-    if (cfg.worktree_per_task && !wt) log(progress, t("loop.log.worktreeUnavailable", { id: task.id }));
-    const taskWorkspace = wt ?? workspace;
-
-    let taskReviewBase: string | null | undefined;
-    const reviewOn = cfg.review_after && !!cfg.advisor;
-    if (reviewOn || cfg.commit_per_task) {
-      if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(taskWorkspace));
+    if (batch.length === 1) {
+      if ((await runOneTask(batch[0], prd, true)) === "stop") return;
+    } else {
+      log(progress, t("loop.log.waveStart", { n: batch.length, ids: batch.map((tk) => tk.id).join(", ") }));
+      // allSettled, not all: a throw in one cell must not leave its siblings'
+      // rejections unhandled, and every cell has a finally that owes git a
+      // worktree removal. The first rejection is then rethrown, so a real bug
+      // still fails loudly instead of being swallowed by the wave.
+      const settled = await Promise.allSettled(batch.map((tk) => runOneTask(tk, prd, false)));
+      const crashed = settled.find((r) => r.status === "rejected");
+      if (crashed) throw crashed.reason;
+      if (settled.some((r) => r.status === "fulfilled" && r.value === "stop")) return;
     }
-    if (reviewOn) taskReviewBase = taskBaselines.get(task.id);
-    // in worktree mode this IS the base the worktree was cut from, so it doubles
-    // as the left end of the cherry-pick range
-    const taskStartCommit = headCommit(taskWorkspace);
-    const planBeforeRun = task.plan;
-    const planKeyBeforeRun = task.planKey;
-
-    // In worktree mode the commit is the TRANSPORT: it is how the work leaves
-    // the cell, so both it and the cherry-pick have to succeed before the task
-    // may be called done. The serial path is untouched and still commits after
-    // savePRD, where the commit carries the task's new status.
-    //
-    // ponytail: an executor that rewrites prd.json rewrites the WORKTREE's copy,
-    // which is frozen at the base commit while the live one keeps moving. That
-    // fails closed rather than silently — the live file is dirty, so the pick is
-    // refused and the task blocks — but it does mean mid-run backlog edits do
-    // not work in worktree mode. Give the worktree a symlink to the real file if
-    // that ever needs to work.
-    const wtTask = task;
-    // "someone already said, with a sha, what happened to this worktree's work" —
-    // so the discard notice below does not repeat a line the merge already wrote.
-    let worktreeAccounted = false;
-    const landWorktreeWork = (): "ok" | "conflict" | "dirty" => {
-      if (!wt) return "ok";
-      logTaskCommit(taskWorkspace, progress, wtTask.id, wtTask.title, cfg, taskBaselines.get(wtTask.id));
-      const m = mergeBackTaskWork(workspace, wt, taskStartCommit);
-      if (m.status === "conflict" || m.status === "dirty") {
-        log(
-          progress,
-          t(m.status === "dirty" ? "loop.log.worktreeDirty" : "loop.log.worktreeConflict", {
-            id: wtTask.id,
-            hash: shortHash(m.head ?? ""),
-          }),
-        );
-        worktreeAccounted = true;
-        return m.status;
-      }
-      worktreeAccounted = true;
-      return "ok";
-    };
-
-    // unknown, not 0: if runTask throws before any executor settles, whatever it
-    // already spent was never reported to us
-    try {
-      let result: RunTaskResult = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
-      try {
-        result = await runTask(task, prd, cfg, taskWorkspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
-          const currentPrd = reload({ keepDoing: true });
-          if (currentPrd) {
-            const currentTask = currentPrd.tasks.find((x) => x.id === task.id);
-            const advisor = cfg.advisor;
-            const controlFileCacheUnchanged = currentTask?.plan === planBeforeRun && currentTask?.planKey === planKeyBeforeRun;
-            if (
-              currentTask &&
-              advisor &&
-              controlFileCacheUnchanged &&
-              advisorPlanKey(currentTask, currentPrd, advisor, readStandards(taskWorkspace)) === planKey
-            ) {
-              currentTask.status = "doing";
-              currentTask.plan = plan;
-              currentTask.planKey = planKey;
-              savePRD(prdPath, currentPrd);
-            }
-          }
-        });
-      } catch (e) {
-        log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
-        result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
-      }
-      const taskStopMs = performance.now();
-      if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStopMs);
-      const elapsedMs = elapsedTracker.stopTask(taskStopMs);
-      const elapsed = Math.round(elapsedMs / 1000);
-      tasksRun += 1;
-      const spent = taskCost.get(task.id) ?? { usd: 0, unknown: false };
-      mergeCost(spent, result.cost);
-      taskCost.set(task.id, spent);
-      mergeCost(runCost, result.cost);
-      // Silent when nothing was measured AND no budget is set: a line that says
-      // "unknown" on every task of every cli that does not report cost is noise.
-      if (spent.usd > 0 || maxCostUsd > 0) {
-        log(progress, t("loop.log.cost", { id: task.id, cost: formatCost(spent), total: formatCost(runCost) }));
-      }
-      const taskEndCommit = headCommit(taskWorkspace);
-      if (taskEndCommit && taskEndCommit !== taskStartCommit) {
-        log(progress, t("loop.log.executorCommit", { id: task.id, hash: shortHash(taskEndCommit) }));
-      }
-
-      // quit pressed mid-task: the child was aborted, runTask returned. Exit now
-      // without munging status — the task stays "doing" and recovery resets it next run.
-      if (tui?.control.shouldQuit()) {
-        done();
-        log(progress, t("loop.log.quit"));
-        return;
-      }
-      const skipped = tui?.control.takeSkip() ?? false;
-
-      const fresh = reload();
-      if (!fresh) {
-        done();
-        return;
-      }
-      // the just-run task can vanish if prd.json was rewritten mid-run — stop
-      // gracefully instead of throwing on the status write.
-      const freshTask = fresh.tasks.find((t) => t.id === task!.id);
-      if (!freshTask) {
-        done();
-        log(progress, t("loop.log.taskVanished", { id: task.id }));
-        return;
-      }
-      // Worktree mode lands the work BEFORE the status write: a task whose
-      // commits cannot be cherry-picked back must never be recorded as done
-      // with nothing in the main workspace to show for it. No-op serially.
-      const landed = !skipped && result.ok ? landWorktreeWork() : "ok";
-
-      if (skipped) {
-        taskBaselines.delete(task.id);
-        freshTask.status = "blocked";
-        const reason = t("loop.reason.skipped");
-        log(progress, t("loop.log.skipped", { id: task.id, s: elapsed }));
-        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
-        savePRD(prdPath, fresh);
-      } else if (result.ok && landed === "ok") {
-        freshTask.status = "done";
-        accepted += 1;
-        log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
-        emit({ taskId: task.id, status: "done", elapsedMs });
-        savePRD(prdPath, fresh);
-        // AFTER savePRD (the commit is meant to carry the task's new status) and
-        // BEFORE the baseline is dropped — the commit needs it to know which paths
-        // are this task's and which were already dirty. In worktree mode
-        // landWorktreeWork already committed, because there the commit is the
-        // only way the work gets out.
-        if (cfg.commit_per_task && !wt) {
-          logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
-        }
-        taskBaselines.delete(task.id);
-      } else if (landed === "dirty") {
-        // A retry cannot help here: the user's own uncommitted edit to that file
-        // will still be in the way next time, so blocking now saves a full
-        // agent run's spend. This is the one conflict cause reachable at
-        // concurrency 1, since nothing else is writing the main workspace.
-        taskBaselines.delete(task.id);
-        freshTask.status = "blocked";
-        const reason = t("loop.reason.mergeDirty");
-        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
-        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
-        savePRD(prdPath, fresh);
-      } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
-        const reason =
-          result.reason === "review_stalled"
-            ? t("loop.reason.reviewStalled")
-            : result.reason === "review_changes"
-              ? t("loop.reason.reviewChanges")
-              : t("loop.reason.reviewExhausted");
-        const displayReason = withReviewFeedback(reason, result.reviewChanges);
-        // Replan rung of the recovery ladder. A stall means every fix round landed
-        // on the identical failure, and the plan the executor was following is part
-        // of that evidence — so it must not be replayed. Only on a stall: an
-        // ordinary retry is what the cache exists for, and there the plan is not
-        // the suspect. run.ts detects the stall, this owns prd.json, and each exit
-        // below saves `fresh`.
-        if (result.reason === "review_stalled") {
-          invalidatePlan(freshTask);
-          log(progress, t("loop.log.planInvalidated", { id: task.id }));
-        }
-        const allowReviewOverride = result.verificationPassed === true;
-        const action = await reviewBlockedGate(tui, cfg, progress, task.id, displayReason, allowReviewOverride);
-        if (action === "quit") {
-          done();
-          log(progress, t("loop.log.quit"));
-          return;
-        }
-        if (action === "retry") {
-          freshTask.status = "todo";
-          const feedback = result.reviewChanges?.trim() || reason;
-          pendingReviewFeedback.set(task.id, feedback);
-          log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
-          emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
-          savePRD(prdPath, fresh);
-          await sleep(1000);
-          continue;
-        }
-        if (action === "approve" && allowReviewOverride) {
-          const approveLanded = landWorktreeWork();
-          if (approveLanded !== "ok") {
-            // Approved but unlandable. Blocking beats recording a done task the
-            // main workspace never received; the sha to recover it is already
-            // in the log line landWorktreeWork wrote.
-            taskBaselines.delete(task.id);
-            freshTask.status = "blocked";
-            const reason = approveLanded === "dirty" ? t("loop.reason.mergeDirty") : t("loop.reason.mergeConflict");
-            log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
-            emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
-            savePRD(prdPath, fresh);
-            if (opts.task) {
-              done();
-              return;
-            }
-            await sleep(1000);
-            continue;
-          }
-          freshTask.status = "done";
-          accepted += 1; // accepted change, whoever accepted it: same denominator as an auto-pass
-          log(
-            progress,
-            tui
-              ? t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason })
-              : t("loop.log.headlessAccepted", { id: task.id, s: elapsed, reason: displayReason }),
-          );
-          emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
-          savePRD(prdPath, fresh);
-          if (cfg.commit_per_task && !wt) {
-            logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
-          }
-          taskBaselines.delete(task.id);
-          if (opts.task) {
-            done();
-            return;
-          }
-          await sleep(1000);
-          continue;
-        }
-        taskBaselines.delete(task.id);
-        freshTask.status = "blocked";
-        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: displayReason }));
-        emit({ taskId: task.id, status: "blocked", reason: displayReason, elapsedMs });
-        savePRD(prdPath, fresh);
-      } else {
-        // Also where a merge-back CONFLICT lands, deliberately: the next
-        // attempt's worktree is cut from the new HEAD, which already contains
-        // whatever won, so "re-execute on top of the result" is what already
-        // happens and max_retries_per_task is already the attempt ceiling.
-        // No second ladder, no separate block reason.
-        freshTask.retries += 1;
-        if (freshTask.retries >= cfg.max_retries_per_task) {
-          taskBaselines.delete(task.id);
-          freshTask.status = "blocked";
-          const reason = t("loop.reason.maxRetries");
-          log(progress, t("loop.log.blocked", { id: task.id, s: elapsed }));
-          emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
-        } else {
-          freshTask.status = "todo";
-          log(progress, t("loop.log.retry", { id: task.id, s: elapsed, n: freshTask.retries }));
-          emit({ taskId: task.id, status: "retry", elapsedMs });
-        }
-        savePRD(prdPath, fresh);
-      }
-
-      if (opts.task) {
-        done();
-        return;
-      }
-      // a manual skip marks the task blocked too, but the user asked to move ON —
-      // only an automatic (max-retries) block honors stop_on_blocked.
-      if (!skipped && freshTask.status === "blocked" && cfg.stop_on_blocked) {
-        done();
-        log(progress, t("loop.log.stopBlocked"));
-        return;
-      }
-      await sleep(1000);
-    } finally {
-      // Every exit path — done, blocked, skipped, retry, quit, crash — drops the
-      // cell. That discard IS the rollback the serial loop never had, where a
-      // blocked task leaves its mess smeared across the main workspace.
-      if (wt) {
-        // The baseline is a tree of THIS worktree's start. The next attempt gets
-        // a fresh worktree cut from a newer HEAD, so keeping it would make that
-        // attempt stage whatever landed in between as its own work.
-        taskBaselines.delete(task.id);
-        if (!worktreeAccounted) {
-          const lost = worktreeLoss(wt, taskStartCommit);
-          if (lost.head) log(progress, t("loop.log.worktreeDiscarded", { id: task.id, hash: shortHash(lost.head) }));
-          else if (lost.dirty) log(progress, t("loop.log.worktreeDiscardedDirty", { id: task.id }));
-        }
-        removeTaskWorktree(workspace, wt);
-      }
-    }
+    await sleep(1000);
   }
 }
 

@@ -45,6 +45,8 @@ const en = {
   "loop.err.badConfig": "invalid JSON in {path}: {msg}",
   "loop.err.worktreeNeedsCommit":
     "worktree_per_task requires commit_per_task: the commit is how a task's work leaves its worktree.",
+  "loop.err.parallelNeedsWorktree":
+    "max_parallel_tasks > 1 requires worktree_per_task: two executors in one checkout overwrite each other.",
 
   // loop.ts — --dry-run report
   "loop.dry.next": "next: {id} — {title}",
@@ -78,6 +80,8 @@ const en = {
   "loop.log.committed": "  {id}: committed — {hash}",
   "loop.log.commitUnscoped": "  {id}: could not scope the commit to this task's files — staging everything",
   "loop.log.worktreeReaped": "reclaimed {n} orphan worktree(s) left behind by a previous run",
+  "loop.log.waveStart": "WAVE of {n} tasks in parallel: {ids}",
+  "loop.log.scopeEscape": "  {id}: edited {n} path(s) outside its declared scope — {paths}",
   "loop.log.worktreeUnavailable": "  {id}: no worktree available (no repo, or no commit yet) — running in the main workspace",
   "loop.log.worktreeConflict": "  {id}: its work conflicts with what already landed — retrying on top of it (recoverable at {hash})",
   "loop.log.worktreeDirty": "  {id}: merge-back refused — you have uncommitted changes in a file this task touched (recoverable at {hash})",
@@ -297,7 +301,8 @@ const en = {
   "run.gate.exec": "exec",
   "run.gate.tests": "tests",
   "run.gate.review": "review",
-  "run.confirmSkip": "confirm skip? y/n",
+  "run.paneWave": "{n} tasks running in parallel — lines are tagged [task]",
+  "run.confirmSkip": "confirm skip? aborts EVERY task in flight y/n",
   "run.confirmQuit": "confirm quit? y/n",
   "run.footerHint": "[p]ause [s]kip [q]uit",
   "run.footerPaused": "[PAUSED] [c]config [p]resume [s]kip [q]uit",
@@ -366,6 +371,8 @@ const ptBr: Record<MsgKey, string> = {
   "loop.err.badConfig": "JSON inválido em {path}: {msg}",
   "loop.err.worktreeNeedsCommit":
     "worktree_per_task exige commit_per_task: o commit é como o trabalho de uma task sai da worktree dela.",
+  "loop.err.parallelNeedsWorktree":
+    "max_parallel_tasks > 1 exige worktree_per_task: dois executores no mesmo checkout se sobrescrevem.",
 
   "loop.dry.next": "próxima: {id} — {title}",
   "loop.dry.mode": "modo: {mode} | executor {executor} | advisor {advisor}",
@@ -395,6 +402,8 @@ const ptBr: Record<MsgKey, string> = {
   "loop.log.executorCommit": "  {id}: commit detectado durante a execução — {hash}",
   "loop.log.commitUnscoped": "  {id}: não foi possível limitar o commit aos arquivos desta task — commitando tudo",
   "loop.log.worktreeReaped": "{n} worktree(s) órfã(s) de uma execução anterior recolhida(s)",
+  "loop.log.waveStart": "LEVA de {n} tasks em paralelo: {ids}",
+  "loop.log.scopeEscape": "  {id}: editou {n} caminho(s) fora do scope declarado — {paths}",
   "loop.log.worktreeUnavailable": "  {id}: nenhuma worktree disponível (sem repo, ou sem commit ainda) — rodando no workspace principal",
   "loop.log.worktreeConflict": "  {id}: o trabalho conflita com o que já entrou — tentando de novo em cima dele (recuperável em {hash})",
   "loop.log.worktreeDirty": "  {id}: merge de volta recusado — você tem mudanças não commitadas em um arquivo que esta task tocou (recuperável em {hash})",
@@ -602,7 +611,8 @@ const ptBr: Record<MsgKey, string> = {
   "run.gate.exec": "exec",
   "run.gate.tests": "testes",
   "run.gate.review": "revisão",
-  "run.confirmSkip": "confirmar pular? y/n",
+  "run.paneWave": "{n} tasks rodando em paralelo — as linhas vêm marcadas com [task]",
+  "run.confirmSkip": "confirmar pular? aborta TODAS as tasks em execução y/n",
   "run.confirmQuit": "confirmar sair? y/n",
   "run.footerHint": "[p] pausar [s] pular [q] sair",
   "run.footerPaused": "[PAUSADO] [c] config [p] resumir [s] pular [q] sair",

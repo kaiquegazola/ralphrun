@@ -13,7 +13,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import { readFileSync } from "node:fs";
-import { loadPrdFile, normalizePrd, overlappingScopePairs, type ScopedTask } from "./prdload.js";
+import { loadPrdFile, normalizePrd, overlappingScopePairs, pathsOutsideScope, type ScopedTask } from "./prdload.js";
 
 const mRead = vi.mocked(readFileSync);
 
@@ -316,5 +316,21 @@ describe("loadPrdFile", () => {
     const r = loadPrdFile("/x/prd.json");
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => e.startsWith("dependency cycle:"))).toBe(true);
+  });
+});
+
+describe("pathsOutsideScope", () => {
+  it("reports only the paths no declared glob covers", () => {
+    expect(pathsOutsideScope(["src/api/h.ts", "src/i18n.ts"], ["src/api/**"])).toEqual(["src/i18n.ts"]);
+  });
+
+  it("treats an empty scope as declaring nothing, so nothing can escape it", () => {
+    // a backlog written before `scope` existed must not start emitting a warning
+    // on every task it ever runs
+    expect(pathsOutsideScope(["anything.ts"], [])).toEqual([]);
+  });
+
+  it("matches a directory scope and a ./-prefixed path the same way globs do", () => {
+    expect(pathsOutsideScope(["./src/a.ts", "docs/x.md"], ["src/"])).toEqual(["docs/x.md"]);
   });
 });

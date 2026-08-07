@@ -84,9 +84,15 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   let globalElapsedMs = state.globalElapsedMs;
 
   // status "doing" = task transition: wipe the per-task view so lines/gates from
-  // the previous task don't bleed into the next one.
+  // the previous task don't bleed into the next one. NOT when a sibling is
+  // already in flight: a wave dispatches N tasks back to back, and wiping on
+  // each would erase the one that is still running. With one task at a time
+  // counts.doing is 0 here, so the serial pane behaves exactly as before.
   if (e.status === "doing") {
-    current = { taskId: e.taskId, subphase: "idle", gates: {}, lines: [] };
+    current =
+      state.counts.doing > 0
+        ? { ...current, taskId: e.taskId }
+        : { taskId: e.taskId, subphase: "idle", gates: {}, lines: [] };
   }
 
   if (e.title !== undefined) {
@@ -97,7 +103,12 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   if (e.round !== undefined) current.round = e.round;
   if (e.attempt !== undefined) current.attempt = e.attempt;
   if (e.gates !== undefined) current.gates = { ...current.gates, ...e.gates };
-  if (e.line !== undefined) current.lines = [...current.lines, formatLine(e.line, e.lineSource)].slice(-LINE_CAP);
+  // One pane, N executors: without the id every stream reads as one. Tagged
+  // only while a wave is in flight, so a serial run's pane is unchanged.
+  if (e.line !== undefined) {
+    const tag = state.counts.doing > 1 ? e.taskId : undefined;
+    current.lines = [...current.lines, formatLine(e.line, e.lineSource, tag)].slice(-LINE_CAP);
+  }
   if (e.elapsedMs !== undefined) current.elapsedMs = e.elapsedMs;
   if (e.timeoutMs !== undefined) current.timeoutMs = e.timeoutMs;
   if (e.taskElapsedMs !== undefined) current.taskElapsedMs = e.taskElapsedMs;
@@ -116,9 +127,9 @@ function foldEvent(state: UiState, e: RunEvent): UiState {
   return { ...state, current, tasks, blocked, globalElapsedMs, counts: countOf(tasks) };
 }
 
-function formatLine(line: string, source?: RunEvent["lineSource"]): string {
-  if (!source) return line;
-  return `[${source}] ${line}`;
+function formatLine(line: string, source?: RunEvent["lineSource"], taskId?: string): string {
+  const prefix = (taskId ? `[${taskId}] ` : "") + (source ? `[${source}] ` : "");
+  return prefix + line;
 }
 
 export function reducer(state: UiState, action: Action): UiState {

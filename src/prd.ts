@@ -28,14 +28,25 @@ export interface PRD {
   tasks: Task[];
 }
 
-export function nextTask(prd: PRD): Task | null {
+/**
+ * Every task runnable RIGHT NOW: todo, with every dep already `done`.
+ *
+ * NOT sessionRunnableIds, which looks like the same fixpoint and is not: that
+ * one admits a task whose deps are merely *admitted*, which is correct for a
+ * preflight ("could this run at some point this session?") and catastrophic for
+ * a scheduler, since it would dispatch T2 while T1 is still executing.
+ *
+ * The members of the returned array are pairwise UNORDERED — if A depends on B
+ * then A is only ready once B is done, and a done B is not itself ready — which
+ * is what lets the loop dispatch several of them at once.
+ */
+export function readyTasks(prd: PRD): Task[] {
   const done = new Set(prd.tasks.filter((t) => t.status === "done").map((t) => t.id));
-  for (const t of prd.tasks) {
-    if (t.status === "todo" && t.deps.every((d) => done.has(d))) {
-      return t;
-    }
-  }
-  return null;
+  return prd.tasks.filter((t) => t.status === "todo" && t.deps.every((d) => done.has(d)));
+}
+
+export function nextTask(prd: PRD): Task | null {
+  return readyTasks(prd)[0] ?? null;
 }
 
 export function findTask(prd: PRD, id: string): Task | null {

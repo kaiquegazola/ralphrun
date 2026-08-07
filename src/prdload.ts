@@ -110,6 +110,28 @@ function patternsOverlap(a: string, b: string): boolean {
   return globToRegExp(a).test(normGlob(b)) || globToRegExp(b).test(normGlob(a));
 }
 
+/**
+ * Paths a task actually touched that its declared `scope` does not cover.
+ *
+ * WARN only, deliberately: `scope` is the planner's GUESS, while the merge-back
+ * cherry-pick enforces the FACT that two tasks really did edit the same lines.
+ * Failing a task on the guess blocks work that would have merged fine — in THIS
+ * repo it would block nearly everything, since MsgKey derives from the `en`
+ * dict, so any task adding a message must edit src/i18n.ts and no planner puts
+ * that in a task's scope. An empty scope declares nothing, so it escapes nothing.
+ *
+ * ponytail: revisit fail-closed once planner scope declarations stop producing
+ * false positives; it is a product call, not a technical one.
+ */
+export function pathsOutsideScope(paths: string[], scope: string[]): string[] {
+  const allowed = scope.map((p) => globToRegExp(p));
+  if (allowed.length === 0) return [];
+  return paths.filter((p) => {
+    const norm = p.replace(/^\.\//, "");
+    return !allowed.some((re) => re.test(norm));
+  });
+}
+
 export interface ScopedTask {
   id: string;
   deps: string[];

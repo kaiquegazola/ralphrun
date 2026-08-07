@@ -1,6 +1,6 @@
 // prd.test.ts — nextTask, findTask (normalize/recovery cases live in prdload.test.ts)
 import { describe, it, expect } from "vitest";
-import { nextTask, findTask, sessionRunnableIds } from "./prd.js";
+import { nextTask, findTask, readyTasks, sessionRunnableIds } from "./prd.js";
 import type { PRD, Task } from "./prd.js";
 
 function t(partial: Partial<Task> & { id: string }): Task {
@@ -30,6 +30,27 @@ describe("nextTask", () => {
       tasks: [t({ id: "B", deps: ["A"] })],
     };
     expect(nextTask(prd)).toBeNull();
+  });
+});
+
+describe("readyTasks", () => {
+  const prd = (tasks: Task[]): PRD => ({ project: "", stack: "", architecture_notes: "", tasks });
+
+  it("returns EVERY todo whose deps are all done — that set is what a wave dispatches", () => {
+    const p = prd([t({ id: "A", status: "done" }), t({ id: "B", deps: ["A"] }), t({ id: "C" })]);
+    expect(readyTasks(p).map((x) => x.id)).toEqual(["B", "C"]);
+  });
+
+  it("never admits a task whose dep is merely READY, only one that is done", () => {
+    // the whole difference from sessionRunnableIds: admitting B here would put
+    // two ordered tasks in the same wave, running B against a half-built A
+    const p = prd([t({ id: "A" }), t({ id: "B", deps: ["A"] })]);
+    expect(readyTasks(p).map((x) => x.id)).toEqual(["A"]);
+  });
+
+  it("excludes doing/blocked tasks, so a wave never re-dispatches one in flight", () => {
+    const p = prd([t({ id: "A", status: "doing" }), t({ id: "B", status: "blocked" }), t({ id: "C" })]);
+    expect(readyTasks(p).map((x) => x.id)).toEqual(["C"]);
   });
 });
 

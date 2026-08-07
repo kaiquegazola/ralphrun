@@ -106,6 +106,27 @@ describe("foldEvent status", () => {
     expect(s.counts.doing).toBe(1);
   });
 
+  it("a second doing while one is in flight keeps the first task's lines", () => {
+    // a wave dispatches N tasks back to back; wiping on each `doing` would erase
+    // the sibling that is still producing output into the same pane
+    let s = reducer(seeded(), { type: "event", event: { taskId: "T1", status: "doing" } });
+    s = reducer(s, { type: "event", event: { taskId: "T1", line: "still running" } });
+    s = reducer(s, { type: "event", event: { taskId: "T2", status: "doing" } });
+    expect(s.current.lines).toEqual(["still running"]);
+    expect(s.counts.doing).toBe(2);
+  });
+
+  it("tags pane lines with their task id only while a wave is in flight", () => {
+    // one pane, N executors: without the id every stream reads as one. With a
+    // single task in flight the line must stay exactly as it always was.
+    let s = reducer(seeded(), { type: "event", event: { taskId: "T1", status: "doing" } });
+    s = reducer(s, { type: "event", event: { taskId: "T1", line: "solo" } });
+    expect(s.current.lines).toEqual(["solo"]);
+    s = reducer(s, { type: "event", event: { taskId: "T2", status: "doing" } });
+    s = reducer(s, { type: "event", event: { taskId: "T2", line: "mine", lineSource: "executor" } });
+    expect(s.current.lines).toEqual(["solo", "[T2] [executor] mine"]);
+  });
+
   it("retry maps to todo", () => {
     let s = reducer(seeded(), { type: "event", event: { taskId: "T1", status: "done" } });
     s = reducer(s, { type: "event", event: { taskId: "T1", status: "retry" } });

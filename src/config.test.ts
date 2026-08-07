@@ -124,6 +124,36 @@ describe("loadConfig", () => {
     expect(cfg.worktree_link).toEqual(["node_modules"]);
   });
 
+  it("runs one task at a time by default", () => {
+    // parallelism has to be opted into TWICE (worktrees, then a cap), so no
+    // existing run changes shape
+    vi.mocked(existsSync).mockReturnValue(false);
+    expect(loadConfig("/x/prd.json", undefined, {}).max_parallel_tasks).toBe(1);
+  });
+
+  it("refuses max_parallel_tasks > 1 without worktree_per_task", () => {
+    // two executors editing one checkout is data loss, not a configuration
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ max_parallel_tasks: 4 }) as unknown as string);
+    expect(() => loadConfig("/x/prd.json", undefined, {})).toThrow("max_parallel_tasks");
+  });
+
+  it("clamps max_parallel_tasks into [1,8] and coerces a nonsense value to 1", () => {
+    // the ceiling is agent spend and provider rate limits, not cores — and a
+    // hand-edited 0 or "many" must not stall the loop or fan out unbounded
+    vi.mocked(existsSync).mockReturnValue(true);
+    const load = (v: unknown): number => {
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ max_parallel_tasks: v, worktree_per_task: true }) as unknown as string,
+      );
+      return loadConfig("/x/prd.json", undefined, {}).max_parallel_tasks!;
+    };
+    expect(load(99)).toBe(8);
+    expect(load(0)).toBe(1);
+    expect(load("many")).toBe(1);
+    expect(load(2.9)).toBe(2);
+  });
+
   it("overrides win over file and defaults", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ review_after: true }) as unknown as string);

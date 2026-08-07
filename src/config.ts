@@ -96,6 +96,16 @@ export interface Config {
    * a Python/Rust/Go project has to name its own (.venv, target, vendor).
    */
   worktree_link?: string[];
+  /**
+   * How many tasks may execute at the same time. Clamped to [1, 8] — the
+   * binding constraint is agent spend and provider rate limits, not cores.
+   *
+   * 1 (the default) is the serial loop, byte for byte. Anything above 1 is
+   * REFUSED unless worktree_per_task is on: two executors editing one checkout
+   * is data loss, not a configuration. The real ceiling is the DAG's width, a
+   * property of the plan and not of this knob. See README.
+   */
+  max_parallel_tasks?: number;
   extra_executor_args: string[];
 }
 
@@ -120,6 +130,7 @@ export const DEFAULTS: Config = {
   review_timeout: 900,
   worktree_per_task: false,
   worktree_link: ["node_modules"],
+  max_parallel_tasks: 1,
   extra_executor_args: [],
 };
 
@@ -182,5 +193,11 @@ export function loadConfig(
   // task does would ever leave it. Fail at load, where the user can see it, not
   // once per task at runtime.
   if (cfg.worktree_per_task && !cfg.commit_per_task) throw new Error(t("loop.err.worktreeNeedsCommit"));
+  // `|| 1` also absorbs 0 and a non-numeric value from a hand-edited config
+  cfg.max_parallel_tasks = Math.min(8, Math.max(1, Math.trunc(Number(cfg.max_parallel_tasks)) || 1));
+  // Same reason as above, one step harder: without a worktree per task, two
+  // executors share one checkout and overwrite each other's files. Refuse at
+  // load rather than discovering it as a corrupted commit.
+  if (cfg.max_parallel_tasks > 1 && !cfg.worktree_per_task) throw new Error(t("loop.err.parallelNeedsWorktree"));
   return cfg;
 }

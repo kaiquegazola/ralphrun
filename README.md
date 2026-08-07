@@ -371,10 +371,18 @@ that stops the loop from lying). `verify` should be a stack-aware quality gate:
 for typed/tested projects, include the relevant static check plus focused tests,
 and add build or integration tests when the task changes integration surface.
 
-`scope` is optional: the paths or globs the task is allowed to edit. Nothing
-enforces it yet — it is declared so the plan can later refuse two independent
-tasks that would edit the same files, and so the reviewer gets a checkable
-contract (paths changed outside `scope`) instead of a judgement call.
+`scope` is optional: the paths or globs the task is allowed to edit. Two tasks
+with no dependency path between them may not declare overlapping scope — see
+below. Nothing enforces it at run time yet; it is also declared so the reviewer
+gets a checkable contract (paths changed outside `scope`) instead of a
+judgement call.
+
+`deps` is the other half of the plan's quality. Declare an edge only when a task
+**consumes** something the earlier one produces — "comes later in the narrative"
+is not a dependency, and a plan that chains everything sequentially cannot be
+parallelized later. Where parallel branches converge, add an integration task
+whose `verify` runs the whole suite: N tasks each passing their own isolated
+gate can still be broken together.
 
 ```json
 {
@@ -402,6 +410,10 @@ loop starts, not diagnosed halfway through it.
   finalize a PRD where any task has no `verify`: a task whose gate can never fail
   is a hole in the loop. Loading an existing backlog stays permissive — it warns
   once with the count (`3/8 tasks have no verify command`) and runs.
+- **Overlapping editor scopes.** Two tasks with no dependency path between them
+  (direct or transitive) that declare `scope` globs sharing a file are refused:
+  nothing orders them, so both could edit that file at once. Tasks that *do*
+  depend on each other may overlap freely — the graph already sequences them.
 - **Shape.** Unknown dep ids, duplicate ids, wrong field types, an empty task
   list, and a `scope` that is not an array of strings.
 

@@ -264,6 +264,8 @@ const en = {
   "prd.err.depCycle": "dependency cycle: {cycle} — no task in it can ever start",
   "prd.err.scope": "task[{i}].scope must be an array",
   "prd.err.scopeItem": "task[{i}].scope items must be strings",
+  "prd.err.scopeOverlap":
+    "tasks {a} and {b} have no dependency between them but edit the same files: {pa} overlaps {pb}",
   "prd.err.verify": "task[{i}].verify must be a string",
   "prd.err.verifyRequired": "task[{i}].verify is required — a task with no verify command is never verified",
   "prd.err.plan": "task[{i}].plan must be a string",
@@ -552,6 +554,8 @@ const ptBr: Record<MsgKey, string> = {
   "prd.err.depCycle": "ciclo de dependências: {cycle} — nenhuma task dele consegue começar",
   "prd.err.scope": "task[{i}].scope precisa ser um array",
   "prd.err.scopeItem": "task[{i}].scope precisa conter apenas strings",
+  "prd.err.scopeOverlap":
+    "as tasks {a} e {b} não têm dependência entre si mas editam os mesmos arquivos: {pa} se sobrepõe a {pb}",
   "prd.err.verify": "task[{i}].verify precisa ser uma string",
   "prd.err.verifyRequired": "task[{i}].verify é obrigatório — uma task sem comando verify nunca é verificada",
   "prd.err.plan": "task[{i}].plan precisa ser uma string",

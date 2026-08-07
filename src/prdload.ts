@@ -85,6 +85,77 @@ function findDepCycle(edges: Map<string, string[]>): string[] | null {
   return null;
 }
 
+// Glob → anchored RegExp. "**" crosses directories, "*"/"?" do not. A trailing
+// slash means the whole directory ("src/" == "src/**").
+function globToRegExp(pattern: string): RegExp {
+  const body = normGlob(pattern).replace(/\*\*|[*?]|[.+^${}()|[\]\\]/g, (m) =>
+    m === "**" ? ".*" : m === "*" ? "[^/]*" : m === "?" ? "[^/]" : "\\" + m,
+  );
+  return new RegExp(`^${body}$`);
+}
+
+function normGlob(pattern: string): string {
+  const p = pattern.trim().replace(/^\.\//, "");
+  return p.endsWith("/") ? p + "**" : p;
+}
+
+// Deciding whether two globs share a file is exact-cover reasoning; this instead
+// expands one and matches the other AS A LITERAL STRING, both ways. It catches
+// what plans actually write ("src/**" vs "src/api/handler.ts", "src/*.ts" vs
+// "src/db.ts"), and only misses mutual partial wildcards ("src/a*.ts" vs
+// "src/*b.ts", which both match src/ab.ts) — a false NEGATIVE, so the cheap
+// version never refuses a plan that was fine.
+function patternsOverlap(a: string, b: string): boolean {
+  if (normGlob(a) === "" || normGlob(b) === "") return false;
+  return globToRegExp(a).test(normGlob(b)) || globToRegExp(b).test(normGlob(a));
+}
+
+export interface ScopedTask {
+  id: string;
+  deps: string[];
+  scope: string[];
+}
+
+// "Overlapping editor scopes forbidden": two tasks the graph does NOT order can
+// run at the same time, so declaring the same files in both is a merge conflict
+// the plan compiler can refuse before the loop starts. Tasks joined by a dep
+// path — direct OR transitive, A -> B -> C orders A and C — are sequenced, so
+// they may overlap freely. Pass EVERY task, not only the scoped ones: an
+// unscoped task in the middle of a chain is what makes its ends ordered.
+export function overlappingScopePairs(tasks: ScopedTask[]): { a: string; b: string; pa: string; pb: string }[] {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const memo = new Map<string, Set<string>>();
+  // deps point at what must come FIRST, so reachability along them is exactly
+  // "ordered before". Seeding the memo before recursing keeps a cyclic plan from
+  // spinning here; a cycle is already its own error, so the partial closure it
+  // yields never decides anything.
+  const orderedBefore = (id: string): Set<string> => {
+    const hit = memo.get(id);
+    if (hit) return hit;
+    const out = new Set<string>();
+    memo.set(id, out);
+    for (const d of byId.get(id)?.deps ?? []) {
+      out.add(d);
+      for (const x of orderedBefore(d)) out.add(x);
+    }
+    return out;
+  };
+
+  const found: { a: string; b: string; pa: string; pb: string }[] = [];
+  for (let i = 0; i < tasks.length; i++) {
+    for (let j = i + 1; j < tasks.length; j++) {
+      const a = tasks[i];
+      const b = tasks[j];
+      if (a.scope.length === 0 || b.scope.length === 0) continue;
+      if (orderedBefore(a.id).has(b.id) || orderedBefore(b.id).has(a.id)) continue;
+      // one pair, one error: listing every colliding glob buries the fix
+      const pa = a.scope.find((p) => b.scope.some((q) => patternsOverlap(p, q)));
+      if (pa !== undefined) found.push({ a: a.id, b: b.id, pa, pb: b.scope.find((q) => patternsOverlap(pa, q))! });
+    }
+  }
+  return found;
+}
+
 // tasks with no verify command, by index. Feeds two different postures: a hard
 // error while a PRD is being AUTHORED (requireVerify), a warning when an already
 // existing backlog is loaded — see validatePrd/loadPrdFile below.
@@ -162,13 +233,19 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
   // nextTask returns null forever and the run dies blaming "no runnable tasks"
   // when the PRD itself is unsatisfiable.
   const edges = new Map<string, string[]>();
+  const scoped: ScopedTask[] = [];
   for (const t of tasks) {
     if (!t || typeof t !== "object" || typeof t.id !== "string" || edges.has(t.id)) continue;
-    const deps = Array.isArray(t.deps) ? t.deps : [];
-    edges.set(t.id, deps.filter((d): d is string => typeof d === "string" && ids.has(d)));
+    const raw = Array.isArray(t.deps) ? t.deps : [];
+    const deps = raw.filter((d): d is string => typeof d === "string" && ids.has(d));
+    edges.set(t.id, deps);
+    const scope = Array.isArray(t.scope) ? t.scope.filter((s): s is string => typeof s === "string") : [];
+    scoped.push({ id: t.id, deps, scope });
   }
   const cycle = findDepCycle(edges);
   if (cycle) errors.push(msg("prd.err.depCycle", { cycle: cycle.join(" -> ") }));
+
+  for (const o of overlappingScopePairs(scoped)) errors.push(msg("prd.err.scopeOverlap", o));
 
   return { ok: errors.length === 0, errors };
 }

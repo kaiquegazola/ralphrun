@@ -124,6 +124,26 @@ it("rejects a scope that is not an array of strings (omitted stays allowed)", ()
   expect(validatePrd(prd({ tasks: [task({ scope: ["src/**", "README.md"] })] })).ok).toBe(true);
 });
 
+// two tasks the graph does not order can run at the same time, so declaring the
+// same files in both is a merge conflict the plan can refuse up front. The glob
+// arithmetic itself is covered directly in prdload.test.ts.
+it("rejects overlapping editor scopes between tasks with no dependency between them", () => {
+  const r = validatePrd(
+    prd({ tasks: [task({ id: "A", scope: ["src/api/**"] }), task({ id: "B", scope: ["src/api/db.ts"] })] }),
+  );
+  expect(r.ok).toBe(false);
+  expect(r.errors).toContain(
+    "tasks A and B have no dependency between them but edit the same files: src/api/** overlaps src/api/db.ts",
+  );
+});
+
+it("accepts the same overlap once an edge orders the two tasks", () => {
+  const p = prd({
+    tasks: [task({ id: "A", scope: ["src/api/**"] }), task({ id: "B", deps: ["A"], scope: ["src/api/db.ts"] })],
+  });
+  expect(validatePrd(p)).toEqual({ ok: true, errors: [] });
+});
+
 it("rejects non-string persisted plan fields", () => {
   const r = validatePrd(prd({ tasks: [task({ plan: 42, planKey: false })] }));
   expect(r.errors).toContain("task[0].plan must be a string");

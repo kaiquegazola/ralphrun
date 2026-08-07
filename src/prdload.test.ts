@@ -13,7 +13,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import { readFileSync } from "node:fs";
-import { loadPrdFile, normalizePrd } from "./prdload.js";
+import { loadPrdFile, normalizePrd, overlappingScopePairs, type ScopedTask } from "./prdload.js";
 
 const mRead = vi.mocked(readFileSync);
 
@@ -101,6 +101,57 @@ describe("normalizePrd", () => {
 
   it("returns false on an already-normalized PRD", () => {
     expect(normalizePrd(prd())).toBe(false);
+  });
+});
+
+describe("overlappingScopePairs", () => {
+  const st = (id: string, deps: string[], scope: string[]): ScopedTask => ({ id, deps, scope });
+
+  it("reports two independent tasks that edit the same files", () => {
+    const r = overlappingScopePairs([st("A", [], ["src/api/**"]), st("B", [], ["src/api/handler.ts"])]);
+    expect(r).toEqual([{ a: "A", b: "B", pa: "src/api/**", pb: "src/api/handler.ts" }]);
+  });
+
+  // the whole point of the rule: an edge means the two are ordered, so they can
+  // never race for the same file and the overlap is legitimate.
+  it("allows overlap between tasks joined by a dependency edge", () => {
+    expect(overlappingScopePairs([st("A", [], ["src/db.ts"]), st("B", ["A"], ["src/db.ts"])])).toEqual([]);
+  });
+
+  // A -> B -> C orders A and C just as firmly as a direct edge; without the
+  // transitive walk this pair would be refused for an overlap that cannot race.
+  it("allows overlap across a transitive dependency chain", () => {
+    expect(
+      overlappingScopePairs([st("A", [], ["src/db.ts"]), st("B", ["A"], []), st("C", ["B"], ["src/db.ts"])]),
+    ).toEqual([]);
+  });
+
+  // the middle task carries no scope of its own, but dropping it from the input
+  // would break the chain and turn an ordered pair into a false conflict
+  it("still orders a pair through an unscoped middle task", () => {
+    const chain = [st("A", [], ["src/db.ts"]), st("B", ["A"], []), st("C", ["A", "B"], ["src/db.ts"])];
+    expect(overlappingScopePairs(chain)).toEqual([]);
+  });
+
+  it("distinguishes sibling globs that cannot share a file", () => {
+    expect(overlappingScopePairs([st("A", [], ["src/api/**"]), st("B", [], ["src/ui/**"])])).toEqual([]);
+    expect(overlappingScopePairs([st("A", [], ["src/*.ts"]), st("B", [], ["src/*.css"])])).toEqual([]);
+    expect(overlappingScopePairs([st("A", [], ["src/*.ts"]), st("B", [], ["src/db.ts"])])).toHaveLength(1);
+  });
+
+  it("treats a trailing slash and a ./ prefix as the same directory", () => {
+    expect(overlappingScopePairs([st("A", [], ["src/"]), st("B", [], ["./src/db.ts"])])).toHaveLength(1);
+  });
+
+  it("ignores tasks with an empty scope — nothing declared, nothing to collide", () => {
+    expect(overlappingScopePairs([st("A", [], []), st("B", [], [])])).toEqual([]);
+    expect(overlappingScopePairs([st("A", [], [""]), st("B", [], [" "])])).toEqual([]);
+  });
+
+  // a cyclic plan is rejected by the cycle check anyway; this only pins that the
+  // memoized walk terminates instead of recursing forever
+  it("terminates on a cyclic graph", () => {
+    expect(overlappingScopePairs([st("A", ["B"], ["x.ts"]), st("B", ["A"], ["x.ts"])])).toEqual([]);
   });
 });
 

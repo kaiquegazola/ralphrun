@@ -163,6 +163,21 @@ it("instructs the planner to use context-aware verify quality gates", async () =
   expect(prompt).toContain("Do not mark a task done if typecheck/lint/build is known to fail");
 });
 
+// planners chain everything sequentially because that is how work is described
+// in natural language, and a narrow graph makes the rest of the pipeline
+// pointless — the fake-edge test is the instruction that widens it.
+it("instructs the planner to declare deps only for consumed artifacts, and to scope tasks", async () => {
+  await run(["sum", "", "```json", VALID_JSON, "```"]);
+  const prompt = buildCmdMock.mock.calls[0][1] as string;
+  expect(prompt).toContain("declare an edge ONLY when the task CONSUMES an artifact");
+  expect(prompt).toContain("would this task FAIL if it ran first?");
+  expect(prompt).toContain("do not manufacture parallelism");
+  expect(prompt).toContain("must not declare overlapping scope");
+  expect(prompt).toContain("acceptance item as a CHECKABLE statement");
+  expect(prompt).toContain("add an integration task whose verify");
+  expect(prompt).toContain("scope[]"); // the field is in the announced json shape
+});
+
 it("notes truncated attachments and flags unreadable ones in the prompt", async () => {
   await run(["sum", "", "```json", VALID_JSON, "```"], {
     attachments: [

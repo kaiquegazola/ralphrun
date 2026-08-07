@@ -109,6 +109,7 @@ tail -f ralph.out
   "stream_output": true,
   "commit_per_task": true,
   "stop_on_blocked": false,
+  "max_cost_usd": 0,
   "extra_executor_args": []
 }
 ```
@@ -127,6 +128,24 @@ tail -f ralph.out
   at 25s of total silence for a 25s task. Only applied to CLIs with a verified
   event parser (today: `claude`); the rest ignore it. The advisor never streams,
   because its stdout *is* its verdict.
+
+- `max_cost_usd` stops the run once the measured spend reaches that many dollars.
+  `0` (the default) is no ceiling, so an existing setup keeps running exactly as
+  it did. It is read **once**, before the first task: the config menu is reachable
+  mid-run, and a re-read per iteration would let a run raise its own budget from
+  the inside. It is checked **between** tasks and never mid-task — killing a task
+  that is already paid for throws the result away and still leaves the bill — so
+  the task that crosses the line finishes, and the run stops before the next one.
+  Each task logs its own cost, and the run ends with the total and the cost per
+  accepted change.
+
+- **The reported total is a floor, not a total.** `total_cost_usd` comes from
+  `claude` and from nothing else today, and *no* CLI meters the advisor, so part
+  of nearly every run is unmeasured: costs print as `≥$1.2345` when some of the
+  spend was never reported and `unknown` when none of it was. `max_cost_usd`
+  therefore bounds only the spend ralphrun can *see* — with an unmetered executor
+  it never fires at all. It is a backstop against a runaway loop, not a billing
+  limit; your provider's own spend cap is the only real one.
 
 There is deliberately **no** idle timeout. A silence-based kill sounds obvious
 but measurement says otherwise: a buffered CLI is silent for the entire task, and

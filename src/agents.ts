@@ -1,20 +1,25 @@
 // agents.ts — THE agent registry. The single source of truth for every coding
 // CLI ralphrun can drive.
 //
-// Adding a CLI = adding ONE entry to AGENTS below. Nothing else. Every other
-// module derives what it needs from here instead of re-listing the clis:
+// Adding a CLI = adding ONE entry to AGENTS below, or — for a cli with an
+// ordinary command line — a JSON manifest the user drops in their config dir
+// (see "Agent manifests" at the bottom). Nothing else. Every other module
+// derives what it needs from here instead of re-listing the clis:
 //   adapters.ts            -> buildCmd            (spawn args)
 //   config.ts              -> binOf/defaultModelOf (BINARIES / DEFAULT_MODELS)
 //   diagnostics.ts         -> checkAuth, agentClis (preflight)
 //   wizard/configcmd       -> label, models, recommended (pickers)
 //   run.ts / loop.ts       -> nativeAdvisor       (NATIVE vs CROSS routing)
 //
-// Depends on nothing in the app (only node stdlib), so it can be imported from
-// any layer without a cycle.
+// Imports only node stdlib and userconfig.ts (which is itself stdlib-only), so
+// it can still be imported from any layer without a cycle.
 
 import { execSync } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import { parseClaudeStream, type StreamEvent } from "./stream.js";
+import { configDir } from "./userconfig.js";
 
 export type AgentRole = "planner" | "executor" | "advisor";
 
@@ -345,7 +350,193 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
   },
 } satisfies Record<string, AgentDef>);
 
-/** every registered cli, in picker order */
+// ---------------------------------------------------------------------------
+// Agent manifests — a cli as DATA, not code.
+//
+// Drop `<cli>.json` in <configDir>/agents/ (the same place userconfig.ts keeps
+// config.json) and that cli joins the registry: it shows up in the pickers,
+// gets a preflight probe and runs. No fork, no rebuild, no republish.
+//
+// WHERE THE LINE IS. A manifest describes one command-line shape:
+//   <bin> <args…> [prompt] [modelFlag <model>] [autoApproveArgs…] [reviewArgs…]
+// with the prompt either right after `args`, LAST (promptLast), or piped in
+// (promptVia: "stdin"). That covers every built-in above except grok, which
+// weaves `--cwd <cwd>` into the middle of its argv.
+//
+// Everything that is a FUNCTION stays in code, because data cannot express it:
+// stream parsers (stream.ts), headless auth probes, nativeAdvisor flags, and
+// in-process SDK backends. An exotic cli still gets an entry in AGENTS above —
+// that is the escape hatch, not a hole in the format. Rewriting the built-ins
+// as manifests would be a migration with no user-visible gain, so they stay.
+// ---------------------------------------------------------------------------
+
+/** the declarative subset of an AgentDef: what a user can register from JSON */
+export interface AgentManifest {
+  label: string;
+  bin: string;
+  /** model ids offered in the pickers; the picker label is the id itself */
+  models: string[];
+  /** the flag this cli takes its model on, e.g. "--model" or "-m" */
+  modelFlag: string;
+  /** fixed args right after the binary: subcommand and always-on flags, e.g. ["agent", "--trust", "-p"] */
+  args?: string[];
+  /** appended when ralphrun runs unattended, e.g. ["--yolo"] */
+  autoApproveArgs?: string[];
+  /** READ-ONLY tool grant for the review call — see AgentDef.reviewArgs */
+  reviewArgs?: string[];
+  /** "" or absent = let the cli pick; anything else must be one of `models` */
+  defaultModel?: string;
+  /** "stdin" keeps the prompt out of the argv (survives cmd.exe's ~8191 limit) */
+  promptVia?: "argv" | "stdin";
+  /** true = the prompt is the LAST argv element, after the flags (codex, opencode) */
+  promptLast?: boolean;
+}
+
+/** a manifest we refused to register, and why */
+export interface ManifestRefusal {
+  /** the cli id the file WOULD have registered (its filename, minus .json) */
+  cli: string;
+  file: string;
+  reason: string;
+}
+
+/** where a user drops <cli>.json to register a cli without forking ralphrun */
+export function manifestDir(): string {
+  return join(configDir(), "agents");
+}
+
+// the id is typed by a human as `--executor <cli>:<model>`, so it may not
+// contain the ":" that separator splits on, nor be empty
+const MANIFEST_ID = /^[a-z0-9][a-z0-9._-]*$/i;
+
+// the same shapes agents.test.ts refuses on the built-ins: the review runs at
+// autoApprove:false on purpose, so a "read-only" grant that switches
+// permissions off wholesale hands back exactly what that posture withholds.
+const BLANKET_APPROVE = /skip-permissions|bypass|always-approve|--force|--auto\b/;
+
+const BUILT_IN = new Set(Object.keys(AGENTS));
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((s) => typeof s === "string");
+}
+
+/** first thing wrong with a parsed manifest, naming the field; null = usable */
+function manifestProblem(m: Record<string, unknown>): string | null {
+  if (typeof m.label !== "string" || !m.label.trim()) return '"label" must be a non-empty string';
+  if (typeof m.bin !== "string" || !m.bin.trim()) return '"bin" must be a non-empty string';
+  if (!isStringArray(m.models) || m.models.length === 0 || m.models.some((s) => !s.trim()))
+    return '"models" must be a non-empty array of non-empty strings';
+  if (typeof m.modelFlag !== "string" || !m.modelFlag.trim())
+    return '"modelFlag" must be a non-empty string — the flag this cli takes its model on, e.g. "--model"';
+  if (m.defaultModel !== undefined && typeof m.defaultModel !== "string") return '"defaultModel" must be a string';
+  if (m.defaultModel && !m.models.includes(m.defaultModel as string))
+    return '"defaultModel" must be one of "models" (or "" to let the cli choose)';
+  for (const k of ["args", "autoApproveArgs", "reviewArgs"] as const)
+    if (m[k] !== undefined && !isStringArray(m[k])) return `"${k}" must be an array of strings`;
+  if (m.promptVia !== undefined && m.promptVia !== "argv" && m.promptVia !== "stdin")
+    return '"promptVia" must be "argv" or "stdin"';
+  if (m.promptLast !== undefined && typeof m.promptLast !== "boolean") return '"promptLast" must be a boolean';
+  const blanket = (m.reviewArgs as string[] | undefined)?.find((a) => BLANKET_APPROVE.test(a));
+  if (blanket) return `"reviewArgs" must not contain the approve-everything flag ${blanket} — a review runs read-only`;
+  return null;
+}
+
+function compileManifest(m: AgentManifest): AgentDef {
+  const defaultModel = m.defaultModel ?? "";
+  // a manifest declares no per-role opinion, so every role gets the same pick.
+  // It has to be a REAL model or the pickers offer something the cli rejects.
+  const pick = defaultModel || m.models[0];
+  return {
+    label: m.label,
+    bin: m.bin,
+    defaultModel,
+    models: m.models.map((value) => ({ value, label: value })),
+    recommended: { planner: pick, executor: pick, advisor: pick },
+    ...(m.promptVia === "stdin" ? { promptVia: "stdin" as const } : {}),
+    ...(m.reviewArgs ? { reviewArgs: m.reviewArgs } : {}),
+    buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs }) => {
+      const cmd = [bin, ...(m.args ?? [])];
+      // empty prompt = adapters kept it out for a stdin cli; never push "",
+      // which most clis read as an empty positional argument and reject
+      if (prompt && !m.promptLast) cmd.push(prompt);
+      if (model) cmd.push(m.modelFlag, model);
+      if (autoApprove) cmd.push(...(m.autoApproveArgs ?? []));
+      if (reviewArgs) cmd.push(...reviewArgs);
+      if (prompt && m.promptLast) cmd.push(prompt);
+      return cmd;
+    },
+  };
+}
+
+/**
+ * Read every manifest in `dir`. Untrusted input (BUILD 08 posture): a file that
+ * does not validate registers NOTHING and comes back as a refusal naming the
+ * file and the field, rather than half-registering a cli that fails at spawn.
+ */
+export function loadAgentManifests(explicitDir?: string): {
+  agents: Record<string, AgentDef>;
+  refusals: ManifestRefusal[];
+} {
+  const agents: Record<string, AgentDef> = Object.create(null) as Record<string, AgentDef>;
+  const refusals: ManifestRefusal[] = [];
+  let dir: string;
+  let files: string[];
+  // Resolving the config dir is inside the try on purpose: agents.ts is
+  // imported by every layer and this runs at load, so "we cannot locate the
+  // config dir" has to degrade to "no manifests", never to a crash on import.
+  try {
+    dir = explicitDir ?? manifestDir();
+    files = readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .sort(); // picker order must not depend on the filesystem's readdir order
+  } catch {
+    return { agents, refusals }; // no manifest dir at all is the normal case
+  }
+  for (const f of files) {
+    const cli = basename(f, ".json");
+    const path = join(dir, f);
+    const refuse = (reason: string): void => void refusals.push({ cli, file: path, reason });
+    if (!MANIFEST_ID.test(cli)) {
+      refuse(`"${cli}" is not a usable cli id — the file name is the id, and it is typed as <cli>:<model>`);
+      continue;
+    }
+    // A manifest may EXTEND the registry, never redefine it. Letting a file in
+    // ~/.config silently repoint `claude` at another binary would change what
+    // every existing prd.json and config runs, without anything saying so.
+    if (BUILT_IN.has(cli)) {
+      refuse(`"${cli}" is a built-in cli — a manifest cannot redefine one; rename the file to register a new cli`);
+      continue;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(path, "utf8"));
+    } catch (e) {
+      refuse(`invalid JSON: ${(e as Error).message}`);
+      continue;
+    }
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      refuse("must be a JSON object");
+      continue;
+    }
+    const problem = manifestProblem(raw as Record<string, unknown>);
+    if (problem) refuse(problem);
+    else agents[cli] = compileManifest(raw as unknown as AgentManifest);
+  }
+  return { agents, refusals };
+}
+
+const manifests = loadAgentManifests();
+Object.assign(AGENTS, manifests.agents);
+
+/** manifests that were REFUSED this process; empty in the normal case */
+export const manifestRefusals: readonly ManifestRefusal[] = manifests.refusals;
+
+// Loud on stderr, once, at load: the alternative is a manifest that quietly
+// does nothing and a preflight that then blames the user's PATH. This runs
+// before setLocale, so it is English like the other thrown-error diagnostics.
+for (const r of manifestRefusals) console.error(`ralphrun: ignoring agent manifest ${r.file} — ${r.reason}`);
+
+/** every registered cli, in picker order (built-ins first, then manifests) */
 export const agentClis: string[] = Object.keys(AGENTS);
 
 export function agentDef(cli: string): AgentDef | undefined {

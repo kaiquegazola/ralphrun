@@ -2,18 +2,33 @@
 // cli is ONE entry and every consumer picks it up; these tests fail if an entry
 // is added half-way (the bug that left codex/agy out of BINARIES/DEFAULT_MODELS).
 
-import { describe, it, expect } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { basename, join } from "node:path";
+import { describe, it, expect, vi } from "vitest";
 import {
   AGENTS,
   agentClis,
   agentDef,
   binOf,
   defaultModelOf,
+  loadAgentManifests,
+  manifestDir,
   nativeAdvisorArgs,
   supportsNativeAdvisor,
+  type AgentDef,
   type AgentRole,
 } from "./agents.js";
 import { buildCmd } from "./adapters.js";
+import { configDir } from "./userconfig.js";
+
+// Only the two calls the manifest loader makes. Stubbing them also pins the
+// registry under test to the BUILT-INS: a manifest sitting in the developer's
+// own config dir must not decide whether this suite passes.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  readdirSync: vi.fn(),
+  readFileSync: vi.fn(),
+}));
 
 const ROLES: AgentRole[] = ["planner", "executor", "advisor"];
 
@@ -131,6 +146,163 @@ describe("lookups fall back safely on an unknown cli", () => {
       expect(binOf(proto)).toBe(proto);
       expect(() => buildCmd(proto, "p", "m", "/w", false)).toThrow("unknown cli");
     }
+  });
+});
+
+describe("agent manifests: a cli registered from JSON, without forking", () => {
+  const VALID = {
+    label: "My CLI",
+    bin: "mycli",
+    models: ["fast", "slow"],
+    modelFlag: "--model",
+    args: ["run", "-p"],
+    autoApproveArgs: ["--yolo"],
+  };
+
+  // a string body is written verbatim (malformed JSON on purpose); anything
+  // else is serialized like a real manifest file
+  function withManifests(files: Record<string, unknown>): ReturnType<typeof loadAgentManifests> {
+    vi.mocked(readdirSync).mockReturnValue(Object.keys(files) as unknown as ReturnType<typeof readdirSync>);
+    vi.mocked(readFileSync).mockImplementation((p) => {
+      const body = files[basename(String(p))];
+      if (body === undefined) throw new Error(`ENOENT: ${String(p)}`);
+      return typeof body === "string" ? body : JSON.stringify(body);
+    });
+    return loadAgentManifests(join(configDir(), "agents"));
+  }
+
+  function only(files: Record<string, unknown>): AgentDef {
+    const { agents, refusals } = withManifests(files);
+    expect(refusals).toEqual([]);
+    return agents[Object.keys(agents)[0]];
+  }
+
+  // manifests live next to config.json, not in a second invented location
+  it("reads from <configDir>/agents", () => {
+    expect(manifestDir()).toBe(join(configDir(), "agents"));
+  });
+
+  // the normal case: nobody has ever written a manifest
+  it("is a no-op when the directory does not exist", () => {
+    vi.mocked(readdirSync).mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+    expect(loadAgentManifests("/nope")).toEqual({ agents: {}, refusals: [] });
+  });
+
+  // the registry's consumers (pickers, preflight, adapters) read these fields
+  // unconditionally — a compiled manifest has to satisfy the same invariants an
+  // in-code entry does, or it half-registers a cli that only fails at spawn
+  it("compiles into a def that satisfies every registry invariant", () => {
+    const def = only({ "mycli.json": VALID });
+    expect(def.label).toBe("My CLI");
+    expect(def.bin).toBe("mycli");
+    expect(def.defaultModel).toBe(""); // absent = let the cli choose
+    expect(def.models).toEqual([
+      { value: "fast", label: "fast" },
+      { value: "slow", label: "slow" },
+    ]);
+    const known = def.models.map((m) => m.value);
+    for (const role of ROLES) expect(known).toContain(def.recommended[role]);
+  });
+
+  it("takes its cli id from the file name", () => {
+    const { agents } = withManifests({ "mycli.json": VALID });
+    expect(Object.keys(agents)).toEqual(["mycli"]);
+  });
+
+  it("builds the argv the manifest describes", () => {
+    const def = only({ "mycli.json": VALID });
+    expect(def.buildCmd!({ bin: "mycli", prompt: "P", model: "fast", cwd: "/w", autoApprove: true })).toEqual([
+      "mycli", "run", "-p", "P", "--model", "fast", "--yolo",
+    ]);
+    expect(def.buildCmd!({ bin: "mycli", prompt: "P", model: "", cwd: "/w", autoApprove: false })).toEqual([
+      "mycli", "run", "-p", "P",
+    ]);
+  });
+
+  // codex/opencode shape: the prompt is positional and has to come after the flags
+  it("puts the prompt last when the manifest says so", () => {
+    const def = only({ "mycli.json": { ...VALID, promptLast: true } });
+    expect(def.buildCmd!({ bin: "mycli", prompt: "P", model: "fast", cwd: "/w", autoApprove: true })).toEqual([
+      "mycli", "run", "-p", "--model", "fast", "--yolo", "P",
+    ]);
+  });
+
+  // a stdin cli gets an EMPTY prompt from adapters; pushing "" would hand the
+  // cli an empty positional argument instead of leaving the slot out
+  it("keeps the prompt out of the argv for a stdin cli", () => {
+    const def = only({ "mycli.json": { ...VALID, promptVia: "stdin" } });
+    expect(def.promptVia).toBe("stdin");
+    expect(def.buildCmd!({ bin: "mycli", prompt: "", model: "fast", cwd: "/w", autoApprove: false })).toEqual([
+      "mycli", "run", "-p", "--model", "fast",
+    ]);
+  });
+
+  it("emits reviewArgs only on the review call", () => {
+    const def = only({ "mycli.json": { ...VALID, reviewArgs: ["--read-only"] } });
+    const args = { bin: "mycli", prompt: "P", model: "", cwd: "/w", autoApprove: false };
+    expect(def.buildCmd!({ ...args, reviewArgs: def.reviewArgs })).toContain("--read-only");
+    expect(def.buildCmd!(args)).not.toContain("--read-only");
+  });
+
+  it("uses defaultModel as the recommended pick when it declares one", () => {
+    const def = only({ "mycli.json": { ...VALID, defaultModel: "slow" } });
+    expect(def.defaultModel).toBe("slow");
+    for (const role of ROLES) expect(def.recommended[role]).toBe("slow");
+  });
+
+  // A file in ~/.config repointing `claude` at another binary would change what
+  // every existing prd.json runs with nothing on screen saying so.
+  it("refuses to redefine a built-in cli", () => {
+    const { agents, refusals } = withManifests({ "claude.json": { ...VALID, bin: "evil" } });
+    expect(agents).toEqual({});
+    expect(refusals[0].cli).toBe("claude");
+    expect(refusals[0].reason).toContain("built-in");
+    expect(AGENTS.claude.bin).toBe("claude");
+  });
+
+  it.each([
+    ["not JSON at all", "{ nope", "invalid JSON"],
+    ["a JSON array", [], "JSON object"],
+    ["no label", { ...VALID, label: "" }, '"label"'],
+    ["no bin", { ...VALID, bin: undefined }, '"bin"'],
+    ["no models", { ...VALID, models: [] }, '"models"'],
+    ["a non-string model", { ...VALID, models: [1] }, '"models"'],
+    ["no modelFlag", { ...VALID, modelFlag: undefined }, '"modelFlag"'],
+    ["a defaultModel outside models", { ...VALID, defaultModel: "ghost" }, '"defaultModel"'],
+    ["args that are not strings", { ...VALID, args: [{}] }, '"args"'],
+    ["an unknown promptVia", { ...VALID, promptVia: "pipe" }, '"promptVia"'],
+    ["a non-boolean promptLast", { ...VALID, promptLast: "yes" }, '"promptLast"'],
+  ])("refuses a manifest with %s, naming the file and the field", (_case, body, expected) => {
+    const { agents, refusals } = withManifests({ "mycli.json": body });
+    expect(agents).toEqual({}); // refused means registered NOTHING, not half a cli
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].file).toMatch(/mycli\.json$/);
+    expect(refusals[0].reason).toContain(expected);
+  });
+
+  // the review deliberately runs at autoApprove:false — the same rule the
+  // built-ins are held to above, applied to input we do not control
+  it("refuses reviewArgs that switch permissions off wholesale", () => {
+    const { agents, refusals } = withManifests({ "mycli.json": { ...VALID, reviewArgs: ["--force"] } });
+    expect(agents).toEqual({});
+    expect(refusals[0].reason).toContain("--force");
+  });
+
+  // the id ends up in `--executor <cli>:<model>`; a name with a space (or the
+  // ":" the spec splits on, which is not even a legal file name on Windows)
+  // could never be typed back
+  it("refuses a file name that cannot be typed as a cli id", () => {
+    const { agents, refusals } = withManifests({ "my cli.json": VALID });
+    expect(agents).toEqual({});
+    expect(refusals[0].reason).toContain("cli id");
+  });
+
+  it("keeps the good manifests when a sibling is refused", () => {
+    const { agents, refusals } = withManifests({ "good.json": VALID, "bad.json": "{" });
+    expect(Object.keys(agents)).toEqual(["good"]);
+    expect(refusals).toHaveLength(1);
   });
 });
 

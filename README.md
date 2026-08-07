@@ -184,10 +184,13 @@ ralphrun config edit        # Clack wizard over the key knobs
 
 - Flags override the file: `--executor cli:model`, `--advisor cli:model|none`.
 - `cli` is `claude`, `grok`, `cursor`, `cursorsdk`, `codex`, `agy`, or
-  `opencode`. **To add another, add one entry to `AGENTS` in `src/agents.ts`** —
-  the registry is the single source of truth, and the adapters, preflight,
-  pickers and NATIVE/CROSS routing all derive from it. (An in-process backend
-  like `cursorsdk` also needs a runner module: it has no argv to build.)
+  `opencode`. **To add another, drop a JSON manifest in your config dir** (see
+  [Registering a CLI](#registering-a-cli-agent-manifests)) — no fork, no
+  rebuild. A CLI whose command line does not fit that shape gets an entry in
+  `AGENTS` in `src/agents.ts` instead; the registry is the single source of
+  truth, and the adapters, preflight, pickers and NATIVE/CROSS routing all
+  derive from it. (An in-process backend like `cursorsdk` also needs a runner
+  module: it has no argv to build.)
 - Model shorthand: `--executor grok` → `grok:grok-4.5`, `--executor claude` →
   `claude:sonnet`. `--executor cursor` / `codex` / `agy` / `opencode` (no model)
   lets that CLI pick its own default.
@@ -210,6 +213,56 @@ ralphrun config show --global    # print the global config path + contents
 ralphrun config reset --global   # delete it (the language screen shows again on next init)
 ralphrun --lang pt-br            # force the UI language for one run (not saved)
 ```
+
+## Registering a CLI (agent manifests)
+
+Any coding CLI with an ordinary command line can be registered as **data**, in
+an `agents/` folder next to that same global config — `~/.config/ralphrun/agents/`
+(`%APPDATA%\ralphrun\agents\` on Windows). One file per CLI; **the file name is
+the CLI id**, so `mycli.json` is used as `--executor mycli:fast`.
+
+```json
+{
+  "label": "My CLI",
+  "bin": "mycli",
+  "models": ["fast", "slow"],
+  "modelFlag": "--model",
+  "args": ["run", "-p"],
+  "autoApproveArgs": ["--yolo"],
+  "defaultModel": "fast",
+  "promptVia": "argv",
+  "promptLast": false,
+  "reviewArgs": ["--read-only"]
+}
+```
+
+It builds exactly this command line:
+
+```
+<bin> <args…> [prompt] [modelFlag <model>] [autoApproveArgs…] [reviewArgs…]
+```
+
+- `label`, `bin`, `models`, `modelFlag` are required; the rest are optional.
+- `promptVia: "stdin"` keeps the prompt out of the argv and pipes it in — use it
+  if the CLI reads stdin when given no prompt argument (it is what makes a 25k
+  review prompt survive Windows' ~8191 char command line limit).
+- `promptLast: true` puts the prompt after the flags instead of after `args`.
+- `reviewArgs` are added **only** on the review call and must be a read-only
+  grant: a manifest that puts an approve-everything flag there is refused.
+- `defaultModel` must be one of `models`, or `""` to let the CLI choose. The
+  wizard recommends it (or the first model) for all three roles.
+
+A registered CLI appears in the pickers, gets the same preflight PATH check as
+a built-in, and runs. A manifest **cannot redefine a built-in CLI** — name it
+`claude.json` and it is refused, so nothing in `~/.config` can silently repoint
+what your existing `prd.json` runs. Anything invalid is refused the same way,
+with the file and the field printed on stderr at startup, and registers nothing.
+
+**Where the line is.** A manifest covers the common shape only. Streaming event
+parsers, headless auth probes, server-side advisor flags (NATIVE mode) and
+in-process SDK backends are *functions*, so a CLI that needs one still gets an
+entry in `AGENTS` in `src/agents.ts` — as does one whose argv does not fit the
+template above (`grok` weaves `--cwd <cwd>` into the middle of its own).
 
 ## Requirements
 
@@ -467,7 +520,8 @@ src/
   i18n.ts       # en + pt-br dicts, typed t()
   prd.ts        # backlog types, recover/normalize, next_task
   agents.ts     # THE agent registry: one entry per CLI (bin, models, buildCmd,
-                #   auth probe, native-advisor capability). Add a CLI here, only here.
+                #   auth probe, native-advisor capability) + the JSON manifest
+                #   loader that lets a user register a CLI without forking.
   adapters.ts   # build_cmd — thin seam over the registry
   prompts.ts    # executor/advisor prompt templates (always English)
   log.ts        # stdout/reporter + progress.md with timestamps

@@ -125,7 +125,62 @@ already works. Otherwise reply CHANGES naming what the task still requires.
 An unchanged workspace is NOT evidence that the work was already done: if the task asks for
 anything to be built, changed, fixed or removed, no diff means it did not happen.`;
 
-export function reviewPrompt(task: Task, prd: PRD, standards: string, diff: string): string {
+/** What the objective verify gate found on this attempt, as the reviewer sees it. */
+export interface VerificationEvidence {
+  passed: boolean;
+  output: string;
+}
+
+/**
+ * The verify result, handed to the reviewer as evidence.
+ *
+ * It used to judge a diff without knowing whether anything ran on it, so it asked
+ * for changes the failing output already explained, and could not tell a green
+ * task from one with no gate at all.
+ *
+ * The wording carries as much weight as the data. run.ts gates on the same
+ * `passed` flag independently, so PASSED here is an input to the review and never
+ * a reason to approve — a reviewer handed a green run and no instruction reads it
+ * as a verdict and rubber-stamps, which turns two gates back into one.
+ */
+function verificationBlock(task: Task, verification?: VerificationEvidence): string {
+  if (!verification) return "";
+  if (!task.verify) {
+    return `
+## Verification
+This task declares NO verify command, so nothing objective ran against it. You are the only
+gate this diff has to pass — judge it that way.
+`;
+  }
+  const tail = verification.output.trim().slice(-3000);
+  const head = `
+## Verification
+Command: ${task.verify}
+Result: ${verification.passed ? "PASSED" : "FAILED"}${tail ? `\n\nOutput (tail):\n${tail}` : ""}`;
+  return verification.passed
+    ? `${head}
+
+Passing tests are NECESSARY but NOT SUFFICIENT, and they are NOT an approval. They are a
+separate gate this task already has to clear on its own, so a green run tells you nothing
+about the question you are being asked. Judge what the tests do not catch: acceptance
+criteria nothing asserts, the wrong approach taken, missing error handling, project
+standards ignored, changes beyond what the task asked for.
+`
+    : `${head}
+
+The loop already feeds this failure back to the executor, so do not spend your verdict
+restating it. Judge the diff on its own terms, and mention the failure only where it
+exposes something structural the executor will not find from the output alone.
+`;
+}
+
+export function reviewPrompt(
+  task: Task,
+  prd: PRD,
+  standards: string,
+  diff: string,
+  verification?: VerificationEvidence,
+): string {
   return `You are a senior REVIEWER. Do NOT write code or use tools — reply with text ONLY.
 
 Below is a task and the diff an executor produced for it.
@@ -139,7 +194,7 @@ Task ${task.id} — ${task.title}: ${task.description}
 
 Acceptance:
 ${task.acceptance.map((a) => "- " + a).join("\n")}
-${standardsBlock(standards)}
+${standardsBlock(standards)}${verificationBlock(task, verification)}
 ${diff.trim() ? `## Diff\n${diff}` : `## No diff\n${NO_DIFF_NOTICE}`}`;
 }
 

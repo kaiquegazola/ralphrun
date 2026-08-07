@@ -98,7 +98,21 @@ describe("runTask CROSS", () => {
     const c = cfg({ advisor: { cli: "grok", model: "g" } });
     await runTask(task, prd, c, "/ws", "/prog", undefined, undefined, "task-start");
     expect(mReview).toHaveBeenCalledWith(
-      task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start",
+      task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start", { passed: true, output: "out" },
+    );
+  });
+
+  // The reviewer and the verify gate judge the SAME attempt. A reviewer that
+  // cannot see the test output re-derives it by guessing, and asks for changes
+  // the failing output already explains.
+  it("hands the reviewer the verify verdict and output of this very round", async () => {
+    mVerify.mockResolvedValue({ passed: false, output: "1 failing: expected 2 got 3" });
+    mReview.mockResolvedValue({ approved: false, changes: "fix it", diff: "D" });
+    const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1 });
+    await runTask(task, prd, c, "/ws", "/prog");
+    expect(mReview).toHaveBeenCalledWith(
+      task, prd, c.advisor, c, "/ws", "/prog", "STD", "base-tree",
+      { passed: false, output: "1 failing: expected 2 got 3" },
     );
   });
 
@@ -178,6 +192,36 @@ describe("runTask CROSS", () => {
     await runTask(task, prd, cfg({ advisor: { cli: "c", model: "m" } }), "/ws", "/prog", undefined, undefined, undefined, onPlan);
     expect(onPlan).toHaveBeenCalledWith("brand-new-plan", expect.stringMatching(/^c:m:[0-9a-f]{64}$/));
     expect(task.planKey).toMatch(/^c:m:[0-9a-f]{64}$/);
+  });
+
+  // Routing on measured facts is what makes an advisor call optional at all —
+  // this is the wiring, the decision itself is exhausted in plan-cache.test.ts.
+  it("skips the advisor for a task the router rates trivial, and logs the facts", async () => {
+    const trivial = { ...task, description: "Rename", acceptance: ["renamed"], verify: "npm test" };
+    const result = await runTask(trivial, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result.ok).toBe(true);
+    expect(mAdvice).not.toHaveBeenCalled();
+    expect(mInject).not.toHaveBeenCalled();
+    expect(mLog).toHaveBeenCalledWith("/prog", expect.stringContaining("no advisor plan"));
+    expect(mLog).toHaveBeenCalledWith("/prog", expect.stringContaining("acceptance:1 deps:0 scope:0 words:1"));
+    // review still runs: the router buys fewer plans, it does not remove a gate
+    expect(mReview).toHaveBeenCalled();
+  });
+
+  it("plans the same task once the project lowers the threshold", async () => {
+    const trivial = { ...task, description: "Rename", acceptance: ["renamed"], verify: "npm test" };
+    await runTask(trivial, prd, cfg({ advisor: { cli: "grok", model: "g" }, advisor_plan_threshold: 1 }), "/ws", "/prog");
+    expect(mAdvice).toHaveBeenCalled();
+  });
+
+  // A cached plan costs nothing, so the router must never be what discards one.
+  it("still reuses a valid cached plan for a task the router would not have planned", async () => {
+    const c = cfg({ advisor: { cli: "grok", model: "g" } });
+    const trivial = { ...task, description: "Rename", acceptance: ["renamed"], verify: "npm test", plan: "old-plan" };
+    trivial.planKey = advisorPlanKey(trivial, prd, c.advisor!, "STD");
+    await runTask(trivial, prd, c, "/ws", "/prog");
+    expect(mInject).toHaveBeenCalledWith(expect.any(String), "old-plan");
+    expect(mAdvice).not.toHaveBeenCalled();
   });
 
   it("stops the fix loop early when failing verify/review/diff repeats", async () => {

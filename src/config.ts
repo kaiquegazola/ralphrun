@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { defaultModelOf } from "./agents.js";
 import { t } from "./i18n.js";
+import { DEFAULT_ADVISOR_PLAN_THRESHOLD } from "./plan-cache.js";
 import { loadUserConfig } from "./userconfig.js";
 
 export interface AgentSpec {
@@ -20,6 +21,12 @@ export interface Config {
   review_after: boolean;
   max_review_rounds: number;
   max_stalled_review_rounds: number;
+  /**
+   * Raise it to buy fewer advisor plans, lower it to plan everything (see
+   * routeAdvisorPlan). Optional like stream_output: DEFAULTS always fills it, and
+   * a config object hand-built without it still routes on the same default.
+   */
+  advisor_plan_threshold?: number;
   heartbeat_secs: number;
   /** false = do not turn on the cli event stream (plain buffered output) */
   stream_output?: boolean;
@@ -38,6 +45,7 @@ export const DEFAULTS: Config = {
   review_after: true,
   max_review_rounds: 3,
   max_stalled_review_rounds: 2,
+  advisor_plan_threshold: DEFAULT_ADVISOR_PLAN_THRESHOLD,
   heartbeat_secs: 30,
   stream_output: true,
   commit_per_task: true,

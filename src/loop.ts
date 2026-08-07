@@ -14,7 +14,7 @@ import { findTask, nextTask, sessionRunnableIds, type PRD } from "./prd.js";
 import { loadPrdFile, type NormalizePrdOptions } from "./prdload.js";
 import { log, setReporter } from "./log.js";
 import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } from "./git.js";
-import { advisorPlanKey } from "./plan-cache.js";
+import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { emit, type RunEvent } from "./tui/events.js";
@@ -130,8 +130,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             if (t.status === "blocked") {
               t.status = "todo";
               t.retries = 0;
-              delete t.plan;
-              delete t.planKey;
+              invalidatePlan(t);
               changed = true;
             }
           }
@@ -284,8 +283,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             if (t.status === "blocked") {
               t.status = "todo";
               t.retries = 0;
-              delete t.plan;
-              delete t.planKey;
+              invalidatePlan(t);
               changed = true;
               emit({ taskId: t.id, status: "todo" });
             }
@@ -417,6 +415,16 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             ? t("loop.reason.reviewChanges")
             : t("loop.reason.reviewExhausted");
       const displayReason = withReviewFeedback(reason, result.reviewChanges);
+      // Replan rung of the recovery ladder. A stall means every fix round landed
+      // on the identical failure, and the plan the executor was following is part
+      // of that evidence — so it must not be replayed. Only on a stall: an
+      // ordinary retry is what the cache exists for, and there the plan is not
+      // the suspect. run.ts detects the stall, this owns prd.json, and each exit
+      // below saves `fresh`.
+      if (result.reason === "review_stalled") {
+        invalidatePlan(freshTask);
+        log(progress, t("loop.log.planInvalidated", { id: task.id }));
+      }
       const allowReviewOverride = result.verificationPassed === true;
       if (tui) {
         const action = await tui.waitReviewBlocked(displayReason, allowReviewOverride);

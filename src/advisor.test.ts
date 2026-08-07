@@ -31,7 +31,7 @@ import { promptViaStdin } from "./adapters.js";
 import { killTree, spawn } from "./spawn.js";
 import { log } from "./log.js";
 import { captureDiff } from "./git.js";
-import { parseReview } from "./prompts.js";
+import { parseReview, reviewPrompt } from "./prompts.js";
 import { runCursorSdkText } from "./cursor-sdk.js";
 import { getAdvice, advisorReview } from "./advisor.js";
 import { emit } from "./tui/events.js";
@@ -132,6 +132,19 @@ describe("advisorReview", () => {
     expect(await p).toEqual({ approved: true, changes: "", diff: "   " });
     expect(spawnMock).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("changed nothing"));
+  });
+
+  // The verify verdict is evidence about the same attempt as the diff, so it has
+  // to survive the trip from run.ts to the prompt — the reviewer used to judge a
+  // diff without knowing whether anything ran on it.
+  it("carries the verify verdict from the caller into the review prompt", async () => {
+    diffMock.mockReturnValue("some diff");
+    const verification = { passed: false, output: "1 failing" };
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std", "base", verification);
+    mockChild.stdout.end("CHANGES: x\n");
+    finishSpawn(0);
+    await p;
+    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification);
   });
 
   it("delegates to parseReview on success", async () => {

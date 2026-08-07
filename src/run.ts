@@ -12,7 +12,7 @@ import { getAdvice, advisorReview } from "./advisor.js";
 import { runVerify, assembleFeedback } from "./verify.js";
 import { emit } from "./tui/events.js";
 import { captureReviewBase } from "./git.js";
-import { advisorPlanKey } from "./plan-cache.js";
+import { advisorPlanKey, routeAdvisorPlan } from "./plan-cache.js";
 
 export type RunTaskFailureReason = "failed" | "review_changes" | "review_exhausted" | "review_stalled";
 
@@ -68,13 +68,21 @@ export async function runTask(
       activeAdvice = task.plan;
       log(progress, `  ${task.id}› reusing saved plan from PRD`);
     } else {
-      emit({ taskId: task.id, subphase: "advising" });
-      const newAdvice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
-      if (newAdvice) {
-        activeAdvice = newAdvice;
-        task.plan = newAdvice;
-        task.planKey = currentPlanKey;
-        onPlanGenerated?.(newAdvice, currentPlanKey);
+      // A cached plan is free, so the router only decides whether one is worth
+      // BUYING. Its facts are logged: a task that failed after being routed past
+      // the advisor has to be diagnosable from progress.md alone.
+      const route = routeAdvisorPlan(task, cfg.advisor_plan_threshold);
+      if (!route.plan) {
+        log(progress, t("run.log.planSkipped", { id: task.id, reason: route.reason }));
+      } else {
+        emit({ taskId: task.id, subphase: "advising" });
+        const newAdvice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
+        if (newAdvice) {
+          activeAdvice = newAdvice;
+          task.plan = newAdvice;
+          task.planKey = currentPlanKey;
+          onPlanGenerated?.(newAdvice, currentPlanKey);
+        }
       }
     }
     if (activeAdvice) execPrompt = injectAdvice(prompt, activeAdvice);
@@ -99,9 +107,16 @@ export async function runTask(
     const { passed: testOk, output: testOut } = await runVerify(task, workspace, progress);
     lastVerificationPassed = testOk;
     emit({ taskId: task.id, subphase: "reviewing" });
+    // The verify verdict goes WITH the diff: these two gates judge the same
+    // attempt, and the reviewer that does not see the test output re-derives it
+    // by guessing. run.ts still gates on testOk itself below — the reviewer gets
+    // it as evidence, never as an approval (see verificationBlock in prompts.ts).
     const { approved, changes, diff = "" } =
       reviewOn && advis
-        ? await advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase)
+        ? await advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase, {
+            passed: testOk,
+            output: testOut,
+          })
         : { approved: true, changes: "", diff: "" };
     lastApproved = approved;
     if (changes.trim()) lastReviewChanges = changes;

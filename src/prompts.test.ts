@@ -157,6 +157,52 @@ describe("reviewPrompt", () => {
     expect(out).toContain("is NOT evidence that the work was already done");
     expect(out).toContain("- a1"); // still judged against the same acceptance
   });
+
+  it("says nothing about verification when the caller has no verdict to give", () => {
+    expect(reviewPrompt(task, prd, "STD", "the diff")).not.toContain("## Verification");
+  });
+
+  // The reviewer used to judge a diff without knowing whether anything ran on it,
+  // so it asked for changes the failing output already explained.
+  it("shows the verify command, the verdict, and the output tail", () => {
+    const t: Task = { ...task, verify: "npm test" };
+    const out = reviewPrompt(t, prd, "STD", "the diff", { passed: false, output: "1 failing: expected 2 got 3" });
+    expect(out).toContain("## Verification");
+    expect(out).toContain("Command: npm test");
+    expect(out).toContain("Result: FAILED");
+    expect(out).toContain("expected 2 got 3");
+    // the loop already feeds a failing run back to the executor — the reviewer
+    // restating it burns a round on feedback nobody needed
+    expect(out).toContain("do not spend your verdict");
+  });
+
+  // THE point of the section. run.ts gates on the same flag independently, so a
+  // reviewer handed a green run and no instruction reads it as a verdict and
+  // rubber-stamps — which quietly turns two gates back into one.
+  it("tells the reviewer that a green run is necessary but never sufficient", () => {
+    const t: Task = { ...task, verify: "npm test" };
+    const out = reviewPrompt(t, prd, "STD", "the diff", { passed: true, output: "42 passed" }).replace(/\s+/g, " ");
+    expect(out).toContain("Result: PASSED");
+    expect(out).toContain("NECESSARY but NOT SUFFICIENT");
+    expect(out).toContain("NOT an approval");
+    expect(out).toContain("Judge what the tests do not catch");
+  });
+
+  it("truncates a huge verify output to a tail", () => {
+    const t: Task = { ...task, verify: "npm test" };
+    const out = reviewPrompt(t, prd, "STD", "d", { passed: false, output: "HEAD" + "z".repeat(5000) + "TAIL" });
+    expect(out).toContain("TAIL");
+    expect(out).not.toContain("HEAD");
+  });
+
+  // A task with no verify command has the reviewer as its ONLY gate; saying so is
+  // the difference between a careful read and a glance.
+  it("tells the reviewer it is the only gate when the task declares no verify", () => {
+    const out = reviewPrompt(task, prd, "STD", "the diff", { passed: true, output: "" });
+    expect(out).toContain("declares NO verify command");
+    expect(out).toContain("only");
+    expect(out).not.toContain("Result: PASSED"); // nothing ran, so there is no verdict to report
+  });
 });
 
 describe("parseReview", () => {

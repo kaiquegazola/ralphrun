@@ -35,7 +35,12 @@ vi.mock("./git.js", () => ({
   commitPaths: vi.fn(() => true),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
-vi.mock("./plan-cache.js", () => ({ advisorPlanKey: vi.fn(() => "plan-key") }));
+// only the key is stubbed — invalidatePlan is pure, and the stall tests are
+// about the plan actually leaving prd.json, not about a spy having been called
+vi.mock("./plan-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./plan-cache.js")>()),
+  advisorPlanKey: vi.fn(() => "plan-key"),
+}));
 vi.mock("./tui/mount.js", () => ({ mount: vi.fn() }));
 vi.mock("./configcmd.js", () => ({ pickModel: vi.fn() }));
 vi.mock("@clack/prompts", () => ({
@@ -560,6 +565,46 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await runLoop({ prd: "prd.json" });
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("review loop stalled"));
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("…"));
+  });
+
+  // Replan rung of the recovery ladder. The plan key is a pure function of the
+  // task, so a retry recomputes the same key and reuses the plan the fix loop
+  // just failed with, round after round — the plan has to physically leave
+  // prd.json or the next attempt replays it.
+  it("drops the cached plan from prd.json when the review stalled", async () => {
+    mRead.mockReturnValue(
+      JSON.stringify({
+        project: "P",
+        stack: "S",
+        architecture_notes: "A",
+        tasks: [{ ...TASK, plan: "the plan that stalled", planKey: "plan-key" }],
+      }),
+    );
+    mRunTask.mockResolvedValue({ ok: false, reason: "review_stalled", verificationPassed: true });
+    await runLoop({ prd: "prd.json" });
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    const saved = JSON.parse(writes[writes.length - 1]);
+    expect(saved.tasks[0].plan).toBeUndefined();
+    expect(saved.tasks[0].planKey).toBeUndefined();
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("plan discarded"));
+  });
+
+  // The cache exists to save advisor calls and that is correct on an ordinary
+  // retry: only a stall is evidence against the plan itself.
+  it("keeps the cached plan when the review merely requested changes", async () => {
+    mRead.mockReturnValue(
+      JSON.stringify({
+        project: "P",
+        stack: "S",
+        architecture_notes: "A",
+        tasks: [{ ...TASK, plan: "a plan worth keeping", planKey: "plan-key" }],
+      }),
+    );
+    mRunTask.mockResolvedValue({ ok: false, reason: "review_changes", verificationPassed: true });
+    await runLoop({ prd: "prd.json" });
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    const saved = JSON.parse(writes[writes.length - 1]);
+    expect(saved.tasks[0].plan).toBe("a plan worth keeping");
   });
 
   it("retries review failures with the reason when reviewer feedback is empty", async () => {

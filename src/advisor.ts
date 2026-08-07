@@ -9,7 +9,7 @@ import { runCursorSdkText } from "./cursor-sdk.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
-import { advisorPrompt, parseReview, reviewPrompt } from "./prompts.js";
+import { advisorPrompt, parseReview, reviewPrompt, type VerificationEvidence } from "./prompts.js";
 import { captureDiff } from "./git.js";
 import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
@@ -118,6 +118,7 @@ export async function advisorReview(
   progress: string,
   standards: string,
   reviewBase?: string | null,
+  verification?: VerificationEvidence,
 ): Promise<AdvisorReviewResult> {
   // The reviewer is a GATE, so "no verdict" is not a verdict. Each branch below
   // used to return approved:true, which is how a task reached `done` with
@@ -128,7 +129,7 @@ export async function advisorReview(
   // change is a judgement about that task, so the reviewer makes it (the prompt
   // says what it is looking at). Only the spawn is unconditional now.
   if (!diff.trim()) log(progress, t("advisor.reviewNoDiff", { id: task.id }));
-  const prompt = reviewPrompt(task, prd, standards, diff);
+  const prompt = reviewPrompt(task, prd, standards, diff, verification);
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review");
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the

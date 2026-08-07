@@ -104,6 +104,7 @@ tail -f ralph.out
   "review_after": true,
   "max_review_rounds": 3,
   "max_stalled_review_rounds": 2,
+  "advisor_plan_threshold": 3,
   "heartbeat_secs": 30,
   "stream_output": true,
   "commit_per_task": true,
@@ -111,6 +112,14 @@ tail -f ralph.out
   "extra_executor_args": []
 }
 ```
+
+- `advisor_plan_threshold` is how much task a plan has to be worth. CROSS scores
+  every task on measured facts — acceptance criteria, deps, declared `scope`
+  paths, description length — and calls the advisor when the score reaches this
+  number, which at the default skips only the tasks that are small on every axis.
+  A task with no `verify` command is always planned, whatever you set here.
+  Raise it to buy fewer advisor calls, lower it to plan everything. Skips are
+  logged with the numbers behind them.
 
 - `stream_output` turns on the executor CLI's own event stream, so the live pane
   shows tool calls and answers **as they happen**. Without it a `-p` style CLI

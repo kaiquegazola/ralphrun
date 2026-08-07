@@ -55,16 +55,27 @@ describe("buildCmd", () => {
   // allowlist is what lets it open the files that view left out. It is an
   // allowlist and not an approve-all, so the advisor still cannot write.
   it("claude gets read-only tools on the review call only", () => {
-    expect(buildCmd("claude", "P", "fable", "/w", false, true)).toEqual([
+    expect(buildCmd("claude", "P", "fable", "/w", false, "read")).toEqual([
       "claude", "-p", "--model", "fable", "--allowedTools", "Read,Grep,Glob",
     ]);
     expect(buildCmd("claude", "P", "fable", "/w", false)).toEqual(["claude", "-p", "--model", "fable"]);
+  });
+  // "exec" is a WIDER grant, not a different one: a reviewer that can run the
+  // suite but can no longer open a file would be a downgrade.
+  it("claude gets the command grant on an exec review, and it still allows reads", () => {
+    const cmd = buildCmd("claude", "P", "fable", "/w", false, "exec");
+    expect(cmd).toContain("--disallowedTools");
+    const allowed = cmd[cmd.indexOf("--allowedTools") + 1];
+    expect(allowed).toContain("Read");
+    expect(allowed).toContain("Bash(vitest:*)");
   });
   // asking for tools from a cli with no verified read-only flag must be a no-op,
   // not a guessed flag that makes every review fail on an unknown argument
   it("a cli that declares no reviewArgs is unchanged by the request", () => {
     for (const cli of ["grok", "cursor", "codex", "opencode", "agy"]) {
-      expect(buildCmd(cli, "P", "", "/w", false, true)).toEqual(buildCmd(cli, "P", "", "/w", false));
+      for (const want of ["read", "exec"] as const) {
+        expect(buildCmd(cli, "P", "", "/w", false, want)).toEqual(buildCmd(cli, "P", "", "/w", false));
+      }
     }
   });
   it("unknown cli throws", () => {

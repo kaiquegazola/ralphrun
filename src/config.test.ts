@@ -57,6 +57,14 @@ describe("loadConfig", () => {
     expect(DEFAULTS.executor.model).toBe("sonnet");
   });
 
+  // An executing reviewer is the largest per-round cost multiplier there is: it
+  // turns every review round into a second agent doing real work. Opting in has
+  // to be a decision someone made, never a default that arrived with an upgrade.
+  it("keeps the executing reviewer off, with its own budget ready if it is turned on", () => {
+    expect(DEFAULTS.review_runs_commands).toBe(false);
+    expect(DEFAULTS.review_timeout).toBeGreaterThan(DEFAULTS.advisor_timeout);
+  });
+
   it("merges file config, using configFlag path", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ task_timeout: 999 }) as unknown as string);

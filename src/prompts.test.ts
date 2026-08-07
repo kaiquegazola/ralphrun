@@ -207,6 +207,44 @@ describe("reviewPrompt", () => {
     expect(out).toContain("Judge what the tests do not catch");
   });
 
+  // Gate 2 already ran task.verify and its result is in the prompt. A reviewer
+  // that spends its (much larger) budget re-running it has bought a slower copy
+  // of an answer it was handed — the whole value of this mode is what it runs
+  // INSTEAD.
+  it("tells a running reviewer not to re-run the verify command", () => {
+    const t: Task = { ...task, verify: "npm test" };
+    const out = reviewPrompt(t, prd, "STD", "the diff", { passed: true, output: "ok" }, true).replace(/\s+/g, " ");
+    expect(out).toContain("Do NOT re-run `npm test`");
+    expect(out).toContain("Run what the verify command does NOT cover");
+    expect(out).toContain("acceptance scenario end to end");
+  });
+
+  // A task with no verify command has nothing already-run to avoid, and naming a
+  // command that does not exist would just be noise.
+  it("omits the do-not-re-run line when the task declares no verify", () => {
+    const out = reviewPrompt(task, prd, "STD", "the diff", undefined, true);
+    expect(out).not.toContain("Do NOT re-run");
+    expect(out).toContain("Run what the verify command does NOT cover");
+  });
+
+  // Running is not writing: whatever it runs, its reply is still the only thing
+  // that leaves, and the commit belongs to the executor's task.
+  it("still forbids a running reviewer from changing the workspace", () => {
+    const out = reviewPrompt(task, prd, "STD", "the diff", undefined, true).replace(/\s+/g, " ");
+    expect(out).toContain("Do NOT write, edit or delete anything");
+    expect(out).toContain("your reply IS your whole output");
+    expect(out).toContain("refused by the allowlist");
+  });
+
+  // The default is the read-only posture, and it has to keep saying "do not run
+  // anything": telling a reviewer with no execution grant that it may run things
+  // costs a round of refused tool calls.
+  it("keeps the read-only posture unless the caller asks for the running one", () => {
+    const out = reviewPrompt(task, prd, "STD", "the diff");
+    expect(out).toContain("Do NOT write, edit, delete or run anything");
+    expect(out).not.toContain("you can RUN things");
+  });
+
   it("truncates a huge verify output to a tail", () => {
     const t: Task = { ...task, verify: "npm test" };
     const out = reviewPrompt(t, prd, "STD", "d", { passed: false, output: "HEAD" + "z".repeat(5000) + "TAIL" });

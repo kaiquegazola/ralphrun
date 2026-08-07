@@ -18,6 +18,7 @@ import {
   type AgentDef,
   type AgentRole,
 } from "./agents.js";
+import { EXEC_ALLOWED_COMMANDS, EXEC_DENIED_COMMANDS } from "./reviewexec.js";
 import { buildCmd } from "./adapters.js";
 import { configDir } from "./userconfig.js";
 
@@ -98,10 +99,22 @@ describe("registry completeness", () => {
   // A grant that turns permissions off wholesale would hand back exactly what that
   // posture is there to withhold, so read-only has to mean an explicit allowlist.
   it.each(agentClis)("%s never grants review tools through a blanket approve flag", (cli) => {
-    for (const arg of AGENTS[cli].reviewArgs ?? []) {
+    for (const arg of [...(AGENTS[cli].reviewArgs ?? []), ...(AGENTS[cli].reviewExecArgs ?? [])]) {
       expect(arg).not.toMatch(/skip-permissions|bypass|always-approve|--force|--auto\b/);
     }
   });
+
+  // The execution grant is GENERATED from reviewexec.ts. Hand-editing it here is
+  // how the policy ralphrun documents and tests stops being the policy the cli
+  // enforces — which is the only enforcement there is.
+  it.each(agentClis)("%s builds its exec grant from the shared allow/deny lists", (cli) => {
+    const args = AGENTS[cli].reviewExecArgs;
+    if (!args) return; // no execution grant: this cli reviews read-only
+    const joined = args.join(" ");
+    for (const cmd of EXEC_ALLOWED_COMMANDS) expect(joined).toContain(`Bash(${cmd}:*)`);
+    for (const cmd of EXEC_DENIED_COMMANDS) expect(joined).toContain(`Bash(${cmd}:*)`);
+  });
+
 });
 
 describe("model names containing spaces", () => {

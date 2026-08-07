@@ -57,6 +57,26 @@ export interface Config {
    * setup silently starts auto-accepting.
    */
   review_blocked_policy?: ReviewBlockedPolicy;
+  /**
+   * Let the reviewer RUN its own checks instead of only reading the diff — the
+   * acceptance scenario end to end, the edge case the suite never passes. OFF by
+   * default, and it must stay that way: it is the largest per-round cost
+   * multiplier there is, since every review round becomes a second agent doing
+   * real work rather than a single read-and-answer turn. See README.
+   *
+   * The commands it may run are decided by reviewexec.ts and enforced by the
+   * target cli's own allowlist; a cli with no execution grant ignores this and
+   * reviews read-only.
+   */
+  review_runs_commands?: boolean;
+  /**
+   * Wall clock for the review call, in seconds — used ONLY when
+   * review_runs_commands is on. A reviewer running a suite needs the budget of a
+   * test run, not of an answer, but a read-only reviewer that hangs must still
+   * die at advisor_timeout: raising that ceiling for every review would triple
+   * the cost of a hung one for no gain.
+   */
+  review_timeout?: number;
   extra_executor_args: string[];
 }
 
@@ -77,6 +97,8 @@ export const DEFAULTS: Config = {
   stop_on_blocked: false,
   max_cost_usd: 0,
   review_blocked_policy: "block",
+  review_runs_commands: false,
+  review_timeout: 900,
   extra_executor_args: [],
 };
 

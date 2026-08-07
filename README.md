@@ -114,6 +114,8 @@ tail -f ralph.out
   "stop_on_blocked": false,
   "max_cost_usd": 0,
   "review_blocked_policy": "block",
+  "review_runs_commands": false,
+  "review_timeout": 900,
   "extra_executor_args": []
 }
 ```
@@ -167,6 +169,32 @@ tail -f ralph.out
   Every headless decision — accepted, or refused and why — is written to
   `progress.md`, since that log is the only audit trail a run nobody watched
   leaves behind.
+
+- **`review_runs_commands` multiplies what every round costs.** It is `false` by
+  default and it should stay that way unless you want it. Off, a review round is
+  one agent turn that reads a diff and answers. On, it is an agent that runs the
+  acceptance scenario, a reproduction, an edge case — real work, real tool calls,
+  real minutes — and it happens on *every* round of *every* task, up to
+  `max_review_rounds`. Assume a several-fold jump in both wall clock and spend.
+  What you buy is the integration bug: a reviewer that only reads a diff never
+  catches the one where each piece is fine and the assembly is not.
+
+- It does **not** re-run `verify`. The loop's own gate already ran that command
+  and hands the reviewer the result, and the prompt says so explicitly: running it
+  again buys a slower copy of an answer it was given. Its budget goes on what the
+  suite does *not* cover.
+
+- `review_timeout` (seconds, default `900`) is that reviewer's own wall clock,
+  used **only** when `review_runs_commands` is on. A reviewer running a suite
+  needs the budget of a test run rather than of an answer; a read-only one still
+  dies at `advisor_timeout`, because raising that ceiling for every review would
+  only make a hung one three times more expensive.
+
+- **The reviewer's spend is unmetered, like every other advisor call.** No CLI
+  reports what an advisor turn cost, so an executing reviewer counts toward
+  `max_cost_usd` exactly the way the rest of the advisor does: by marking the
+  run's total a floor (`≥$…`). The ceiling still fires between tasks — on money
+  ralphrun could see. With this on, more of the bill is money it cannot.
 
 There is deliberately **no** idle timeout. A silence-based kill sounds obvious
 but measurement says otherwise: a buffered CLI is silent for the entire task, and
@@ -377,6 +405,32 @@ the reviewer from writing.
 > CLI to this list means verifying its flag grants reads *without* writes and
 > *without* prompting — nobody is on the other end of a review to answer a
 > permission prompt, so a CLI that asks just burns `advisor_timeout`.
+
+**With `review_runs_commands` on, the reviewer gets a wider, scoped grant.** The
+decision of what it may run is one pure function over `(program, args)`
+(`src/reviewexec.ts`), and the per-CLI flags are *generated* from its own lists,
+so the policy documented here and the policy the CLI enforces cannot drift apart.
+It is default-deny:
+
+- **Allowed**: reads (`cat`, `grep`, `rg`, `ls`, `git log|diff|show|blame|…`),
+  builds and tests (`node`, `npm`, `pnpm`, `npx`, `pytest`, `go`, `cargo`, `make`,
+  `mvn`, …). A reviewer that cannot run the test suite is pointless, so
+  over-blocking is treated as a failure, not as a safe default.
+- **Refused**: everything not on the list, which is where `kubectl`, `docker`,
+  `terraform`, `aws`, `ssh`, `curl` and every deploy tool shipped next year land
+  without anyone maintaining a denylist. Plus, explicitly: `git push`/`commit`/
+  `reset`/`clean`, `npm publish`, `npm version`, global installs, and any command
+  carrying a shell metacharacter — `npm test; git push` is not the command it
+  claims to be.
+- **A runner is decided on its real program**: `npx wrangler deploy` is a deploy,
+  not an `npx`, so the decision looks through `npx`/`bunx`/`pnpm dlx`/`uv run`/
+  `bundle exec` to what actually runs.
+
+> **Same limitation, one size larger.** This is still the target CLI's
+> enforcement, not ralphrun's — the function decides, the CLI's allowlist flags
+> enforce, and nothing in between can see a tool call. A CLI with no execution
+> grant silently stays read-only rather than being handed a blanket "run
+> anything", which would be the opposite of the point.
 
 ## Live feedback
 

@@ -144,7 +144,7 @@ describe("advisorReview", () => {
     mockChild.stdout.end("CHANGES: x\n");
     finishSpawn(0);
     await p;
-    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification);
+    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification, false);
   });
 
   it("delegates to parseReview on success", async () => {
@@ -259,7 +259,7 @@ describe("advisorReview", () => {
     mockChild.stdout.end("APPROVE\n");
     finishSpawn(0);
     await p;
-    expect(buildCmd).toHaveBeenCalledWith("claude", "rp", "fable", "ws", false, true);
+    expect(buildCmd).toHaveBeenCalledWith("claude", "rp", "fable", "ws", false, "read");
 
     mockChild.stdout = new PassThrough();
     mockChild.stderr = new PassThrough();
@@ -269,7 +269,55 @@ describe("advisorReview", () => {
     mockChild.stdout.end("advice\n");
     finishSpawn(0);
     await a;
-    expect(buildCmd).toHaveBeenLastCalledWith("claude", "ap", "fable", "ws", false, false);
+    expect(buildCmd).toHaveBeenLastCalledWith("claude", "ap", "fable", "ws", false, "none");
+  });
+
+  // Off by default is the whole safety of this mode: it is the largest per-round
+  // cost multiplier there is, so a config that never mentions it must review
+  // exactly the way it did before.
+  it("does not grant execution unless the config asked for it", async () => {
+    diffMock.mockReturnValue("some diff");
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
+    expect(buildCmd).toHaveBeenCalledWith("claude", "rp", "fable", "ws", false, "read");
+    expect(vi.mocked(reviewPrompt).mock.calls[0][5]).toBe(false);
+  });
+
+  it("grants execution, its own timeout and the running prompt when review_runs_commands is on", async () => {
+    vi.useFakeTimers();
+    try {
+      diffMock.mockReturnValue("some diff");
+      const execCfg = { ...cfg, review_runs_commands: true, review_timeout: 900 } as unknown as Config;
+      const p = advisorReview(task, prd, advis, execCfg, "ws", "prog", "std");
+      expect(buildCmd).toHaveBeenCalledWith("claude", "rp", "fable", "ws", false, "exec");
+      // the prompt has to match the grant, or the reviewer burns its round on
+      // tools it was never given
+      expect(vi.mocked(reviewPrompt).mock.calls[0][5]).toBe(true);
+      // advisor_timeout (300s) would have killed a suite mid-run
+      vi.advanceTimersByTime(300_000);
+      expect(killTreeMock).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(600_000);
+      expect(killTreeMock).toHaveBeenCalledWith(mockChild);
+      finishSpawn(1);
+      await p;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The grant comes from the cli, not from us: telling a cli with no execution
+  // flags that it may run things produces a reviewer that only fails at it.
+  it("stays read-only when the cli has no execution grant, config or not", async () => {
+    diffMock.mockReturnValue("some diff");
+    const execCfg = { ...cfg, review_runs_commands: true } as unknown as Config;
+    const p = advisorReview(task, prd, { cli: "opencode", model: "m" }, execCfg, "ws", "prog", "std");
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
+    expect(buildCmd).toHaveBeenCalledWith("opencode", "rp", "m", "ws", false, "read");
+    expect(vi.mocked(reviewPrompt).mock.calls[0][5]).toBe(false);
   });
 
   it("passes the task baseline to the diff capture", async () => {

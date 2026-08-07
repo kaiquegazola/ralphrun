@@ -24,6 +24,16 @@ export interface AdvisorReviewResult {
   diff: string;
 }
 
+/**
+ * Is THIS reviewer actually going to run commands? Both halves matter: the user
+ * has to have opted in, and the cli has to have an execution grant to be given.
+ * Asked once and used twice — the flags and the prompt have to agree, or a
+ * reviewer spends its round trying tools it was never handed.
+ */
+function reviewerRuns(advis: AgentSpec, cfg: Config): boolean {
+  return !!cfg.review_runs_commands && !!agentDef(advis.cli)?.reviewExecArgs;
+}
+
 function runAdvisorCli(
   advis: AgentSpec,
   prompt: string,
@@ -40,7 +50,12 @@ function runAdvisorCli(
   // is cut at 12k chars and can be empty, and a reviewer with no way to open a file
   // has nothing but that text to go on. Guidance runs before any code exists, so
   // there is nothing to inspect and it stays text-only.
-  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false, source === "review");
+  const exec = source === "review" && reviewerRuns(advis, cfg);
+  const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false, source === "review" ? (exec ? "exec" : "read") : "none");
+  // Only the executing reviewer gets the longer budget: it is running a suite,
+  // not composing an answer. Everything else keeps advisor_timeout, so a hung
+  // read-only review still dies when it always did.
+  const timeoutSecs = exec ? (cfg.review_timeout ?? cfg.advisor_timeout) : cfg.advisor_timeout;
   return new Promise((resolve) => {
     try {
       const viaStdin = promptViaStdin(advis.cli);
@@ -84,7 +99,7 @@ function runAdvisorCli(
         proc.stderr?.destroy();
         grace = setTimeout(() => finish(null), KILL_GRACE_MS);
         grace.unref?.();
-      }, cfg.advisor_timeout * 1000);
+      }, timeoutSecs * 1000);
 
       proc.on("close", () => finish(out.trim() || null));
       proc.on("error", () => finish(null));
@@ -134,7 +149,11 @@ export async function advisorReview(
   // change is a judgement about that task, so the reviewer makes it (the prompt
   // says what it is looking at). Only the spawn is unconditional now.
   if (!diff.trim()) log(progress, t("advisor.reviewNoDiff", { id: task.id }));
-  const prompt = reviewPrompt(task, prd, standards, diff, verification);
+  const runs = reviewerRuns(advis, cfg);
+  // A round that just got several minutes longer and several times more
+  // expensive has to say so in the durable log, not only in the config file.
+  if (runs) log(progress, t("advisor.reviewExec", { id: task.id, s: cfg.review_timeout ?? cfg.advisor_timeout }));
+  const prompt = reviewPrompt(task, prd, standards, diff, verification, runs);
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review");
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the

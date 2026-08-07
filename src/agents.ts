@@ -18,6 +18,7 @@ import { execSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { EXEC_ALLOWED_COMMANDS, EXEC_DENIED_COMMANDS } from "./reviewexec.js";
 import { parseClaudeStream, type StreamEvent } from "./stream.js";
 import { configDir } from "./userconfig.js";
 
@@ -75,6 +76,18 @@ export interface AgentDef {
    * see, let alone refuse.
    */
   reviewArgs?: string[];
+  /**
+   * The WIDER grant for a reviewer that is allowed to run its own checks
+   * (config: review_runs_commands). Same two conditions as `reviewArgs` — no
+   * blanket approve, no prompting — plus a third: the command allowlist it
+   * carries must be the one reviewexec.ts decides, not a hand-written variant,
+   * or the policy ralphrun documents stops being the policy the cli enforces.
+   *
+   * Absent = this cli cannot be told which commands it may run, so it stays on
+   * `reviewArgs` even when the config asks for execution. Granting it a blanket
+   * "run anything" instead would be the opposite of the point.
+   */
+  reviewExecArgs?: string[];
   /**
    * Server-side advisor: extra args that make THIS cli consult an advisor model
    * mid-task, in one call. Present = the cli supports NATIVE mode. Absent = CROSS.
@@ -162,6 +175,16 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     // stay out — and under `-p` there is no interactive prompt to hang on:
     // anything off the list is refused, not asked about.
     reviewArgs: ["--allowedTools", "Read,Grep,Glob"],
+    // The execution grant, generated from reviewexec.ts so the two cannot drift.
+    // `--allowedTools` matches a Bash entry by PREFIX, so `Bash(npm:*)` would
+    // cover `npm publish` as well — `--disallowedTools` is what takes those back,
+    // and it wins over the allowlist.
+    reviewExecArgs: [
+      "--allowedTools",
+      ["Read", "Grep", "Glob", ...EXEC_ALLOWED_COMMANDS.map((c) => `Bash(${c}:*)`)].join(","),
+      "--disallowedTools",
+      EXEC_DENIED_COMMANDS.map((c) => `Bash(${c}:*)`).join(","),
+    ],
     buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs }) => {
       const cmd = [bin, "-p", ...(prompt ? [prompt] : [])];
       if (model) cmd.push("--model", model);

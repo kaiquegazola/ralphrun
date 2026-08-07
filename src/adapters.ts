@@ -4,14 +4,21 @@
 
 import { agentDef, binOf } from "./agents.js";
 
+/**
+ * Which tool grant a call asks for. "read" is the reviewer that only inspects,
+ * "exec" the one allowed to run its own checks (see reviewexec.ts). "exec" falls
+ * back to "read" on a cli with no execution grant: the review still happens, it
+ * just cannot run anything — which is strictly better than inventing a flag.
+ */
+export type ReviewTools = "none" | "read" | "exec";
+
 export function buildCmd(
   cli: string,
   prompt: string,
   model: string,
   cwd: string,
   autoApprove: boolean,
-  /** review call: hand the cli its read-only tool flags, if it declares any */
-  readOnlyTools = false,
+  reviewTools: ReviewTools = "none",
 ): string[] {
   const def = agentDef(cli);
   if (!def) throw new Error(`unknown cli: ${cli}`);
@@ -27,7 +34,7 @@ export function buildCmd(
     model,
     cwd,
     autoApprove,
-    reviewArgs: readOnlyTools ? def.reviewArgs : undefined,
+    reviewArgs: reviewTools === "none" ? undefined : reviewTools === "exec" ? (def.reviewExecArgs ?? def.reviewArgs) : def.reviewArgs,
   });
 }
 

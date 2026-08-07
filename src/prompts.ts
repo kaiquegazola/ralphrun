@@ -177,18 +177,50 @@ exposes something structural the executor will not find from the output alone.
 `;
 }
 
+const READING_POSTURE = `You are a senior REVIEWER. Do NOT write, edit, delete or run anything: your reply IS your
+whole output. You MAY read the workspace — open files, grep, glob — and you should whenever the
+text below is not enough to judge. The diff is CUT at a fixed size and shows only changed lines,
+never the code around them that still has to work, so "the diff looks fine" is not the same
+answer as "the code is fine". When it is cut (it says so where it was), read the real files.`;
+
+/**
+ * The posture for a reviewer that may RUN things (config: review_runs_commands).
+ *
+ * Two instructions carry the whole value of this mode. The first is what NOT to
+ * run: the loop's own verify gate already ran, and a reviewer that spends its
+ * budget re-running it has bought a slower copy of a result it was handed. The
+ * second is what to run instead — the acceptance scenario end to end, which is
+ * exactly the integration bug a diff-reading reviewer cannot see.
+ */
+function runningPosture(task: Task): string {
+  return `You are a senior REVIEWER, and you can RUN things. Do NOT write, edit or delete anything in
+this workspace: your reply IS your whole output, and any file you leave behind lands in someone
+else's commit. You MAY read — open files, grep, glob — and you MAY run reads, builds, linters and
+tests. Publishing, deploying, pushing, global installs and anything else that reaches outside this
+workspace are refused by the allowlist you are running under, so do not spend a turn trying them.
+${
+  task.verify
+    ? `
+Do NOT re-run \`${task.verify}\`. The loop already ran it and its result is below — running it
+again buys a slower copy of an answer you already have.`
+    : ""
+}
+Run what the verify command does NOT cover: the acceptance scenario end to end, the error path,
+the edge case, the input nothing asserts on. A green suite and a broken feature coexist easily,
+and that gap is the only reason you are allowed to run anything at all. Report what you actually
+observed, not what you expect the code to do.`;
+}
+
 export function reviewPrompt(
   task: Task,
   prd: PRD,
   standards: string,
   diff: string,
   verification?: VerificationEvidence,
+  /** the reviewer may run commands — see runningPosture */
+  canRun = false,
 ): string {
-  return `You are a senior REVIEWER. Do NOT write, edit, delete or run anything: your reply IS your
-whole output. You MAY read the workspace — open files, grep, glob — and you should whenever the
-text below is not enough to judge. The diff is CUT at a fixed size and shows only changed lines,
-never the code around them that still has to work, so "the diff looks fine" is not the same
-answer as "the code is fine". When it is cut (it says so where it was), read the real files.
+  return `${canRun ? runningPosture(task) : READING_POSTURE}
 
 Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.

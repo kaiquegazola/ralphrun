@@ -254,9 +254,15 @@ const en = {
   "prd.err.acceptanceItem": "task[{i}].acceptance items must be strings",
   "prd.err.deps": "task[{i}].deps must be an array",
   "prd.err.depUnknown": "task[{i}] dep references unknown id: {d}",
+  "prd.err.depCycle": "dependency cycle: {cycle} — no task in it can ever start",
+  "prd.err.scope": "task[{i}].scope must be an array",
+  "prd.err.scopeItem": "task[{i}].scope items must be strings",
   "prd.err.verify": "task[{i}].verify must be a string",
+  "prd.err.verifyRequired": "task[{i}].verify is required — a task with no verify command is never verified",
   "prd.err.plan": "task[{i}].plan must be a string",
   "prd.err.planKey": "task[{i}].planKey must be a string",
+  "prd.warn.noVerify":
+    "⚠ {n}/{total} tasks have no verify command — for those, 'done' only means the executor exited 0",
 
   // run-loop TUI (App.tsx + controller.ts)
   "run.tasks": "Tasks",
@@ -529,9 +535,15 @@ const ptBr: Record<MsgKey, string> = {
   "prd.err.acceptanceItem": "task[{i}].acceptance precisa conter apenas strings",
   "prd.err.deps": "task[{i}].deps precisa ser um array",
   "prd.err.depUnknown": "task[{i}] dep referencia id desconhecido: {d}",
+  "prd.err.depCycle": "ciclo de dependências: {cycle} — nenhuma task dele consegue começar",
+  "prd.err.scope": "task[{i}].scope precisa ser um array",
+  "prd.err.scopeItem": "task[{i}].scope precisa conter apenas strings",
   "prd.err.verify": "task[{i}].verify precisa ser uma string",
+  "prd.err.verifyRequired": "task[{i}].verify é obrigatório — uma task sem comando verify nunca é verificada",
   "prd.err.plan": "task[{i}].plan precisa ser uma string",
   "prd.err.planKey": "task[{i}].planKey precisa ser uma string",
+  "prd.warn.noVerify":
+    "⚠ {n}/{total} tasks sem comando verify — para elas, 'concluída' só significa que o executor saiu com 0",
 
   "run.tasks": "Tarefas",
   "run.phase": "fase",

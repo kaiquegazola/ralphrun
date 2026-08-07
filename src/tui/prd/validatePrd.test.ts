@@ -11,6 +11,8 @@ function task(over: Record<string, unknown> = {}): Record<string, unknown> {
     retries: 0,
     description: "d",
     acceptance: [],
+    scope: [],
+    verify: "npm test",
     ...over,
   };
 }
@@ -95,11 +97,31 @@ it("rejects non-string acceptance items", () => {
   expect(r.errors).toContain("task[0].acceptance items must be strings");
 });
 
-it("rejects a non-string verify (undefined stays allowed)", () => {
+it("rejects a non-string verify", () => {
   const r = validatePrd(prd({ tasks: [task({ verify: 42 })] }));
   expect(r.errors).toContain("task[0].verify must be a string");
   expect(validatePrd(prd({ tasks: [task({ verify: "npm test" })] })).ok).toBe(true);
-  expect(validatePrd(prd()).ok).toBe(true); // verify omitted
+});
+
+// the shim is the AUTHORING view: a PRD coming out of the planner or the studio
+// must not ship a task whose gate can never fail. The load path stays lenient —
+// prdload.test.ts covers that side.
+it("rejects a task with no verify on the authoring path", () => {
+  for (const missing of [undefined, "", "   "]) {
+    const r = validatePrd(prd({ tasks: [task({ verify: missing })] }));
+    expect(r.errors).toContain("task[0].verify is required — a task with no verify command is never verified");
+  }
+  // callers can still opt back out explicitly (the shim only sets the default)
+  expect(validatePrd(prd({ tasks: [task({ verify: undefined })] }), { requireVerify: false }).ok).toBe(true);
+});
+
+it("rejects a scope that is not an array of strings (omitted stays allowed)", () => {
+  expect(validatePrd(prd({ tasks: [task({ scope: "src/" })] })).errors).toContain("task[0].scope must be an array");
+  expect(validatePrd(prd({ tasks: [task({ scope: ["src/a.ts", 7] })] })).errors).toContain(
+    "task[0].scope items must be strings",
+  );
+  expect(validatePrd(prd({ tasks: [task({ scope: undefined })] })).ok).toBe(true);
+  expect(validatePrd(prd({ tasks: [task({ scope: ["src/**", "README.md"] })] })).ok).toBe(true);
 });
 
 it("rejects non-string persisted plan fields", () => {
@@ -112,4 +134,50 @@ it("rejects non-string persisted plan fields", () => {
 it("rejects a dep referencing an unknown id", () => {
   const r = validatePrd(prd({ tasks: [task({ id: "A", deps: ["ghost"] })] }));
   expect(r.errors).toContain("task[0] dep references unknown id: ghost");
+});
+
+// a cycle passes every per-task check, so without this the PRD loads and only
+// dies later as "no runnable tasks" — a message that blames the backlog for an
+// unsatisfiable graph. The error has to name the tasks so it is fixable.
+it("rejects a dependency cycle and names the tasks in it", () => {
+  const r = validatePrd(prd({ tasks: [task({ id: "A", deps: ["B"] }), task({ id: "B", deps: ["A"] })] }));
+  expect(r.ok).toBe(false);
+  expect(r.errors).toContain("dependency cycle: A -> B -> A — no task in it can ever start");
+});
+
+it("rejects a self-dependency", () => {
+  const r = validatePrd(prd({ tasks: [task({ id: "A", deps: ["A"] })] }));
+  expect(r.errors).toContain("dependency cycle: A -> A — no task in it can ever start");
+});
+
+// a cycle nobody points at is still unsatisfiable, and it is only reachable if
+// the walk starts from every node rather than from the roots.
+it("finds a cycle that no acyclic task depends on", () => {
+  const r = validatePrd(
+    prd({ tasks: [task({ id: "A" }), task({ id: "B", deps: ["C"] }), task({ id: "C", deps: ["B"] })] }),
+  );
+  expect(r.errors).toContain("dependency cycle: B -> C -> B — no task in it can ever start");
+});
+
+// the regression that a naive "already on the stack" check causes: a diamond
+// visits A twice on two different paths, which is re-convergence, not a cycle.
+it("accepts a diamond DAG (a node reached twice is not a cycle)", () => {
+  const r = validatePrd(
+    prd({
+      tasks: [
+        task({ id: "A" }),
+        task({ id: "B", deps: ["A"] }),
+        task({ id: "C", deps: ["A"] }),
+        task({ id: "D", deps: ["B", "C"] }),
+      ],
+    }),
+  );
+  expect(r).toEqual({ ok: true, errors: [] });
+});
+
+// deps pointing at ids that do not exist already have their own error; feeding
+// them to the cycle walk would report a cycle through a task nobody declared.
+it("does not report a cycle through an unknown dep id", () => {
+  const r = validatePrd(prd({ tasks: [task({ id: "A", deps: ["ghost"] })] }));
+  expect(r.errors).toEqual(["task[0] dep references unknown id: ghost"]);
 });

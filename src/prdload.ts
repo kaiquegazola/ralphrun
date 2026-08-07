@@ -17,7 +17,7 @@ const STATUSES = new Set(["todo", "doing", "done", "blocked"]);
 // SAFE coercions only, superset of the old normalizeDraft + recoverAndNormalize:
 // invalid/missing status → enum-coerced (case-insensitive) else "todo"; then
 // "doing" → "todo" (crash recovery — skipped with keepDoing, the planner path);
-// retries non-number → 0; deps/acceptance UNDEFINED → []
+// retries non-number → 0; deps/acceptance/scope UNDEFINED → []
 // (wrong TYPE untouched — validation rejects). Returns whether anything changed.
 export interface NormalizePrdOptions {
   keepDoing?: boolean;
@@ -48,13 +48,64 @@ export function normalizePrd(obj: unknown, opts?: NormalizePrdOptions): boolean 
       task.acceptance = [];
       changed = true;
     }
+    if (task.scope === undefined) {
+      task.scope = [];
+      changed = true;
+    }
   }
   return changed;
 }
 
+// First dependency cycle in the graph, as the path that closes it (T1→T2→T1),
+// or null. Iterative colours would be cheaper to reason about, but a backlog is
+// tens of tasks deep, so recursion is fine and the path falls out of the stack.
+// Only the FIRST cycle is reported: the rest are usually the same knot seen from
+// another node, and one named cycle is enough to make the PRD fixable.
+function findDepCycle(edges: Map<string, string[]>): string[] | null {
+  const state = new Map<string, "open" | "closed">();
+  const path: string[] = [];
+  const visit = (id: string): string[] | null => {
+    const s = state.get(id);
+    if (s === "closed") return null;
+    if (s === "open") return path.slice(path.indexOf(id)).concat(id);
+    state.set(id, "open");
+    path.push(id);
+    for (const d of edges.get(id) ?? []) {
+      const cycle = visit(d);
+      if (cycle) return cycle;
+    }
+    path.pop();
+    state.set(id, "closed");
+    return null;
+  };
+  for (const id of edges.keys()) {
+    const cycle = visit(id);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
+// tasks with no verify command, by index. Feeds two different postures: a hard
+// error while a PRD is being AUTHORED (requireVerify), a warning when an already
+// existing backlog is loaded — see validatePrd/loadPrdFile below.
+function unverifiedTaskIndexes(tasks: Record<string, unknown>[]): number[] {
+  return tasks.flatMap((t, i) =>
+    t && typeof t === "object" && typeof t.verify === "string" && t.verify.trim() !== "" ? [] : [i],
+  );
+}
+
+export interface ValidatePrdOptions {
+  // "unverified branches forbidden": a task that can never fail its own gate is
+  // a hole in the loop. Hard error on the authoring paths (planner reply,
+  // studio finalize) via the tui shim; the load path only warns, because every
+  // backlog written before this rule exists would otherwise stop loading.
+  requireVerify?: boolean;
+}
+
 // Structural validator: top-level shape, per-task shape, unique ids, dep
-// references. Errors render in the studio chat pane, so they route through t().
-export function validatePrd(obj: unknown): { ok: boolean; errors: string[] } {
+// references, dep cycles. Errors render in the studio chat pane, so they route
+// through t().
+export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: boolean; errors: string[] } {
   const errors: string[] = [];
   if (typeof obj !== "object" || obj === null) return { ok: false, errors: [msg("prd.err.notObject")] };
   const p = obj as Record<string, unknown>;
@@ -93,10 +144,31 @@ export function validatePrd(obj: unknown): { ok: boolean; errors: string[] } {
     else if (t.acceptance.some((a) => typeof a !== "string")) errors.push(msg("prd.err.acceptanceItem", { i }));
     if (!Array.isArray(t.deps)) errors.push(msg("prd.err.deps", { i }));
     else for (const d of t.deps) if (!ids.has(d)) errors.push(msg("prd.err.depUnknown", { i, d }));
+    if (t.scope !== undefined) {
+      if (!Array.isArray(t.scope)) errors.push(msg("prd.err.scope", { i }));
+      else if (t.scope.some((s) => typeof s !== "string")) errors.push(msg("prd.err.scopeItem", { i }));
+    }
     if (t.verify !== undefined && typeof t.verify !== "string") errors.push(msg("prd.err.verify", { i }));
     if (t.plan !== undefined && typeof t.plan !== "string") errors.push(msg("prd.err.plan", { i }));
     if (t.planKey !== undefined && typeof t.planKey !== "string") errors.push(msg("prd.err.planKey", { i }));
   });
+
+  if (opts?.requireVerify) {
+    for (const i of unverifiedTaskIndexes(tasks)) errors.push(msg("prd.err.verifyRequired", { i }));
+  }
+
+  // cycle check runs on the resolvable edges only (known ids, string deps), so a
+  // reported cycle is always real. Without it a cyclic backlog validates, then
+  // nextTask returns null forever and the run dies blaming "no runnable tasks"
+  // when the PRD itself is unsatisfiable.
+  const edges = new Map<string, string[]>();
+  for (const t of tasks) {
+    if (!t || typeof t !== "object" || typeof t.id !== "string" || edges.has(t.id)) continue;
+    const deps = Array.isArray(t.deps) ? t.deps : [];
+    edges.set(t.id, deps.filter((d): d is string => typeof d === "string" && ids.has(d)));
+  }
+  const cycle = findDepCycle(edges);
+  if (cycle) errors.push(msg("prd.err.depCycle", { cycle: cycle.join(" -> ") }));
 
   return { ok: errors.length === 0, errors };
 }
@@ -144,6 +216,14 @@ export function loadPrdFile(path: string, opts?: NormalizePrdOptions): PrdLoadRe
     return typeof obj === "object" && obj !== null
       ? { ok: false, errors: v.errors, prd: seedSafe(obj) }
       : { ok: false, errors: v.errors };
+  }
+  // Whole-PRD posture check, distinct from run.ts's per-task "this task has no
+  // gate" line: a backlog that is MOSTLY unverified is a plan problem, and the
+  // operator has to see it before the loop starts. Straight to stderr because
+  // intake happens before any logger or TUI exists.
+  const unverified = unverifiedTaskIndexes((obj as { tasks: Record<string, unknown>[] }).tasks);
+  if (unverified.length > 0) {
+    console.error(msg("prd.warn.noVerify", { n: unverified.length, total: (obj as PRD).tasks.length }));
   }
   return { ok: true, prd: obj as PRD, normalized };
 }

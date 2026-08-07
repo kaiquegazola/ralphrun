@@ -39,7 +39,7 @@ Requires Node >= 20.
 
 | File | Role |
 |---|---|
-| `prd.json` | The backlog — tasks with `deps`, `acceptance`, `verify` command. **The memory.** |
+| `prd.json` | The backlog — tasks with `deps`, `acceptance`, `scope`, `verify` command. **The memory.** |
 | `ralph.config.json` | Executor + advisor (`cli:model`), limits, timeouts. Auto-loaded next to the PRD. |
 | `progress.md` | Append-only run log (auto-created next to the PRD) with `[HH:MM:SS]` timestamps. |
 | `CLAUDE.md` / `AGENTS.md` | Project standards, injected into BOTH executor and advisor prompts. |
@@ -283,7 +283,8 @@ Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
 
 - **Crash recovery**: on startup, any task stuck in `doing` (killed mid-run) is
   reset to `todo`, and hand-written backlogs get missing fields filled
-  (`status` / `retries` / `deps` / `acceptance`). Re-running always resumes.
+  (`status` / `retries` / `deps` / `acceptance` / `scope`). Re-running always
+  resumes.
 - **Git isolation**: the workspace gets its own `.git`, so commits/diffs never
   leak into a parent repo (auto-initialized when `commit_per_task` or
   `review_after` is on).
@@ -323,6 +324,11 @@ that stops the loop from lying). `verify` should be a stack-aware quality gate:
 for typed/tested projects, include the relevant static check plus focused tests,
 and add build or integration tests when the task changes integration surface.
 
+`scope` is optional: the paths or globs the task is allowed to edit. Nothing
+enforces it yet — it is declared so the plan can later refuse two independent
+tasks that would edit the same files, and so the reviewer gets a checkable
+contract (paths changed outside `scope`) instead of a judgement call.
+
 ```json
 {
   "id": "T2-data-model",
@@ -331,9 +337,26 @@ and add build or integration tests when the task changes integration surface.
   "retries": 0,
   "description": "Define the core entities and schema.",
   "acceptance": ["schema/migration files present", "migration runs clean"],
+  "scope": ["src/db/**", "migrations/**"],
   "verify": "npm run typecheck && npm run test -- tests/data-model.test.ts && npm run migrate"
 }
 ```
+
+### What validation refuses
+
+The backlog is treated as untrusted input; a broken plan is rejected before the
+loop starts, not diagnosed halfway through it.
+
+- **Dependency cycles.** `A → B → A` used to pass every check, and then the run
+  died with *"no runnable tasks"* — a message that blames the tasks when the PRD
+  is the thing that cannot be satisfied. It is now a load error that names the
+  tasks in the cycle.
+- **Unverified tasks, while authoring.** The planner and the studio refuse to
+  finalize a PRD where any task has no `verify`: a task whose gate can never fail
+  is a hole in the loop. Loading an existing backlog stays permissive — it warns
+  once with the count (`3/8 tasks have no verify command`) and runs.
+- **Shape.** Unknown dep ids, duplicate ids, wrong field types, an empty task
+  list, and a `scope` that is not an array of strings.
 
 ## Development
 

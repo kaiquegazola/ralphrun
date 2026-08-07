@@ -26,6 +26,8 @@ function task(over: Record<string, unknown> = {}): Record<string, unknown> {
     retries: 0,
     description: "d",
     acceptance: [],
+    scope: [],
+    verify: "npm test",
     ...over,
   };
 }
@@ -78,21 +80,23 @@ describe("normalizePrd", () => {
     expect((p.tasks as Record<string, unknown>[])[0].status).toBe("doing");
   });
 
-  it("fills non-number retries and undefined deps/acceptance", () => {
-    const p = prd({ tasks: [task({ retries: "5", deps: undefined, acceptance: undefined })] });
+  it("fills non-number retries and undefined deps/acceptance/scope", () => {
+    const p = prd({ tasks: [task({ retries: "5", deps: undefined, acceptance: undefined, scope: undefined })] });
     expect(normalizePrd(p)).toBe(true);
     const t0 = (p.tasks as Record<string, unknown>[])[0];
     expect(t0.retries).toBe(0);
     expect(t0.deps).toEqual([]);
     expect(t0.acceptance).toEqual([]);
+    expect(t0.scope).toEqual([]);
   });
 
-  it("leaves wrong-TYPE deps/acceptance untouched (validation rejects them)", () => {
-    const p = prd({ tasks: [task({ deps: {}, acceptance: "x" })] });
+  it("leaves wrong-TYPE deps/acceptance/scope untouched (validation rejects them)", () => {
+    const p = prd({ tasks: [task({ deps: {}, acceptance: "x", scope: "src/" })] });
     expect(normalizePrd(p)).toBe(false);
     const t0 = (p.tasks as Record<string, unknown>[])[0];
     expect(t0.deps).toEqual({});
     expect(t0.acceptance).toBe("x");
+    expect(t0.scope).toBe("src/");
   });
 
   it("returns false on an already-normalized PRD", () => {
@@ -207,7 +211,7 @@ describe("loadPrdFile", () => {
 
   it("valid-after-normalize PRD -> ok:true, normalized:true, coercions applied", () => {
     mRead.mockReturnValue(
-      JSON.stringify(prd({ tasks: [{ id: "A", title: "x", status: "doing", description: "" }] })),
+      JSON.stringify(prd({ tasks: [{ id: "A", title: "x", status: "doing", description: "", verify: "npm test" }] })),
     );
     const r = loadPrdFile("/x/prd.json");
     expect(r.ok).toBe(true);
@@ -218,6 +222,48 @@ describe("loadPrdFile", () => {
       expect(t0.retries).toBe(0);
       expect(t0.deps).toEqual([]);
       expect(t0.acceptance).toEqual([]);
+      expect(t0.scope).toEqual([]);
     }
+  });
+
+  // COMPAT: requiring verify is an authoring-time rule (the tui shim turns it
+  // on). Every backlog written before the rule exists still has to load, so the
+  // load path only warns — and it warns about the PRD as a whole, which is what
+  // run.ts's per-task "no verify" line cannot say.
+  it("loads an unverified backlog but warns once with the whole-PRD count", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    mRead.mockReturnValue(
+      JSON.stringify(prd({ tasks: [task({ id: "A", verify: undefined }), task({ id: "B", verify: "  " })] })),
+    );
+    expect(loadPrdFile("/x/prd.json").ok).toBe(true);
+    expect(err).toHaveBeenCalledTimes(1);
+    expect(err.mock.calls[0][0]).toContain("2/2 tasks have no verify command");
+    err.mockRestore();
+  });
+
+  it("stays quiet when every task has a verify command", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    mRead.mockReturnValue(JSON.stringify(prd()));
+    expect(loadPrdFile("/x/prd.json").ok).toBe(true);
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  // the load path must NOT inherit the shim's requireVerify default
+  it("does not turn a missing verify into a load error", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mRead.mockReturnValue(JSON.stringify(prd({ tasks: [task({ verify: undefined })] })));
+    expect(loadPrdFile("/x/prd.json").ok).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  // a cyclic backlog used to load clean and only fail later inside the loop
+  it("rejects a cyclic backlog at intake", () => {
+    mRead.mockReturnValue(
+      JSON.stringify(prd({ tasks: [task({ id: "A", deps: ["B"] }), task({ id: "B", deps: ["A"] })] })),
+    );
+    const r = loadPrdFile("/x/prd.json");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.startsWith("dependency cycle:"))).toBe(true);
   });
 });

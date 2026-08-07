@@ -16,7 +16,7 @@ function mkPrd(tasks: PRD["tasks"]): PRD {
   return { project: "p", stack: "s", architecture_notes: "a", tasks };
 }
 function mkTask(id: string, over: Partial<PRD["tasks"][number]> = {}): PRD["tasks"][number] {
-  return { id, title: id, status: "todo", deps: [], retries: 0, description: "d", acceptance: [], ...over };
+  return { id, title: id, status: "todo", deps: [], retries: 0, description: "d", acceptance: [], verify: "v", ...over };
 }
 const VALID = mkPrd([mkTask("A"), mkTask("B", { deps: ["A"] })]);
 

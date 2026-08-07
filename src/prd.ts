@@ -10,6 +10,12 @@ export interface Task {
   retries: number;
   description: string;
   acceptance: string[];
+  // paths or globs this task is allowed to edit. Declared, not enforced yet: it
+  // exists so (a) the plan compiler can refuse overlapping editor scopes between
+  // tasks with no dependency edge between them, and (b) the reviewer gets a
+  // verifiable contract — taskChangedPaths outside scope is an objective
+  // violation instead of an LLM judgement call.
+  scope?: string[];
   verify?: string;
   plan?: string;
   planKey?: string;

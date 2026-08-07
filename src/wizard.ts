@@ -36,6 +36,7 @@ export function defaultScaffold(): PRD {
         retries: 0,
         description: "Initialize the project structure and tooling per the stack.",
         acceptance: ["package.json (or equivalent) exists", "app builds / typechecks with no errors"],
+        scope: [], // the paths this task may edit; empty = unrestricted, same as what normalizePrd fills in
         verify: "exit 1  # TODO: set a real stack-specific gate, e.g. typecheck && focused tests && build when relevant",
       },
     ],

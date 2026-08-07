@@ -38,8 +38,8 @@ const VALID: PRD = {
   stack: "s",
   architecture_notes: "a",
   tasks: [
-    { id: "A", title: "A", status: "todo", deps: [], retries: 0, description: "d", acceptance: [] },
-    { id: "B", title: "B", status: "todo", deps: ["A"], retries: 0, description: "d", acceptance: [] },
+    { id: "A", title: "A", status: "todo", deps: [], retries: 0, description: "d", acceptance: [], scope: [], verify: "v" },
+    { id: "B", title: "B", status: "todo", deps: ["A"], retries: 0, description: "d", acceptance: [], scope: [], verify: "v" },
   ],
 };
 const VALID_JSON = JSON.stringify(VALID);
@@ -181,9 +181,9 @@ it("coerces invented statuses/missing defaults instead of rejecting the draft", 
     stack: "s",
     architecture_notes: "a",
     tasks: [
-      { id: "A", title: "A", status: "PENDING", description: "d" }, // invented status + missing fields
-      { id: "B", title: "B", status: "Done", deps: ["A"], retries: 1, description: "d", acceptance: ["x"] }, // case fix
-      { id: "C", title: "C", status: 5, deps: [], retries: 0, description: "d", acceptance: [] }, // non-string status
+      { id: "A", title: "A", status: "PENDING", description: "d", verify: "v" }, // invented status + missing fields
+      { id: "B", title: "B", status: "Done", deps: ["A"], retries: 1, description: "d", acceptance: ["x"], verify: "v" }, // case
+      { id: "C", title: "C", status: 5, deps: [], retries: 0, description: "d", acceptance: [], verify: "v" }, // non-string status
     ],
   });
   const { res } = await run(["sum", "", "```json", messy, "```"]);
@@ -198,7 +198,9 @@ it("keeps an in-flight 'doing' status (planner path matches the old normalizeDra
     project: "p",
     stack: "s",
     architecture_notes: "a",
-    tasks: [{ id: "A", title: "A", status: "doing", deps: [], retries: 0, description: "d", acceptance: [] }],
+    tasks: [
+      { id: "A", title: "A", status: "doing", deps: [], retries: 0, description: "d", acceptance: [], verify: "v" },
+    ],
   });
   const { res } = await run(["s", "", "```json", doing, "```"]);
   expect(res.errors).toEqual([]);

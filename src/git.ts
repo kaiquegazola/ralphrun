@@ -108,10 +108,17 @@ export function taskChangedPaths(workspace: string, base?: string | null): strin
  * began is not in that list, so it stays in the worktree instead of being
  * swallowed by a commit labelled with this task's name.
  *
- * false = the scoped stage failed and NOTHING was committed, so the caller can
- * fall back. It fails when a path is in neither the worktree nor the index —
- * only reachable if the executor staged a rename or deletion itself, which the
- * task prompt tells it not to do.
+ * false = the scoped STAGE failed, so the caller can fall back to an unscoped
+ * one. It fails when a path is in neither the worktree nor the index — only
+ * reachable if the executor staged a rename or deletion itself, which the task
+ * prompt tells it not to do.
+ *
+ * true is NOT "a commit exists": git refuses a commit of its own accord (a
+ * pre-commit hook, an unset identity, an unusable signing key, or a path list
+ * whose content the executor already committed itself). Reporting that as a
+ * stage failure would send the caller into `git add -A`, which sweeps the user's
+ * unrelated work into a commit named after this task — so the commit's own
+ * outcome is left to the caller, which reads it off HEAD (see logTaskCommit).
  */
 export function commitPaths(workspace: string, paths: string[], message: string): boolean {
   // -A so a path the task DELETED still stages as a removal

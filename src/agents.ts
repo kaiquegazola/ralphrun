@@ -435,7 +435,10 @@ const MANIFEST_ID = /^[a-z0-9][a-z0-9._-]*$/i;
 // the same shapes agents.test.ts refuses on the built-ins: the review runs at
 // autoApprove:false on purpose, so a "read-only" grant that switches
 // permissions off wholesale hands back exactly what that posture withholds.
-const BLANKET_APPROVE = /skip-permissions|bypass|always-approve|--force|--auto\b/;
+// `--yolo` is not an exotic spelling: it is what this README's own manifest
+// example puts in autoApproveArgs, so it is the flag a user is most likely to
+// paste into reviewArgs by mistake.
+const BLANKET_APPROVE = /skip-permissions|bypass|always-approve|dangerous|yolo|full-auto|--force|--auto\b|--yes\b/;
 
 const BUILT_IN = new Set(Object.keys(AGENTS));
 

@@ -36,6 +36,18 @@ export interface RunOptions {
 }
 
 /**
+ * What became of a worktree's work. "uncommitted" is the one that is NOT a git
+ * merge outcome: the transport commit itself never happened, so there is nothing
+ * for the pick to carry and nothing a sha can recover.
+ */
+type LandResult = "ok" | "conflict" | "dirty" | "uncommitted";
+
+function landBlockReason(landed: LandResult): string {
+  if (landed === "uncommitted") return t("loop.reason.commitRefused");
+  return landed === "dirty" ? t("loop.reason.mergeDirty") : t("loop.reason.mergeConflict");
+}
+
+/**
  * THE prd.json rule, and the only serialization a parallel run needs: every
  * read-modify-write of this file must stay SYNCHRONOUS. runLoop is one process
  * on one thread — N parallel tasks are N child *processes* collected at `await`
@@ -267,6 +279,13 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   // diffs against it, and the commit stages only what moved since it. Keyed by
   // task so a retry still measures from the task's own start, not the retry's.
   const taskBaselines = new Map<string, string | null>();
+  // The skip flag is consume-once in the controller, but a confirmed skip aborts
+  // every executor in the WAVE (mount.ts dispatches to all of them). Whoever
+  // settled first would take the flag and its siblings — killed by that same
+  // skip — would read `false`, be charged a retry and be blocked as "max
+  // retries". Latched per batch, so one keypress marks everything it killed as
+  // skipped. Reset where nothing is in flight, right before the batch runs.
+  let batchSkipped = false;
 
   /**
    * One task, from START to a settled status in prd.json. "stop" means the whole
@@ -278,6 +297,33 @@ export async function runLoop(opts: RunOptions): Promise<void> {
    * copy of prd.json it last read.
    */
   const runOneTask = async (task: Task, prd: PRD, solo: boolean): Promise<"stop" | "next"> => {
+    // Worktree mode changes WHERE a task runs, and it is decided before anything
+    // else because a wave cannot proceed without it. null = no isolation
+    // available: for a SOLO task that degrades to the main workspace with a line
+    // rather than failing it, since infrastructure trouble is not something a
+    // retry of the task can fix.
+    const wt = cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, cfg.worktree_link ?? []) : null;
+    if (cfg.worktree_per_task && !wt) {
+      log(progress, t("loop.log.worktreeUnavailable", { id: task.id }));
+      // A wave has no such degradation: its siblings are already executing, and
+      // N executors in one checkout is precisely what loadConfig refuses
+      // (parallelNeedsWorktree) because they overwrite each other's files.
+      // pickWave proves a repo EXISTS, never that `worktree add` will succeed.
+      if (!solo) {
+        const reason = t("loop.reason.noWorktree");
+        task.status = "blocked";
+        const cur = reload({ keepDoing: true });
+        const ct = cur?.tasks.find((x) => x.id === task.id);
+        if (cur && ct) {
+          ct.status = "blocked";
+          savePRD(prdPath, cur);
+        }
+        log(progress, t("loop.log.blockedReview", { id: task.id, s: 0, reason }));
+        emit({ taskId: task.id, status: "blocked", reason });
+        return "next";
+      }
+    }
+    const taskWorkspace = wt ?? workspace;
     log(progress, t("loop.log.start", { id: task.id, title: task.title, n: task.retries + 1 }));
     task.status = "doing";
     // A wave has no single current task, and the reporter would otherwise stamp
@@ -297,15 +343,6 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     const signal = tui ? tui.control.beginTask() : undefined;
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
-
-    // Worktree mode changes WHERE a task runs. null = no isolation available, so
-    // degrade to the main workspace with a line rather than failing the task:
-    // infrastructure trouble is not something a retry of the task can fix. A
-    // WAVE is never admitted without a usable repo (see pickWave), so this only
-    // degrades a solo task.
-    const wt = cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, cfg.worktree_link ?? []) : null;
-    if (cfg.worktree_per_task && !wt) log(progress, t("loop.log.worktreeUnavailable", { id: task.id }));
-    const taskWorkspace = wt ?? workspace;
 
     let taskReviewBase: string | null | undefined;
     const reviewOn = cfg.review_after && !!cfg.advisor;
@@ -342,10 +379,19 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     // "someone already said, with a sha, what happened to this worktree's work" —
     // so the discard notice below does not repeat a line the merge already wrote.
     let worktreeAccounted = false;
-    const landWorktreeWork = (): "ok" | "conflict" | "dirty" => {
+    const landWorktreeWork = (): LandResult => {
       if (!wt) return "ok";
-      logTaskCommit(taskWorkspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+      const committed = logTaskCommit(taskWorkspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
       const m = mergeBackTaskWork(workspace, wt, taskStartCommit);
+      // "nothing to pick" is legitimate only when there was nothing to commit.
+      // With a commit git refused — a pre-commit hook, an unset identity — the
+      // cell's HEAD never moved, so the pick has nothing to carry and the work
+      // exists ONLY in a directory the finally block is about to delete. Calling
+      // that done is how a task lands in prd.json with zero lines to show for it.
+      if (m.status === "nothing" && !committed) {
+        log(progress, t("loop.log.commitRefused", { id: task.id }));
+        return "uncommitted";
+      }
       if (m.status === "conflict" || m.status === "dirty") {
         log(
           progress,
@@ -419,7 +465,8 @@ export async function runLoop(opts: RunOptions): Promise<void> {
         log(progress, t("loop.log.quit"));
         return "stop";
       }
-      const skipped = tui?.control.takeSkip() ?? false;
+      if (tui?.control.takeSkip()) batchSkipped = true;
+      const skipped = batchSkipped;
 
       // A WARNING, never a gate — see pathsOutsideScope. `scope` is what makes a
       // wave safe, but it is the planner's guess, and the cherry-pick already
@@ -497,16 +544,25 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
         }
         taskBaselines.delete(task.id);
-      } else if (landed === "dirty") {
-        // A retry cannot help here: the user's own uncommitted edit to that file
-        // will still be in the way next time, so blocking now saves a full
-        // agent run's spend.
+      } else if (landed === "dirty" || landed === "uncommitted") {
+        // A retry cannot help with either: the user's staged/uncommitted edit
+        // will still be in the way next time, and a commit hook that refused
+        // once refuses again. Blocking now saves a full agent run's spend.
         taskBaselines.delete(task.id);
         freshTask.status = "blocked";
-        const reason = t("loop.reason.mergeDirty");
+        const reason = landBlockReason(landed);
         log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
         emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
         persist();
+        // And stop the RUN, not just this task. Neither failure is about the
+        // task: git refuses a cherry-pick while the trunk's index holds staged
+        // content (any file — it need not be one the task touched), and a commit
+        // hook refuses everyone equally. Every remaining task would execute in
+        // full, at full price, and be blocked the same way. stop_on_blocked does
+        // not gate this: the user has to act before anything else can land.
+        done();
+        log(progress, t("loop.log.stopWorkspace"));
+        return "stop";
       } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
         const reason =
           result.reason === "review_stalled"
@@ -553,7 +609,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
             // in the log line landWorktreeWork wrote.
             taskBaselines.delete(task.id);
             freshTask.status = "blocked";
-            const blockReason = approveLanded === "dirty" ? t("loop.reason.mergeDirty") : t("loop.reason.mergeConflict");
+            const blockReason = landBlockReason(approveLanded);
             log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: blockReason }));
             emit({ taskId: task.id, status: "blocked", reason: blockReason, elapsedMs });
             persist();
@@ -785,6 +841,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       return;
     }
 
+    batchSkipped = false;
     if (batch.length === 1) {
       if ((await runOneTask(batch[0], prd, true)) === "stop") return;
     } else {
@@ -850,6 +907,12 @@ function withReviewFeedback(reason: string, changes?: string): string {
   return `${reason}: ${summary}`;
 }
 
+/**
+ * true = this task's work is IN the history now (either a commit was made, or
+ * there was nothing to commit). false = git refused the commit — a pre-commit
+ * hook, an unset identity, a signing key it cannot use. That refusal is silent
+ * on git's stdout, and in worktree mode it means the work never left the cell.
+ */
 function logTaskCommit(
   workspace: string,
   progress: string,
@@ -857,7 +920,7 @@ function logTaskCommit(
   title: string,
   cfg: Config,
   base?: string | null,
-): void {
+): boolean {
   const before = headCommit(workspace);
   // function replacers: a literal id/title is used verbatim (a "$&"/"$1" in a
   // task title must not be interpreted as a replacement pattern).
@@ -867,7 +930,7 @@ function logTaskCommit(
   // unrelated work in a commit named after a task that never touched it — and
   // the review that approved this commit never saw those files either.
   const paths = taskChangedPaths(workspace, base);
-  if (paths?.length === 0) return; // nothing moved: no empty commit, nothing to log
+  if (paths?.length === 0) return true; // nothing moved: no empty commit, nothing to log
   if (!paths || !commitPaths(workspace, paths, msg)) {
     // null = no baseline to scope against (no repo yet). A FAILED scoped stage is
     // different: the executor staged a rename or deletion despite being told not
@@ -877,7 +940,15 @@ function logTaskCommit(
     git(workspace, "commit", "-m", msg);
   }
   const after = headCommit(workspace);
-  if (after && after !== before) log(progress, t("loop.log.committed", { id, hash: shortHash(after) }));
+  if (after && after !== before) {
+    log(progress, t("loop.log.committed", { id, hash: shortHash(after) }));
+    return true;
+  }
+  // HEAD is the only honest witness: `git commit` returns non-zero for a hook
+  // that refused, an identity it cannot resolve and a signature it cannot make,
+  // and none of that reaches us through the pathspec helper's exit status alone.
+  // Not a failure when there was no repo to move a HEAD in the first place.
+  return before === null && after === null;
 }
 
 function shortHash(hash: string): string {

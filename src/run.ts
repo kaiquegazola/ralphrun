@@ -170,7 +170,12 @@ export async function runTask(
       ok: false,
       reason: failureReason === "review_stalled" ? "review_stalled" : "review_exhausted",
       reviewChanges: lastReviewChanges,
-      verificationPassed: lastVerificationPassed,
+      // The ONLY thing that can override a refusing reviewer, so it has to mean
+      // "something judged this and said yes". runVerify answers `passed: true`
+      // for a task with no verify command — correct there, since nothing is
+      // blocking — but read as verification it turns a missing gate into a
+      // passing one, and a task no gate ever judged would reach done.
+      verificationPassed: !!task.verify && lastVerificationPassed,
       cost,
     };
   }
@@ -181,10 +186,15 @@ export async function runTask(
 function injectReviewRetryFeedback(prompt: string, feedback?: string): string {
   const trimmed = feedback?.trim();
   if (!trimmed) return prompt;
+  // Says "the workspace may not contain that attempt" on purpose: with
+  // worktree_per_task the rejected attempt was DISCARDED with its cell, so an
+  // instruction to fix code that is no longer there makes the executor invent a
+  // target. The demand for concrete changes stays — it is what stops a retry
+  // from answering that nothing needs doing.
   return `${prompt}
 
 ## Human-requested review retry
-The previous reviewer rejected this task. Apply the reviewer feedback below with concrete code, test, or config changes. Do not answer by arguing that no changes are needed. If the feedback is impossible or out of scope, make the smallest unblocker and explain the constraint in the final response.
+A previous attempt at this task was rejected by the reviewer. That attempt may have been rolled back, so do not assume the workspace still contains it — implement the task from what is there now, with concrete code, test, or config changes that address the feedback below. Do not answer by arguing that no changes are needed. If the feedback is impossible or out of scope, make the smallest unblocker and explain the constraint in the final response.
 
 Reviewer feedback:
 ${trimmed}`;

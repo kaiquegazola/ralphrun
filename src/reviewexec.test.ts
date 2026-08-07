@@ -14,7 +14,6 @@ describe("reviewExecDecision — what a reviewer needs", () => {
   it.each([
     ["npm", ["test"]],
     ["npm", ["run", "test:unit"]],
-    ["npm", ["ci"]],
     ["pnpm", ["vitest", "run"]],
     ["npx", ["vitest", "run", "src/foo.test.ts"]],
     ["npx", ["-y", "tsc", "--noEmit"]],
@@ -64,8 +63,32 @@ describe("reviewExecDecision — external mutation", () => {
     ["npm", ["run", "release"]],
     ["npm", ["install", "-g", "wrangler"]],
     ["go", ["install", "./cmd/foo"]],
+    // An install is not a workspace-local write: every worktree in a wave shares
+    // ONE physical node_modules, so this rewrites the user's own dependency tree
+    // and every sibling task's, and no worktree discard can roll that back.
+    ["npm", ["ci"]],
+    ["npm", ["install"]],
+    ["npm", ["i", "lodash"]],
+    ["pnpm", ["add", "-D", "vitest"]],
+    ["uv", ["sync"]],
+    // An interpreter handed code inline is a shell with a different name, and it
+    // carries no character SHELL_META would ever catch.
+    ["node", ["-e", "require('fs').rmSync(process.env.HOME + '/.aws', {recursive: true})"]],
+    ["node", ["--eval", "fetch('https://x.example', {method: 'POST'})"]],
+    ["python3", ["-c", "import shutil; shutil.rmtree('/tmp/x')"]],
+    ["ruby", ["-e", "puts 1"]],
+    ["deno", ["eval", "Deno.exit(0)"]],
+    ["python", ["-"]],
   ])("refuses %s %j", (program, args) => {
     expect(reviewExecDecision(program, args).allowed).toBe(false);
+  });
+
+  // The point of refusing `-e` is not to refuse the interpreter: running a FILE
+  // is exactly what a reproduction script is, and it is no wider than the test
+  // suite, which runs the repository's code anyway.
+  it("still allows an interpreter running a file from the workspace", () => {
+    expect(allows("node", "scripts/repro.mjs", "--verbose")).toBe(true);
+    expect(allows("python3", "-m", "pytest")).toBe(true);
   });
 });
 

@@ -273,6 +273,22 @@ describe("per-task worktrees", () => {
     }
   });
 
+  it("gives two ids that sanitize alike two different directories", () => {
+    // "api:get" and "api/get" are distinct tasks that both fold to "api_get",
+    // and `add` starts by DELETING whatever sits at the path — so in a wave the
+    // second task would reap the first one's LIVE cell, mid-execution.
+    const base = seed();
+    const first = createTaskWorktree(ws, "api:get", [])!;
+    writeFileSync(join(first, "wip.txt"), "in flight\n");
+
+    const second = createTaskWorktree(ws, "api/get", [])!;
+
+    expect(second).not.toBe(first);
+    expect(existsSync(join(first, "wip.txt"))).toBe(true);
+    expect(headCommit(first)).toBe(base);
+    expect(headCommit(second)).toBe(base);
+  });
+
   it("returns null rather than throwing when the repo has no commit to branch from", () => {
     // prepareRun inits a repo with no commit, and a task must degrade to the
     // main workspace instead of failing on infrastructure it cannot fix

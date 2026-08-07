@@ -743,7 +743,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked", retries: 0 });
     expect(mCommitPaths).not.toHaveBeenCalled();
-    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("verify did not pass"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("did not pass"));
   });
 
   // The TUI owns the decision when there is one, so the policy must not reach in
@@ -868,6 +868,45 @@ describe("runLoop real run (non-TTY fallback)", () => {
     const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
     expect(saved.tasks[0].status).toBe("blocked");
     expect(saved.tasks[0].retries).toBe(0);
+    // and neither can any OTHER task: git refuses the pick while the trunk's
+    // index holds staged content, whatever file it is in, so the whole backlog
+    // would execute in full and block identically
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("workspace's, not the task's"));
+  });
+
+  it("blocks a task whose transport commit git refused, instead of calling it done", async () => {
+    // A pre-commit hook (or an unset identity, or an unusable signing key) makes
+    // `git commit` exit non-zero with nothing committed. The cell's HEAD then
+    // never moves, so the pick has nothing to carry — and the finally block is
+    // about to delete the directory that holds the only copy of the work. Marking
+    // that done writes a task into prd.json with zero lines to show for it.
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mHeadCommit.mockReturnValue("base-sha"); // before === after: no commit happened
+    mMergeBack.mockReturnValue({ status: "nothing", head: "base-sha" });
+
+    await runLoop({ prd: "prd.json" });
+
+    const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
+    expect(saved.tasks[0].status).toBe("blocked");
+    expect(saved.tasks[0].retries).toBe(0); // a hook that refused once refuses again
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("refused the commit"));
+  });
+
+  it("still accepts a task that genuinely moved no files", async () => {
+    // the other side of the check above: "nothing to pick" is legitimate when
+    // there was nothing to commit, and blocking that would fail every task whose
+    // work turned out to be a no-op
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mHeadCommit.mockReturnValue("base-sha");
+    mTaskChangedPaths.mockReturnValue([]);
+    mMergeBack.mockReturnValue({ status: "nothing", head: "base-sha" });
+
+    await runLoop({ prd: "prd.json" });
+
+    const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
+    expect(saved.tasks[0].status).toBe("done");
+    expect(mCommitPaths).not.toHaveBeenCalled();
   });
 
   it("names the sha when it discards a worktree that still holds committed work", async () => {
@@ -1355,6 +1394,50 @@ describe("runLoop parallel waves", () => {
     expect(read().A.status).toBe("done");
     expect(read().B.status).toBe("done");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("stopping on cost budget"));
+  });
+
+  it("marks the whole wave skipped, not just the task that took the flag", async () => {
+    // A confirmed skip aborts EVERY executor in the wave (mount.ts has no
+    // per-task selection), but the flag itself is consume-once. Whoever settled
+    // first used to take it and its siblings — killed by that same keypress —
+    // were charged a retry and blocked as "max retries": a task the user never
+    // asked to stop, blocked for a reason that never happened.
+    setTTY(true);
+    const handle = makeHandle();
+    let flag = true;
+    handle.control.takeSkip = vi.fn(() => {
+      const s = flag;
+      flag = false;
+      return s;
+    });
+    mMount.mockReturnValue(handle);
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+    mRunTask.mockResolvedValue({ ok: false, reason: "failed", cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().A.status).toBe("blocked");
+    expect(read().B.status).toBe("blocked");
+    expect(read().A.retries).toBe(0);
+    expect(read().B.retries).toBe(0);
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("SKIPPED B"));
+  });
+
+  it("blocks a wave task that could not get a worktree instead of sharing the checkout", async () => {
+    // pickWave proves a repo EXISTS, never that `worktree add` will succeed. The
+    // solo path degrades to the main workspace on purpose, but doing that inside
+    // a wave puts a second executor in the checkout its siblings are picking
+    // into — the configuration loadConfig refuses outright at load.
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+    mCreateWorktree.mockImplementation((_ws, id) => (id === "B" ? null : `/ws/.ralphrun/worktrees/${id}`));
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().A.status).toBe("done");
+    expect(read().B.status).toBe("blocked");
+    expect(mRunTask.mock.calls.map((c) => c[3])).toEqual(["/ws/.ralphrun/worktrees/A"]);
   });
 
   it("warns about paths outside a task's declared scope without failing it", async () => {

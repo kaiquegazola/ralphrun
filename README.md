@@ -220,14 +220,19 @@ tail -f ralph.out
   (`["node_modules"]`) is Node-shaped: a Python, Rust, Go or Java project must
   set its own before enabling worktrees, or every task fails its gate for a
   reason it cannot fix. The linked directory is **shared**, so a `verify` that
-  runs `npm install` mutates it for everyone.
+  runs `npm install` mutates it for everyone — and with `max_parallel_tasks > 1`
+  two of those at once corrupt the real tree in your workspace, which discarding
+  a worktree cannot undo. Keep installs out of `verify` when running waves.
 
 - **What happens when the pick fails.** If the work conflicts with something
   that landed first, the task goes back into the normal retry ladder and the
   next attempt is cut from the new `HEAD` — re-execution on top of the result,
-  bounded by `max_retries_per_task`. If it fails because *you* have uncommitted
-  changes in a file the task touched, git refuses before starting and the task
-  blocks immediately: retrying cannot move your edit out of the way. Either way
+  bounded by `max_retries_per_task`. If git refuses the pick outright because
+  your workspace has **staged or uncommitted changes** it would overwrite, or if
+  it refuses the task's *commit* (a `pre-commit` hook, an unset identity, a
+  signing key it cannot use), the task blocks and **the whole run stops**: the
+  cause is your workspace, not the task, so every remaining task would execute in
+  full and be refused the same way. Commit or stash, and start again. Either way
   the workspace is left byte-identical, and the log carries the commit sha, so
   the task's work is still recoverable by hand (`git cherry-pick <sha>`) even
   after its worktree is gone. Orphan worktrees from a killed run are reclaimed
@@ -269,11 +274,13 @@ tail -f ralph.out
 - **What parallelism costs you.** The budget is checked *between* waves, so
   `max_cost_usd` can be overshot by up to one wave's worth of tasks — killing
   work already paid for does not refund it. `s`kip and `q`uit abort **every**
-  task in flight, because the dashboard has no per-task selection. And the
+  task in flight, because the dashboard has no per-task selection — so a skip
+  marks the whole wave skipped, not just the first task to notice it. And the
   interactive "review blocked" prompt is skipped during a wave (it would freeze
   every sibling behind one human answer), so those tasks fall through to
   `review_blocked_policy` — default `block`. Nothing unverified is ever
-  accepted either way.
+  accepted either way, and a task with no `verify` command counts as unverified:
+  a missing gate is not a passing one.
 
 There is deliberately **no** idle timeout. A silence-based kill sounds obvious
 but measurement says otherwise: a buffered CLI is silent for the entire task, and
@@ -488,8 +495,8 @@ the reviewer from writing.
 **With `review_runs_commands` on, the reviewer gets a wider, scoped grant.** The
 decision of what it may run is one pure function over `(program, args)`
 (`src/reviewexec.ts`), and the per-CLI flags are *generated* from its own lists,
-so the policy documented here and the policy the CLI enforces cannot drift apart.
-It is default-deny:
+so neither the program list nor the denials are maintained twice. It is
+default-deny:
 
 - **Allowed**: reads (`cat`, `grep`, `rg`, `ls`, `git log|diff|show|blame|…`),
   builds and tests (`node`, `npm`, `pnpm`, `npx`, `pytest`, `go`, `cargo`, `make`,
@@ -498,12 +505,21 @@ It is default-deny:
 - **Refused**: everything not on the list, which is where `kubectl`, `docker`,
   `terraform`, `aws`, `ssh`, `curl` and every deploy tool shipped next year land
   without anyone maintaining a denylist. Plus, explicitly: `git push`/`commit`/
-  `reset`/`clean`, `npm publish`, `npm version`, global installs, and any command
-  carrying a shell metacharacter — `npm test; git push` is not the command it
-  claims to be.
+  `reset`/`clean`, `npm publish`, `npm version`, *any* install (`npm ci`,
+  `pnpm add`, … — every worktree in a wave shares one physical `node_modules`),
+  inline interpreter code (`node -e`, `python3 -c`: a shell by another name), and
+  any command carrying a shell metacharacter — `npm test; git push` is not the
+  command it claims to be.
 - **A runner is decided on its real program**: `npx wrangler deploy` is a deploy,
   not an `npx`, so the decision looks through `npx`/`bunx`/`pnpm dlx`/`uv run`/
   `bundle exec` to what actually runs.
+- **The flags are coarser than the function.** A CLI allowlist matches a command
+  by PREFIX, so what it can carry is "this program, plus these spelled-out
+  denials". The lookthrough above, the shell-metacharacter refusal and the
+  "`./node` is a path, not the allowed `node`" refusal are the *function's*, and
+  a CLI that is handed the flags alone does not enforce them. That is why the
+  program list contains nothing whose own flags write (`find` is off it) — the
+  prefix matcher could not take those back.
 
 > **Same limitation, one size larger.** This is still the target CLI's
 > enforcement, not ralphrun's — the function decides, the CLI's allowlist flags

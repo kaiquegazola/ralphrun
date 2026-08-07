@@ -9,6 +9,7 @@
 // asked about even with disjoint scopes. Do not "optimize" the worktree away
 // for tasks whose scopes do not overlap; the scopes are not what it is for.
 
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { git, gitOut, headCommit } from "./git.js";
@@ -39,8 +40,11 @@ export function createTaskWorktree(workspace: string, taskId: string, links: str
       // A fresh worktree holds TRACKED files only, so node_modules is absent and
       // `verify: "npm test"` fails on every task before anything interesting is
       // exercised. ponytail: one shared node_modules, so a verify that runs
-      // `npm install` mutates every sibling's dependencies — per-worktree
-      // installs cost minutes per task, add them when a task genuinely needs one.
+      // `npm install` mutates every sibling's dependencies — and in a WAVE two
+      // installs at once corrupt the real tree in the main workspace, which no
+      // worktree discard can roll back (that is why the reviewer is refused an
+      // install at all, see reviewexec.ts). Per-worktree installs cost minutes
+      // per task; add them when a backlog genuinely needs a verify that installs.
       const src = join(workspace, name);
       if (existsSync(src) && !existsSync(join(dir, name))) symlinkSync(src, join(dir, name));
     }
@@ -138,7 +142,13 @@ export function reapOrphanWorktrees(workspace: string): number {
 /** Derived from the id, so crash recovery needs no bookkeeping file. */
 function worktreePath(workspace: string, taskId: string): string {
   // a task id is free text in prd.json; keep it inside the directory we own
-  return join(workspace, WORKTREES, taskId.replace(/[^A-Za-z0-9._-]/g, "_"));
+  const safe = taskId.replace(/[^A-Za-z0-9._-]/g, "_");
+  // Sanitizing is many-to-one — "api:get" and "api/get" are two distinct tasks
+  // that both fold to "api_get" — and `add` starts by DELETING whatever sits at
+  // the path, so in a wave the second task would reap the first one's live cell.
+  // The digest makes the mapping injective again while staying derived.
+  const dir = safe === taskId ? safe : `${safe}-${createHash("sha1").update(taskId).digest("hex").slice(0, 8)}`;
+  return join(workspace, WORKTREES, dir);
 }
 
 /**

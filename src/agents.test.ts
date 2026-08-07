@@ -100,7 +100,7 @@ describe("registry completeness", () => {
   // posture is there to withhold, so read-only has to mean an explicit allowlist.
   it.each(agentClis)("%s never grants review tools through a blanket approve flag", (cli) => {
     for (const arg of [...(AGENTS[cli].reviewArgs ?? []), ...(AGENTS[cli].reviewExecArgs ?? [])]) {
-      expect(arg).not.toMatch(/skip-permissions|bypass|always-approve|--force|--auto\b/);
+      expect(arg).not.toMatch(/skip-permissions|bypass|always-approve|dangerous|yolo|full-auto|--force|--auto\b/);
     }
   });
 
@@ -113,6 +113,11 @@ describe("registry completeness", () => {
     const joined = args.join(" ");
     for (const cmd of EXEC_ALLOWED_COMMANDS) expect(joined).toContain(`Bash(${cmd}:*)`);
     for (const cmd of EXEC_DENIED_COMMANDS) expect(joined).toContain(`Bash(${cmd}:*)`);
+    // These lists are crossed products, so a verb added to one of them multiplies
+    // by every runner. cross-spawn wraps the cli in cmd.exe on Windows, where the
+    // whole command line dies past 8191 characters — and the failure there is the
+    // reviewer never running at all.
+    expect(joined.length).toBeLessThan(6000);
   });
 
 });
@@ -297,11 +302,17 @@ describe("agent manifests: a cli registered from JSON, without forking", () => {
 
   // the review deliberately runs at autoApprove:false — the same rule the
   // built-ins are held to above, applied to input we do not control
-  it("refuses reviewArgs that switch permissions off wholesale", () => {
-    const { agents, refusals } = withManifests({ "mycli.json": { ...VALID, reviewArgs: ["--force"] } });
-    expect(agents).toEqual({});
-    expect(refusals[0].reason).toContain("--force");
-  });
+  it.each(["--force", "--yolo", "--dangerously-skip-permissions", "--full-auto", "--yes"])(
+    "refuses reviewArgs that switch permissions off wholesale (%s)",
+    (flag) => {
+      // --yolo is the one a user actually reaches for: it is what the README's
+      // own manifest example puts in autoApproveArgs, one copy-paste away from
+      // reviewArgs, and it used to sail straight through this check.
+      const { agents, refusals } = withManifests({ "mycli.json": { ...VALID, reviewArgs: [flag] } });
+      expect(agents).toEqual({});
+      expect(refusals[0].reason).toContain(flag);
+    },
+  );
 
   // the id ends up in `--executor <cli>:<model>`; a name with a space (or the
   // ":" the spec splits on, which is not even a legal file name on Windows)

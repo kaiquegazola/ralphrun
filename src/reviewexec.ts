@@ -18,6 +18,12 @@
 // remote (no curl/ssh/scp/rsync/gh/docker/kubectl/aws/terraform), and no shell.
 // That is how "no writes outside the workspace" is refused — by there being
 // nothing on the list that could do it, not by inspecting paths.
+//
+// The honest limit of that claim: a test suite runs the repository's own code,
+// so `npm test` is already arbitrary execution and no list can take that back.
+// What the list CAN keep out is the arbitrary command the reviewer writes
+// ITSELF, which is why `node -e` / `python3 -c` are refused while `node
+// build/x.js` is not, and why `find` (whose own flags run and delete) is absent.
 
 /** stdlib-only, imported by agents.ts (which must stay cycle-free) */
 export interface ExecDecision {
@@ -29,9 +35,14 @@ export interface ExecDecision {
 const ALLOW: ExecDecision = { allowed: true, reason: "" };
 const deny = (reason: string): ExecDecision => ({ allowed: false, reason });
 
-/** inspection: none of these writes anything */
+/**
+ * inspection: none of these writes anything. `find` is deliberately NOT here —
+ * `-delete` and `-exec` make it a writer and a runner, and the per-cli flags are
+ * PREFIX matchers that cannot express "find, but not those flags". fd/rg/ls
+ * cover what a reviewer actually needs it for.
+ */
 const READ_TOOLS = [
-  "basename", "cat", "diff", "dirname", "du", "echo", "fd", "file", "find", "grep",
+  "basename", "cat", "diff", "dirname", "du", "echo", "fd", "file", "grep",
   "head", "jq", "ls", "pwd", "rg", "sort", "stat", "tail", "tree", "uniq", "wc", "which",
 ];
 
@@ -55,6 +66,25 @@ const GIT_READ_ONLY = ["blame", "describe", "diff", "grep", "log", "ls-files", "
  * package manager puts its verb.
  */
 const RELEASE_VERBS = ["publish", "unpublish", "deploy", "release", "login", "logout", "adduser", "token", "version"];
+
+/**
+ * Installs, on any runner. Not a workspace-local write like a build artifact:
+ * every worktree in a wave SHARES one physical node_modules (worktree.ts links
+ * it), so an install from a reviewer rewrites the dependency tree of the user's
+ * main checkout and of every sibling task mid-run — the one mutation here that
+ * survives a worktree being discarded. The cell already has the dependencies
+ * linked in, so a reviewer never needs this.
+ */
+const INSTALL_VERBS = ["install", "ci", "add", "remove", "uninstall", "update", "upgrade", "sync"];
+
+/**
+ * Interpreters take their program on the command line, which makes the flag the
+ * payload: `node -e "<anything>"` is a shell with a different name, and it
+ * carries no character SHELL_META would catch. Running a FILE stays allowed —
+ * that is no wider than the test suite, which runs the same code.
+ */
+const INTERPRETERS = ["deno", "node", "php", "python", "python3", "ruby"];
+const INLINE_CODE_FLAGS = ["-e", "--eval", "-p", "--print", "-c", "--command", "-r", "-"];
 
 /**
  * Runners whose real program is an ARGUMENT: `npx wrangler deploy` is a deploy,
@@ -93,7 +123,20 @@ export const EXEC_ALLOWED_COMMANDS: string[] = [
 const EXTRA_DENIED = [
   "cargo publish", "cargo login", "gradle publish", "mvn deploy", "dotnet nuget",
   "go install", "npm install -g", "npm i -g", "pnpm add -g", "yarn global",
+  // The inline-code forms, spelled out because a prefix matcher is all the cli's
+  // denylist can carry. Only the spellings that EXIST: crossing every
+  // interpreter with every flag would put `php --print` on a command line that
+  // has 8191 characters to live within on Windows.
+  "node -e", "node --eval", "node -p", "node --print", "python -c", "python3 -c",
+  "ruby -e", "php -r", "deno eval",
 ];
+
+/**
+ * Installs for the cli's denylist. The decision below refuses INSTALL_VERBS on
+ * every runner; this is the subset worth spending command line on — the verbs a
+ * reviewer would actually reach for, on the managers that have them.
+ */
+const INSTALL_DENIED_VERBS = ["install", "i", "ci", "add", "update"];
 
 /**
  * The refusals that must survive the allowlist. A prefix allowlist entry like
@@ -104,7 +147,9 @@ const EXTRA_DENIED = [
  * at all — crossing every runtime with every verb would triple the command line
  * for combinations that do not exist (`vitest login`).
  */
-export const EXEC_DENIED_COMMANDS: string[] = RUNNERS.flatMap((r) => RELEASE_VERBS.map((v) => `${r} ${v}`))
+export const EXEC_DENIED_COMMANDS: string[] = RUNNERS.flatMap((r) =>
+  [...RELEASE_VERBS, ...INSTALL_DENIED_VERBS].map((v) => `${r} ${v}`),
+)
   .concat(EXTRA_DENIED)
   .sort();
 
@@ -136,6 +181,11 @@ export function reviewExecDecision(program: string, args: string[] = []): ExecDe
   if (!ALLOWED_PROGRAMS.has(name)) return deny(`${name} is not on the reviewer's allowlist`);
 
   const { verb, rest } = firstVerb(args);
+  if (INTERPRETERS.includes(name)) {
+    const inline = args.find((a) => INLINE_CODE_FLAGS.includes(a.toLowerCase()));
+    if (inline) return deny(`${name} ${inline} runs code written right here, which is a shell by another name`);
+    if (name === "deno" && verb === "eval") return deny("deno eval runs code written right here");
+  }
   if (INDIRECT_PROGRAMS.includes(name) || INDIRECT_PAIRS.includes(`${name} ${verb}`)) {
     const [next, ...tail] = INDIRECT_PROGRAMS.includes(name) ? [verb, ...rest] : rest;
     // a runner with nothing to run runs nothing, so there is nothing to refuse
@@ -156,12 +206,11 @@ export function reviewExecDecision(program: string, args: string[] = []): ExecDe
   const verbs = RUNNERS.includes(name) ? args.filter((a) => !a.startsWith("-")).map((a) => a.toLowerCase()) : [verb];
   const release = verbs.find((v) => RELEASE_VERBS.includes(v));
   if (release) return deny(`${name} ${release} mutates something outside this workspace`);
-  // A local install writes into the workspace (node_modules, .venv); a global one
-  // writes into a shared prefix, which is the one write outside the workspace the
-  // allowlist can still reach. EXTRA_DENIED above only names the spellings of it
-  // the cli's own denylist has to carry, not every one.
-  if (["install", "add", "i"].includes(verb) && args.some((a) => a === "-g" || a === "--global"))
-    return deny(`${name} ${verb} --global installs outside this workspace`);
+  // A global install writes into a shared prefix; a LOCAL one is no safer here,
+  // because the node_modules a worktree sees is a symlink to the user's own (see
+  // INSTALL_VERBS). "i" is npm's alias and is not spelled out in the cross above.
+  if (RUNNERS.includes(name) && (INSTALL_VERBS.includes(verb) || verb === "i"))
+    return deny(`${name} ${verb} rewrites a dependency tree every task shares`);
   // `run <script>` executes whatever the manifest says, which we cannot read.
   // ponytail: the script NAME is the only signal there is; a release script
   // called something else gets through. Reading package.json here would make

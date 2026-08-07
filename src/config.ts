@@ -52,9 +52,10 @@ export interface Config {
    * The approval gate for a review-blocked task, for runs with no TUI to ask.
    * A headless run cannot wait on a human, so the gate is a policy rather than a
    * prompt. "accept" is bounded by the SAME safety property as the TUI's approve
-   * key — verification must have passed — so no policy can ever accept a task
-   * whose tests failed. Default "block" = today's behaviour, so no existing
-   * setup silently starts auto-accepting.
+   * key — a `verify` command must have RUN and passed — so no policy can accept
+   * a task whose tests failed, nor one that never had a test to fail. Default
+   * "block" = today's behaviour, so no existing setup silently starts
+   * auto-accepting.
    */
   review_blocked_policy?: ReviewBlockedPolicy;
   /**

@@ -240,6 +240,20 @@ describe("runTask CROSS", () => {
     expect(mExec).toHaveBeenCalledTimes(2); // initial exec + one fix, then stop before another identical fix
   });
 
+  // verificationPassed is the ONLY thing that can override a refusing reviewer
+  // (loop.ts's approve gate), so it has to mean "a gate ran and said yes".
+  // runVerify answers passed:true for a task with no verify command — right
+  // there, nothing is blocking — but read as verification it turns a MISSING
+  // gate into a passing one, and a task nothing ever judged reaches done.
+  it("does not report a missing verify command as verification that passed", async () => {
+    mVerify.mockResolvedValue({ passed: true, output: "" });
+    mReview.mockResolvedValue({ approved: false, changes: "needs work", diff: "d" });
+    const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1 });
+
+    expect((await runTask(task, prd, c, "/ws", "/prog")).verificationPassed).toBe(false);
+    expect((await runTask({ ...task, verify: "npm test" }, prd, c, "/ws", "/prog")).verificationPassed).toBe(true);
+  });
+
   it("uses default stalled-rounds and compacts oversized review feedback", async () => {
     mVerify.mockResolvedValue({ passed: true, output: "" });
     mReview.mockResolvedValue({ approved: false, changes: "x".repeat(1_200), diff: "d" });

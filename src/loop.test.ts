@@ -2,6 +2,7 @@
 // and the TTY Ink dashboard wiring (mount/control/reporter) vs non-TTY fallback.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { performance } from "node:perf_hooks";
+import { resolve } from "node:path";
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
@@ -29,10 +30,21 @@ vi.mock("./prd.js", async (importActual) => {
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
 vi.mock("./git.js", () => ({
   git: vi.fn(),
+  gitOut: vi.fn(() => null),
   headCommit: vi.fn(() => null),
   captureReviewBase: vi.fn(() => "base-tree"),
   taskChangedPaths: vi.fn(() => ["src/a.ts"]),
   commitPaths: vi.fn(() => true),
+}));
+// worktree.js is real git plumbing — proven against real repositories in
+// git.integration.test.ts. Here it is a seam, so the loop's routing (degrade to
+// serial, conflict → retry ladder, discard on every exit) is drivable.
+vi.mock("./worktree.js", () => ({
+  createTaskWorktree: vi.fn(() => "/ws/.ralphrun/worktrees/T1"),
+  mergeBackTaskWork: vi.fn(() => ({ status: "ok", head: "wt-head" })),
+  removeTaskWorktree: vi.fn(),
+  reapOrphanWorktrees: vi.fn(() => 0),
+  worktreeLoss: vi.fn(() => ({ head: null, dirty: false })),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
 // only the key is stubbed — invalidatePlan is pure, and the stall tests are
@@ -56,6 +68,13 @@ import { checkAgent } from "./diagnostics.js";
 import { findTask, nextTask } from "./prd.js";
 import { log, setReporter } from "./log.js";
 import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths } from "./git.js";
+import {
+  createTaskWorktree,
+  mergeBackTaskWork,
+  reapOrphanWorktrees,
+  removeTaskWorktree,
+  worktreeLoss,
+} from "./worktree.js";
 import { runTask } from "./run.js";
 import { advisorPlanKey } from "./plan-cache.js";
 import { mount } from "./tui/mount.js";
@@ -89,6 +108,11 @@ const mHeadCommit = vi.mocked(headCommit);
 const mCaptureReviewBase = vi.mocked(captureReviewBase);
 const mTaskChangedPaths = vi.mocked(taskChangedPaths);
 const mCommitPaths = vi.mocked(commitPaths);
+const mCreateWorktree = vi.mocked(createTaskWorktree);
+const mMergeBack = vi.mocked(mergeBackTaskWork);
+const mReapWorktrees = vi.mocked(reapOrphanWorktrees);
+const mRemoveWorktree = vi.mocked(removeTaskWorktree);
+const mWorktreeLoss = vi.mocked(worktreeLoss);
 const mRunTask = vi.mocked(runTask);
 const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
 const mMount = vi.mocked(mount);
@@ -185,6 +209,10 @@ beforeEach(() => {
   mCaptureReviewBase.mockReturnValue("base-tree");
   mTaskChangedPaths.mockReturnValue(["src/a.ts"]);
   mCommitPaths.mockReturnValue(true);
+  mCreateWorktree.mockReturnValue("/ws/.ralphrun/worktrees/T1");
+  mMergeBack.mockReturnValue({ status: "ok", head: "wt-head" });
+  mReapWorktrees.mockReturnValue(0);
+  mWorktreeLoss.mockReturnValue({ head: null, dirty: false });
   mMount.mockReturnValue(makeHandle());
   mSelect.mockResolvedValue("start" as never);
   mPickModel.mockResolvedValue("claude:sonnet");
@@ -756,6 +784,96 @@ describe("runLoop real run (non-TTY fallback)", () => {
 
     expect(mRunTask.mock.calls[0][7]).toBe("base-tree");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("after-commit"));
+  });
+
+  it("does not create a worktree when worktree_per_task is off", async () => {
+    // default-off is the whole reason this ships alone: an existing run must
+    // not change shape until the user opts in
+    await runLoop({ prd: "prd.json" });
+    expect(mCreateWorktree).not.toHaveBeenCalled();
+    expect(mRunTask.mock.calls[0][3]).toBe(resolve("."));
+  });
+
+  it("reclaims orphan worktrees at boot even with the feature off", async () => {
+    // a crash leaves them behind; turning the feature off afterwards must still
+    // clean up, so the reap cannot be gated on the flag
+    mReapWorktrees.mockReturnValue(2);
+    await runLoop({ prd: "prd.json" });
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("2 orphan worktree"));
+  });
+
+  it("runs the task inside its worktree and cherry-picks the result back", async () => {
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mHeadCommit.mockReturnValue("base-sha");
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask.mock.calls[0][3]).toBe("/ws/.ralphrun/worktrees/T1");
+    expect(mCaptureReviewBase).toHaveBeenCalledWith("/ws/.ralphrun/worktrees/T1");
+    // the commit is the TRANSPORT: it happens in the cell, the pick brings it home
+    expect(mCommitPaths).toHaveBeenCalledWith("/ws/.ralphrun/worktrees/T1", ["src/a.ts"], "T1: Task one");
+    expect(mMergeBack).toHaveBeenCalledWith(resolve("."), "/ws/.ralphrun/worktrees/T1", "base-sha");
+    expect(mRemoveWorktree).toHaveBeenCalledWith(resolve("."), "/ws/.ralphrun/worktrees/T1");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
+  });
+
+  it("degrades to the main workspace when no worktree can be made", async () => {
+    // no repo or no commit yet: infrastructure trouble is not something a retry
+    // of the task could ever fix, so it must not cost the task an attempt
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mCreateWorktree.mockReturnValue(null);
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask.mock.calls[0][3]).toBe(resolve("."));
+    expect(mMergeBack).not.toHaveBeenCalled();
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("no worktree available"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
+  });
+
+  it("routes a merge-back conflict into the existing retry ladder", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mHeadCommit.mockReturnValue("base-sha");
+    mMergeBack.mockReturnValue({ status: "conflict", head: "loser-sha" });
+
+    await runLoop({ prd: "prd.json" });
+
+    // NOT done: nothing landed in the main workspace, so the next attempt gets a
+    // worktree cut from the new HEAD and redoes the work on top of the winner
+    const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
+    expect(saved.tasks[0].status).toBe("todo");
+    expect(saved.tasks[0].retries).toBe(1);
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("loser-sha"));
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
+  });
+
+  it("blocks immediately when the user's own uncommitted change refuses the merge", async () => {
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mHeadCommit.mockReturnValue("base-sha");
+    mMergeBack.mockReturnValue({ status: "dirty", head: "stranded-sha" });
+
+    await runLoop({ prd: "prd.json" });
+
+    // retrying cannot help — the user's edit will still be in the way — so
+    // spending another full agent run on it would just burn money
+    const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
+    expect(saved.tasks[0].status).toBe("blocked");
+    expect(saved.tasks[0].retries).toBe(0);
+  });
+
+  it("names the sha when it discards a worktree that still holds committed work", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mRunTask.mockResolvedValue({ ok: false, reason: "failed", cost: NO_COST });
+    mWorktreeLoss.mockReturnValue({ head: "abandonedsha", dirty: true });
+
+    await runLoop({ prd: "prd.json" });
+
+    // discarding the cell is the rollback the loop never had, but losing an
+    // executor's work SILENTLY is worse than leaving it lying around
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("abandonedsha"));
+    expect(mRemoveWorktree).toHaveBeenCalled();
   });
 
   it("--task found → runs then returns (no commit when commit_per_task false)", async () => {

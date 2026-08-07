@@ -46,14 +46,16 @@ function gitWithPathspec(workspace: string, paths: string[], ...args: string[]):
   }).status;
 }
 
+/** Same as `git`, but for the commands whose ANSWER is their stdout. Empty = null. */
+export function gitOut(workspace: string, ...args: string[]): string | null {
+  const out = spawnSync("git", args, { cwd: workspace, encoding: "utf8" }).stdout;
+  return out?.trim() || null;
+}
+
 export function headCommit(workspace: string): string | null {
+  // a linked worktree's .git is a FILE, not a directory — existsSync covers both
   if (!existsSync(workspace + "/.git")) return null;
-  const out = spawnSync("git", ["rev-parse", "--verify", "HEAD"], {
-    cwd: workspace,
-    encoding: "utf8",
-  }).stdout;
-  const hash = out?.trim();
-  return hash || null;
+  return gitOut(workspace, "rev-parse", "--verify", "HEAD");
 }
 
 // A tree object snapshots the worktree in a private Git index. Comparing later

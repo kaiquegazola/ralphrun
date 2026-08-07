@@ -77,6 +77,25 @@ export interface Config {
    * the cost of a hung one for no gain.
    */
   review_timeout?: number;
+  /**
+   * Run each task in its own detached `git worktree` and cherry-pick the result
+   * back. It buys READ isolation — a `verify` that shells tsc/npm test reads the
+   * whole project, so the gate must not observe files this task never asked
+   * about — and it makes a blocked task's mess a discarded directory instead of
+   * dirt smeared across the workspace.
+   *
+   * OFF by default because it is a real behaviour change, not just an
+   * optimization: a worktree is checked out from HEAD, so the task no longer
+   * sees the user's uncommitted work. See README.
+   */
+  worktree_per_task?: boolean;
+  /**
+   * Untracked paths to symlink from the workspace into a fresh worktree. A
+   * worktree holds TRACKED files only, so without this `verify: "npm test"`
+   * fails on every task before anything else runs. The default is Node-shaped:
+   * a Python/Rust/Go project has to name its own (.venv, target, vendor).
+   */
+  worktree_link?: string[];
   extra_executor_args: string[];
 }
 
@@ -99,6 +118,8 @@ export const DEFAULTS: Config = {
   review_blocked_policy: "block",
   review_runs_commands: false,
   review_timeout: 900,
+  worktree_per_task: false,
+  worktree_link: ["node_modules"],
   extra_executor_args: [],
 };
 
@@ -157,5 +178,9 @@ export function loadConfig(
     Object.assign(cfg, file); // JSON.parse never yields undefined values
   }
   mergeDefined(cfg, overrides);
+  // The commit is the TRANSPORT out of a worktree — with commits off, nothing a
+  // task does would ever leave it. Fail at load, where the user can see it, not
+  // once per task at runtime.
+  if (cfg.worktree_per_task && !cfg.commit_per_task) throw new Error(t("loop.err.worktreeNeedsCommit"));
   return cfg;
 }

@@ -116,6 +116,8 @@ tail -f ralph.out
   "review_blocked_policy": "block",
   "review_runs_commands": false,
   "review_timeout": 900,
+  "worktree_per_task": false,
+  "worktree_link": ["node_modules"],
   "extra_executor_args": []
 }
 ```
@@ -195,6 +197,43 @@ tail -f ralph.out
   `max_cost_usd` exactly the way the rest of the advisor does: by marking the
   run's total a floor (`≥$…`). The ceiling still fires between tasks — on money
   ralphrun could see. With this on, more of the bill is money it cannot.
+
+- `worktree_per_task` runs each task in its own detached `git worktree` cut from
+  `HEAD`, then cherry-picks the resulting commit(s) back into your workspace. It
+  buys two things. **Read isolation**: a `verify` command shells `tsc` or
+  `npm test`, and those read the *whole* project, so without a worktree the gate
+  sees whatever else is lying around. And **rollback**: a blocked task is a
+  directory that gets deleted, instead of a mess smeared across your workspace
+  with nothing to undo it.
+
+- **It changes what a task can see, so it is `false` by default.** A worktree is
+  checked out from `HEAD`, which means a task in worktree mode **no longer sees
+  your uncommitted work**. That is inherent to isolation, not a bug, and it is
+  the reason nothing changes for you until you turn this on. It also requires
+  `commit_per_task` (the default) — the commit is *how* work leaves a worktree,
+  so the two are refused as a pair at config load.
+
+- **`worktree_link` is not optional if your project needs it.** A fresh worktree
+  contains **tracked files only** — no `node_modules`, no `.venv`, no `target/`.
+  Every listed name is symlinked in from the workspace, and the default
+  (`["node_modules"]`) is Node-shaped: a Python, Rust, Go or Java project must
+  set its own before enabling worktrees, or every task fails its gate for a
+  reason it cannot fix. The linked directory is **shared**, so a `verify` that
+  runs `npm install` mutates it for everyone.
+
+- **What happens when the pick fails.** If the work conflicts with something
+  that landed first, the task goes back into the normal retry ladder and the
+  next attempt is cut from the new `HEAD` — re-execution on top of the result,
+  bounded by `max_retries_per_task`. If it fails because *you* have uncommitted
+  changes in a file the task touched, git refuses before starting and the task
+  blocks immediately: retrying cannot move your edit out of the way. Either way
+  the workspace is left byte-identical, and the log carries the commit sha, so
+  the task's work is still recoverable by hand (`git cherry-pick <sha>`) even
+  after its worktree is gone. Orphan worktrees from a killed run are reclaimed
+  at the next startup, whether or not the feature is still on.
+
+- **Worktrees isolate the filesystem, not the machine.** Ports, dev databases
+  and code generators are shared no matter what this setting says.
 
 There is deliberately **no** idle timeout. A silence-based kill sounds obvious
 but measurement says otherwise: a buffered CLI is silent for the entire task, and
@@ -457,7 +496,9 @@ Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
 - **Crash recovery**: on startup, any task stuck in `doing` (killed mid-run) is
   reset to `todo`, and hand-written backlogs get missing fields filled
   (`status` / `retries` / `deps` / `acceptance` / `scope`). Re-running always
-  resumes.
+  resumes. Any per-task worktree a kill left under `.ralphrun/worktrees/` is
+  reclaimed in the same pass — including when `worktree_per_task` has since been
+  turned back off, so a crash never leaves the repository littered.
 - **Git isolation**: the workspace gets its own `.git`, so commits/diffs never
   leak into a parent repo (auto-initialized when `commit_per_task` or
   `review_after` is on).

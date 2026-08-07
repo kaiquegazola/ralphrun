@@ -105,6 +105,25 @@ describe("loadConfig", () => {
     expect(() => loadConfig("/x/prd.json", undefined, {})).toThrow("raw-failure");
   });
 
+  it("refuses worktree_per_task with commit_per_task off", () => {
+    // the commit is the only way work leaves a worktree, so this combination is
+    // a run that silently throws every task away — fail where the user can see it
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ worktree_per_task: true, commit_per_task: false }) as unknown as string,
+    );
+    expect(() => loadConfig("/x/prd.json", undefined, {})).toThrow("worktree_per_task");
+  });
+
+  it("worktree_per_task is off and links node_modules by default", () => {
+    // default-off keeps every existing run identical: a worktree is cut from
+    // HEAD, so it would stop showing the user's uncommitted work
+    vi.mocked(existsSync).mockReturnValue(false);
+    const cfg = loadConfig("/x/prd.json", undefined, {});
+    expect(cfg.worktree_per_task).toBe(false);
+    expect(cfg.worktree_link).toEqual(["node_modules"]);
+  });
+
   it("overrides win over file and defaults", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ review_after: true }) as unknown as string);

@@ -18,6 +18,7 @@ import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
+import { createTaskWorktree, mergeBackTaskWork, reapOrphanWorktrees, removeTaskWorktree, worktreeLoss } from "./worktree.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
 
@@ -159,6 +160,13 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   if (!opts.dryRun) prepareRun(cfg, workspace);
 
   if (!opts.dryRun) {
+    // Unconditional, not gated on worktree_per_task: at boot no ralphrun
+    // worktree can legitimately be live, so turning the feature OFF after a
+    // crash must still clean up what the crash left. Same invariant as
+    // normalizePrd resetting a stuck `doing` task, one layer down.
+    const reaped = reapOrphanWorktrees(workspace);
+    if (reaped > 0) log(progress, t("loop.log.worktreeReaped", { n: reaped }));
+
     log(progress, `\n---`);
     log(progress, t("loop.dry.mode", { mode, executor: exe, advisor: adv }));
     // Browser-validation preflight: a task opts in by invoking dev-browser in
@@ -367,193 +375,298 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     const signal = tui ? tui.control.beginTask() : undefined;
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
+
+    // Worktree mode changes WHERE a task runs, never which task runs — the
+    // scheduler still hands out exactly one. null = no isolation available, so
+    // degrade to the main workspace with a line rather than failing the task:
+    // infrastructure trouble is not something a retry of the task can fix.
+    const wt = cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, cfg.worktree_link ?? []) : null;
+    if (cfg.worktree_per_task && !wt) log(progress, t("loop.log.worktreeUnavailable", { id: task.id }));
+    const taskWorkspace = wt ?? workspace;
+
     let taskReviewBase: string | null | undefined;
     const reviewOn = cfg.review_after && !!cfg.advisor;
     if (reviewOn || cfg.commit_per_task) {
-      if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(workspace));
+      if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(taskWorkspace));
     }
     if (reviewOn) taskReviewBase = taskBaselines.get(task.id);
-    const taskStartCommit = headCommit(workspace);
+    // in worktree mode this IS the base the worktree was cut from, so it doubles
+    // as the left end of the cherry-pick range
+    const taskStartCommit = headCommit(taskWorkspace);
     const planBeforeRun = task.plan;
     const planKeyBeforeRun = task.planKey;
+
+    // In worktree mode the commit is the TRANSPORT: it is how the work leaves
+    // the cell, so both it and the cherry-pick have to succeed before the task
+    // may be called done. The serial path is untouched and still commits after
+    // savePRD, where the commit carries the task's new status.
+    //
+    // ponytail: an executor that rewrites prd.json rewrites the WORKTREE's copy,
+    // which is frozen at the base commit while the live one keeps moving. That
+    // fails closed rather than silently — the live file is dirty, so the pick is
+    // refused and the task blocks — but it does mean mid-run backlog edits do
+    // not work in worktree mode. Give the worktree a symlink to the real file if
+    // that ever needs to work.
+    const wtTask = task;
+    // "someone already said, with a sha, what happened to this worktree's work" —
+    // so the discard notice below does not repeat a line the merge already wrote.
+    let worktreeAccounted = false;
+    const landWorktreeWork = (): "ok" | "conflict" | "dirty" => {
+      if (!wt) return "ok";
+      logTaskCommit(taskWorkspace, progress, wtTask.id, wtTask.title, cfg, taskBaselines.get(wtTask.id));
+      const m = mergeBackTaskWork(workspace, wt, taskStartCommit);
+      if (m.status === "conflict" || m.status === "dirty") {
+        log(
+          progress,
+          t(m.status === "dirty" ? "loop.log.worktreeDirty" : "loop.log.worktreeConflict", {
+            id: wtTask.id,
+            hash: shortHash(m.head ?? ""),
+          }),
+        );
+        worktreeAccounted = true;
+        return m.status;
+      }
+      worktreeAccounted = true;
+      return "ok";
+    };
+
     // unknown, not 0: if runTask throws before any executor settles, whatever it
     // already spent was never reported to us
-    let result: RunTaskResult = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
     try {
-      result = await runTask(task, prd, cfg, workspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
-        const currentPrd = reload({ keepDoing: true });
-        if (currentPrd) {
-          const currentTask = currentPrd.tasks.find((x) => x.id === task.id);
-          const advisor = cfg.advisor;
-          const controlFileCacheUnchanged = currentTask?.plan === planBeforeRun && currentTask?.planKey === planKeyBeforeRun;
-          if (
-            currentTask &&
-            advisor &&
-            controlFileCacheUnchanged &&
-            advisorPlanKey(currentTask, currentPrd, advisor, readStandards(workspace)) === planKey
-          ) {
-            currentTask.status = "doing";
-            currentTask.plan = plan;
-            currentTask.planKey = planKey;
-            savePRD(prdPath, currentPrd);
+      let result: RunTaskResult = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
+      try {
+        result = await runTask(task, prd, cfg, taskWorkspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
+          const currentPrd = reload({ keepDoing: true });
+          if (currentPrd) {
+            const currentTask = currentPrd.tasks.find((x) => x.id === task.id);
+            const advisor = cfg.advisor;
+            const controlFileCacheUnchanged = currentTask?.plan === planBeforeRun && currentTask?.planKey === planKeyBeforeRun;
+            if (
+              currentTask &&
+              advisor &&
+              controlFileCacheUnchanged &&
+              advisorPlanKey(currentTask, currentPrd, advisor, readStandards(taskWorkspace)) === planKey
+            ) {
+              currentTask.status = "doing";
+              currentTask.plan = plan;
+              currentTask.planKey = planKey;
+              savePRD(prdPath, currentPrd);
+            }
           }
-        }
-      });
-    } catch (e) {
-      log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
-      result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
-    }
-    const taskStopMs = performance.now();
-    if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStopMs);
-    const elapsedMs = elapsedTracker.stopTask(taskStopMs);
-    const elapsed = Math.round(elapsedMs / 1000);
-    tasksRun += 1;
-    const spent = taskCost.get(task.id) ?? { usd: 0, unknown: false };
-    mergeCost(spent, result.cost);
-    taskCost.set(task.id, spent);
-    mergeCost(runCost, result.cost);
-    // Silent when nothing was measured AND no budget is set: a line that says
-    // "unknown" on every task of every cli that does not report cost is noise.
-    if (spent.usd > 0 || maxCostUsd > 0) {
-      log(progress, t("loop.log.cost", { id: task.id, cost: formatCost(spent), total: formatCost(runCost) }));
-    }
-    const taskEndCommit = headCommit(workspace);
-    if (taskEndCommit && taskEndCommit !== taskStartCommit) {
-      log(progress, t("loop.log.executorCommit", { id: task.id, hash: shortHash(taskEndCommit) }));
-    }
-
-    // quit pressed mid-task: the child was aborted, runTask returned. Exit now
-    // without munging status — the task stays "doing" and recovery resets it next run.
-    if (tui?.control.shouldQuit()) {
-      done();
-      log(progress, t("loop.log.quit"));
-      return;
-    }
-    const skipped = tui?.control.takeSkip() ?? false;
-
-    const fresh = reload();
-    if (!fresh) {
-      done();
-      return;
-    }
-    // the just-run task can vanish if prd.json was rewritten mid-run — stop
-    // gracefully instead of throwing on the status write.
-    const freshTask = fresh.tasks.find((t) => t.id === task!.id);
-    if (!freshTask) {
-      done();
-      log(progress, t("loop.log.taskVanished", { id: task.id }));
-      return;
-    }
-    if (skipped) {
-      taskBaselines.delete(task.id);
-      freshTask.status = "blocked";
-      const reason = t("loop.reason.skipped");
-      log(progress, t("loop.log.skipped", { id: task.id, s: elapsed }));
-      emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
-      savePRD(prdPath, fresh);
-    } else if (result.ok) {
-      freshTask.status = "done";
-      accepted += 1;
-      log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
-      emit({ taskId: task.id, status: "done", elapsedMs });
-      savePRD(prdPath, fresh);
-      // AFTER savePRD (the commit is meant to carry the task's new status) and
-      // BEFORE the baseline is dropped — the commit needs it to know which paths
-      // are this task's and which were already dirty.
-      if (cfg.commit_per_task) {
-        logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+        });
+      } catch (e) {
+        log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
+        result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
       }
-      taskBaselines.delete(task.id);
-    } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
-      const reason =
-        result.reason === "review_stalled"
-          ? t("loop.reason.reviewStalled")
-          : result.reason === "review_changes"
-            ? t("loop.reason.reviewChanges")
-            : t("loop.reason.reviewExhausted");
-      const displayReason = withReviewFeedback(reason, result.reviewChanges);
-      // Replan rung of the recovery ladder. A stall means every fix round landed
-      // on the identical failure, and the plan the executor was following is part
-      // of that evidence — so it must not be replayed. Only on a stall: an
-      // ordinary retry is what the cache exists for, and there the plan is not
-      // the suspect. run.ts detects the stall, this owns prd.json, and each exit
-      // below saves `fresh`.
-      if (result.reason === "review_stalled") {
-        invalidatePlan(freshTask);
-        log(progress, t("loop.log.planInvalidated", { id: task.id }));
+      const taskStopMs = performance.now();
+      if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStopMs);
+      const elapsedMs = elapsedTracker.stopTask(taskStopMs);
+      const elapsed = Math.round(elapsedMs / 1000);
+      tasksRun += 1;
+      const spent = taskCost.get(task.id) ?? { usd: 0, unknown: false };
+      mergeCost(spent, result.cost);
+      taskCost.set(task.id, spent);
+      mergeCost(runCost, result.cost);
+      // Silent when nothing was measured AND no budget is set: a line that says
+      // "unknown" on every task of every cli that does not report cost is noise.
+      if (spent.usd > 0 || maxCostUsd > 0) {
+        log(progress, t("loop.log.cost", { id: task.id, cost: formatCost(spent), total: formatCost(runCost) }));
       }
-      const allowReviewOverride = result.verificationPassed === true;
-      const action = await reviewBlockedGate(tui, cfg, progress, task.id, displayReason, allowReviewOverride);
-      if (action === "quit") {
+      const taskEndCommit = headCommit(taskWorkspace);
+      if (taskEndCommit && taskEndCommit !== taskStartCommit) {
+        log(progress, t("loop.log.executorCommit", { id: task.id, hash: shortHash(taskEndCommit) }));
+      }
+
+      // quit pressed mid-task: the child was aborted, runTask returned. Exit now
+      // without munging status — the task stays "doing" and recovery resets it next run.
+      if (tui?.control.shouldQuit()) {
         done();
         log(progress, t("loop.log.quit"));
         return;
       }
-      if (action === "retry") {
-        freshTask.status = "todo";
-        const feedback = result.reviewChanges?.trim() || reason;
-        pendingReviewFeedback.set(task.id, feedback);
-        log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
-        emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
-        savePRD(prdPath, fresh);
-        await sleep(1000);
-        continue;
+      const skipped = tui?.control.takeSkip() ?? false;
+
+      const fresh = reload();
+      if (!fresh) {
+        done();
+        return;
       }
-      if (action === "approve" && allowReviewOverride) {
-        freshTask.status = "done";
-        accepted += 1; // accepted change, whoever accepted it: same denominator as an auto-pass
-        log(
-          progress,
-          tui
-            ? t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason })
-            : t("loop.log.headlessAccepted", { id: task.id, s: elapsed, reason: displayReason }),
-        );
-        emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
+      // the just-run task can vanish if prd.json was rewritten mid-run — stop
+      // gracefully instead of throwing on the status write.
+      const freshTask = fresh.tasks.find((t) => t.id === task!.id);
+      if (!freshTask) {
+        done();
+        log(progress, t("loop.log.taskVanished", { id: task.id }));
+        return;
+      }
+      // Worktree mode lands the work BEFORE the status write: a task whose
+      // commits cannot be cherry-picked back must never be recorded as done
+      // with nothing in the main workspace to show for it. No-op serially.
+      const landed = !skipped && result.ok ? landWorktreeWork() : "ok";
+
+      if (skipped) {
+        taskBaselines.delete(task.id);
+        freshTask.status = "blocked";
+        const reason = t("loop.reason.skipped");
+        log(progress, t("loop.log.skipped", { id: task.id, s: elapsed }));
+        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
         savePRD(prdPath, fresh);
-        if (cfg.commit_per_task) {
+      } else if (result.ok && landed === "ok") {
+        freshTask.status = "done";
+        accepted += 1;
+        log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
+        emit({ taskId: task.id, status: "done", elapsedMs });
+        savePRD(prdPath, fresh);
+        // AFTER savePRD (the commit is meant to carry the task's new status) and
+        // BEFORE the baseline is dropped — the commit needs it to know which paths
+        // are this task's and which were already dirty. In worktree mode
+        // landWorktreeWork already committed, because there the commit is the
+        // only way the work gets out.
+        if (cfg.commit_per_task && !wt) {
           logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
         }
         taskBaselines.delete(task.id);
-        if (opts.task) {
-          done();
-          return;
-        }
-        await sleep(1000);
-        continue;
-      }
-      taskBaselines.delete(task.id);
-      freshTask.status = "blocked";
-      log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: displayReason }));
-      emit({ taskId: task.id, status: "blocked", reason: displayReason, elapsedMs });
-      savePRD(prdPath, fresh);
-    } else {
-      freshTask.retries += 1;
-      if (freshTask.retries >= cfg.max_retries_per_task) {
+      } else if (landed === "dirty") {
+        // A retry cannot help here: the user's own uncommitted edit to that file
+        // will still be in the way next time, so blocking now saves a full
+        // agent run's spend. This is the one conflict cause reachable at
+        // concurrency 1, since nothing else is writing the main workspace.
         taskBaselines.delete(task.id);
         freshTask.status = "blocked";
-        const reason = t("loop.reason.maxRetries");
-        log(progress, t("loop.log.blocked", { id: task.id, s: elapsed }));
+        const reason = t("loop.reason.mergeDirty");
+        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
         emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        savePRD(prdPath, fresh);
+      } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
+        const reason =
+          result.reason === "review_stalled"
+            ? t("loop.reason.reviewStalled")
+            : result.reason === "review_changes"
+              ? t("loop.reason.reviewChanges")
+              : t("loop.reason.reviewExhausted");
+        const displayReason = withReviewFeedback(reason, result.reviewChanges);
+        // Replan rung of the recovery ladder. A stall means every fix round landed
+        // on the identical failure, and the plan the executor was following is part
+        // of that evidence — so it must not be replayed. Only on a stall: an
+        // ordinary retry is what the cache exists for, and there the plan is not
+        // the suspect. run.ts detects the stall, this owns prd.json, and each exit
+        // below saves `fresh`.
+        if (result.reason === "review_stalled") {
+          invalidatePlan(freshTask);
+          log(progress, t("loop.log.planInvalidated", { id: task.id }));
+        }
+        const allowReviewOverride = result.verificationPassed === true;
+        const action = await reviewBlockedGate(tui, cfg, progress, task.id, displayReason, allowReviewOverride);
+        if (action === "quit") {
+          done();
+          log(progress, t("loop.log.quit"));
+          return;
+        }
+        if (action === "retry") {
+          freshTask.status = "todo";
+          const feedback = result.reviewChanges?.trim() || reason;
+          pendingReviewFeedback.set(task.id, feedback);
+          log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
+          emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
+          savePRD(prdPath, fresh);
+          await sleep(1000);
+          continue;
+        }
+        if (action === "approve" && allowReviewOverride) {
+          const approveLanded = landWorktreeWork();
+          if (approveLanded !== "ok") {
+            // Approved but unlandable. Blocking beats recording a done task the
+            // main workspace never received; the sha to recover it is already
+            // in the log line landWorktreeWork wrote.
+            taskBaselines.delete(task.id);
+            freshTask.status = "blocked";
+            const reason = approveLanded === "dirty" ? t("loop.reason.mergeDirty") : t("loop.reason.mergeConflict");
+            log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
+            emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+            savePRD(prdPath, fresh);
+            if (opts.task) {
+              done();
+              return;
+            }
+            await sleep(1000);
+            continue;
+          }
+          freshTask.status = "done";
+          accepted += 1; // accepted change, whoever accepted it: same denominator as an auto-pass
+          log(
+            progress,
+            tui
+              ? t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason })
+              : t("loop.log.headlessAccepted", { id: task.id, s: elapsed, reason: displayReason }),
+          );
+          emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
+          savePRD(prdPath, fresh);
+          if (cfg.commit_per_task && !wt) {
+            logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+          }
+          taskBaselines.delete(task.id);
+          if (opts.task) {
+            done();
+            return;
+          }
+          await sleep(1000);
+          continue;
+        }
+        taskBaselines.delete(task.id);
+        freshTask.status = "blocked";
+        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason: displayReason }));
+        emit({ taskId: task.id, status: "blocked", reason: displayReason, elapsedMs });
+        savePRD(prdPath, fresh);
       } else {
-        freshTask.status = "todo";
-        log(progress, t("loop.log.retry", { id: task.id, s: elapsed, n: freshTask.retries }));
-        emit({ taskId: task.id, status: "retry", elapsedMs });
+        // Also where a merge-back CONFLICT lands, deliberately: the next
+        // attempt's worktree is cut from the new HEAD, which already contains
+        // whatever won, so "re-execute on top of the result" is what already
+        // happens and max_retries_per_task is already the attempt ceiling.
+        // No second ladder, no separate block reason.
+        freshTask.retries += 1;
+        if (freshTask.retries >= cfg.max_retries_per_task) {
+          taskBaselines.delete(task.id);
+          freshTask.status = "blocked";
+          const reason = t("loop.reason.maxRetries");
+          log(progress, t("loop.log.blocked", { id: task.id, s: elapsed }));
+          emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        } else {
+          freshTask.status = "todo";
+          log(progress, t("loop.log.retry", { id: task.id, s: elapsed, n: freshTask.retries }));
+          emit({ taskId: task.id, status: "retry", elapsedMs });
+        }
+        savePRD(prdPath, fresh);
       }
-      savePRD(prdPath, fresh);
-    }
 
-    if (opts.task) {
-      done();
-      return;
+      if (opts.task) {
+        done();
+        return;
+      }
+      // a manual skip marks the task blocked too, but the user asked to move ON —
+      // only an automatic (max-retries) block honors stop_on_blocked.
+      if (!skipped && freshTask.status === "blocked" && cfg.stop_on_blocked) {
+        done();
+        log(progress, t("loop.log.stopBlocked"));
+        return;
+      }
+      await sleep(1000);
+    } finally {
+      // Every exit path — done, blocked, skipped, retry, quit, crash — drops the
+      // cell. That discard IS the rollback the serial loop never had, where a
+      // blocked task leaves its mess smeared across the main workspace.
+      if (wt) {
+        // The baseline is a tree of THIS worktree's start. The next attempt gets
+        // a fresh worktree cut from a newer HEAD, so keeping it would make that
+        // attempt stage whatever landed in between as its own work.
+        taskBaselines.delete(task.id);
+        if (!worktreeAccounted) {
+          const lost = worktreeLoss(wt, taskStartCommit);
+          if (lost.head) log(progress, t("loop.log.worktreeDiscarded", { id: task.id, hash: shortHash(lost.head) }));
+          else if (lost.dirty) log(progress, t("loop.log.worktreeDiscardedDirty", { id: task.id }));
+        }
+        removeTaskWorktree(workspace, wt);
+      }
     }
-    // a manual skip marks the task blocked too, but the user asked to move ON —
-    // only an automatic (max-retries) block honors stop_on_blocked.
-    if (!skipped && freshTask.status === "blocked" && cfg.stop_on_blocked) {
-      done();
-      log(progress, t("loop.log.stopBlocked"));
-      return;
-    }
-    await sleep(1000);
   }
 }
 

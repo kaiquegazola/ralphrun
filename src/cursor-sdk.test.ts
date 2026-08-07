@@ -178,7 +178,10 @@ describe("cursorSdkEvent", () => {
     ["status ERROR with a message", { type: "status", status: "ERROR", message: "boom" }, { text: "boom" }],
     ["status ERROR with no message", { type: "status", status: "ERROR" }, { text: "" }],
     ["system", { type: "system" }, { text: "" }],
+    // a usage tally with no cost field leaves the spend UNKNOWN, and stays
+    // classified as noise: it legitimately trails the agent's final answer
     ["usage", { type: "usage" }, { text: "" }],
+    ["usage carrying a cost", { type: "usage", totalCostUsd: 0.5 }, { text: "", costUsd: 0.5 }],
     ["request", { type: "request" }, { text: "" }],
     ["task", { type: "task", text: "x" }, { text: "" }],
     ["an unrecognised type", { type: "nonsense" }, { text: "" }],

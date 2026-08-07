@@ -581,7 +581,7 @@ describe("in-process backend", () => {
     const signal = new AbortController().signal;
     expect(await runExecutor(sdkSpec, "prompt", c, "ws", "prog", task, [], signal)).toBe(true);
     expect(runCursorSdkExecutor).toHaveBeenCalledTimes(1);
-    expect(runCursorSdkExecutor).toHaveBeenCalledWith(sdkSpec, "prompt", c, "ws", "prog", task, signal);
+    expect(runCursorSdkExecutor).toHaveBeenCalledWith(sdkSpec, "prompt", c, "ws", "prog", task, signal, undefined, undefined);
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });

@@ -17,7 +17,7 @@ import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
-import { assistantEvent, toolSummary, type StreamEvent } from "./stream.js";
+import { assistantEvent, reportedCostUsd, toolSummary, type CostSink, type StreamEvent } from "./stream.js";
 import { emit } from "./tui/events.js";
 
 // Structural mirrors of @cursor/sdk, covering ONLY the fields this module
@@ -201,7 +201,15 @@ export function cursorSdkEvent(msg: CursorMessage): StreamEvent {
     case "status":
       return { text: msg.status === "ERROR" && typeof msg.message === "string" ? msg.message : "" };
 
-    // system / usage / request / task and anything unrecognised are the HARNESS
+    // The SDK's billing tally. It is read for a cost figure and for NOTHING
+    // else: still no text, still not activity (see below). Cursor does not
+    // document a USD number here — its usage is token counts — so when there is
+    // no cost field the spend stays UNKNOWN rather than becoming a 0 that would
+    // satisfy a budget nothing measured.
+    case "usage":
+      return { text: "", costUsd: reportedCostUsd(msg) };
+
+    // system / request / task and anything unrecognised are the HARNESS
     // talking. FINISHED, a usage tally and system:init all legitimately trail
     // the agent's final answer, so counting them as activity would clear a real
     // BLOCKED marker and mark a failed task DONE. A wasted retry beats a wrong
@@ -414,6 +422,7 @@ export async function runCursorSdkExecutor(
   task: Task,
   signal?: AbortSignal,
   seams?: CursorSdkSeams,
+  onCost?: CostSink,
 ): Promise<boolean> {
   // ponytail: KNOWN CEILING — one Agent per call, exactly like the CLI path. The
   // real win here would be keeping ONE agent across the fix rounds and sending
@@ -430,6 +439,8 @@ export async function runCursorSdkExecutor(
   // executor.ts for why both halves matter
   let lastLine = "";
   let lastWasProse = false;
+  // see executor.ts: undefined stays undefined until a cli reports a figure
+  let costUsd: number | undefined;
 
   // there is no command line to append them to, and silently dropping a knob the
   // user set is worse than one line saying so
@@ -462,6 +473,7 @@ export async function runCursorSdkExecutor(
         // ordering is load-bearing: this runs BEFORE the same event's own text
         // can set it back
         if (ev.activity) lastWasProse = false;
+        if (ev.costUsd !== undefined) costUsd = (costUsd ?? 0) + ev.costUsd;
         if (!ev.text) return;
         for (const line of ev.text.split("\n")) {
           if (line.trim()) {
@@ -509,6 +521,9 @@ export async function runCursorSdkExecutor(
     return true;
   } finally {
     clearInterval(hbTimer);
+    // `finally` is this backend's single settle point, so the sink fires exactly
+    // once here too — including on the timeout/abort paths that were still billed
+    onCost?.(costUsd);
   }
 }
 

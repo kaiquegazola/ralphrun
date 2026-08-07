@@ -96,6 +96,9 @@ const mPickModel = vi.mocked(pickModel);
 const mSelect = vi.mocked(select);
 const mIsCancel = vi.mocked(isCancel);
 
+// the default for tests that are not about money: a metered run that spent nothing
+const NO_COST = { usd: 0, unknown: false };
+
 const TASK = { id: "T1", title: "Task one", status: "todo", deps: [], retries: 0, description: "d", acceptance: [] };
 const PRD_JSON = JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks: [TASK] });
 
@@ -177,7 +180,7 @@ beforeEach(() => {
   mCheckAgent.mockReturnValue({ cli: "claude", installed: true, loggedIn: true, loginCommand: "claude auth login" });
   mNextTask.mockReturnValueOnce(TASK as never).mockReturnValue(null);
   mFindTask.mockReturnValue(TASK as never);
-  mRunTask.mockResolvedValue({ ok: true });
+  mRunTask.mockResolvedValue({ ok: true, cost: NO_COST });
   mHeadCommit.mockReturnValue(null);
   mCaptureReviewBase.mockReturnValue("base-tree");
   mTaskChangedPaths.mockReturnValue(["src/a.ts"]);
@@ -496,7 +499,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
   it("done → commit; falls back to default template when commit_message_template is empty", async () => {
     fastTimers();
     mLoadConfig.mockReturnValue(cfg({ commit_message_template: "" })); // Falsy forces fallback
-    mRunTask.mockResolvedValueOnce({ ok: true });
+    mRunTask.mockResolvedValueOnce({ ok: true, cost: NO_COST });
     mHeadCommit.mockReturnValueOnce("aaaa").mockReturnValueOnce("bbbb");
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
     expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], "T1: Task one");
@@ -550,7 +553,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
   });
 
   it("review failure blocks immediately without consuming task retries", async () => {
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
@@ -561,7 +564,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
 
   it("reports a stalled-review reason and compacts long reviewer feedback", async () => {
     const feedback = "x".repeat(300);
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_stalled", reviewChanges: feedback, verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_stalled", reviewChanges: feedback, verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("review loop stalled"));
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("…"));
@@ -580,7 +583,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
         tasks: [{ ...TASK, plan: "the plan that stalled", planKey: "plan-key" }],
       }),
     );
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_stalled", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_stalled", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
@@ -600,7 +603,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
         tasks: [{ ...TASK, plan: "a plan worth keeping", planKey: "plan-key" }],
       }),
     );
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
@@ -614,7 +617,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mMount.mockReturnValue(handle);
     mNextTask.mockReset();
     mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
-    mRunTask.mockResolvedValueOnce({ ok: false, reason: "review_changes", reviewChanges: "" }).mockResolvedValueOnce({ ok: true });
+    mRunTask.mockResolvedValueOnce({ ok: false, cost: NO_COST, reason: "review_changes", reviewChanges: "" }).mockResolvedValueOnce({ ok: true, cost: NO_COST });
 
     await runLoop({ prd: "prd.json" });
 
@@ -642,7 +645,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     setTTY(true);
     const handle = makeHandle({ reviewAction: "approve" });
     mMount.mockReturnValue(handle);
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
@@ -657,7 +660,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     setTTY(true);
     const handle = makeHandle({ reviewAction: "approve" });
     mMount.mockReturnValue(handle);
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_exhausted", verificationPassed: false });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: false });
 
     await runLoop({ prd: "prd.json" });
 
@@ -675,8 +678,8 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mNextTask.mockReset();
     mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
     mRunTask
-      .mockResolvedValueOnce({ ok: false, reason: "review_changes", reviewChanges: "fix the typecheck gate" })
-      .mockResolvedValueOnce({ ok: true });
+      .mockResolvedValueOnce({ ok: false, cost: NO_COST, reason: "review_changes", reviewChanges: "fix the typecheck gate" })
+      .mockResolvedValueOnce({ ok: true, cost: NO_COST });
 
     await runLoop({ prd: "prd.json" });
 
@@ -718,7 +721,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
       t.plan = "new-plan";
       t.planKey = "plan-key";
       if (onPlan) onPlan("new-plan", "plan-key");
-      return { ok: true };
+      return { ok: true, cost: NO_COST };
     });
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
 
@@ -740,7 +743,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
       t.plan = "generated-plan";
       t.planKey = "plan-key";
       onPlan?.("generated-plan", "plan-key");
-      return { ok: false, reason: "failed" };
+      return { ok: false, cost: NO_COST, reason: "failed" };
     });
 
     await runLoop({ prd: "prd.json", task: "T1" });
@@ -756,7 +759,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mAdvisorPlanKey.mockReturnValueOnce("changed-input-key");
     mRunTask.mockImplementationOnce(async (t, p, c, w, prog, sig, rfb, rb, onPlan) => {
       onPlan?.("generated-plan", "original-key");
-      return { ok: true };
+      return { ok: true, cost: NO_COST };
     });
 
     await runLoop({ prd: "prd.json", task: "T1" });
@@ -832,7 +835,7 @@ describe("runLoop TTY dashboard", () => {
     });
     mRunTask.mockImplementation(async () => {
       reporter?.("mid");
-      return { ok: true };
+      return { ok: true, cost: NO_COST };
     });
     await runLoop({ prd: "prd.json" });
     expect(mMount).toHaveBeenCalledWith(
@@ -868,7 +871,7 @@ describe("runLoop TTY dashboard", () => {
       onPausedChange(false);
       nowMs = 1_000;
       paused = true;
-      return { ok: true };
+      return { ok: true, cost: NO_COST };
     });
 
     await runLoop({ prd: "prd.json" });
@@ -893,7 +896,7 @@ describe("runLoop TTY dashboard", () => {
     setTTY(true);
     const handle = makeHandle({ reviewAction: "quit" });
     mMount.mockReturnValue(handle);
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_exhausted", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
 
     await runLoop({ prd: "prd.json" });
 
@@ -905,7 +908,7 @@ describe("runLoop TTY dashboard", () => {
     setTTY(true);
     const handle = makeHandle({ reviewAction: "approve" });
     mMount.mockReturnValue(handle);
-    mRunTask.mockResolvedValue({ ok: false, reason: "review_exhausted", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
 
     await runLoop({ prd: "prd.json", task: "T1" });
 

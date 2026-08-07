@@ -33,6 +33,14 @@ export interface Config {
   commit_per_task: boolean;
   commit_message_template: string;
   stop_on_blocked: boolean;
+  /**
+   * Stop the run once the measured spend reaches this many USD. 0 (the default)
+   * or absent = no ceiling, so every existing setup keeps running exactly as it
+   * did. Only spend that a cli actually REPORTED counts — claude does, nothing
+   * else does yet — so this is a ceiling on what we can see, never on what an
+   * unmetered agent can bill. See README.
+   */
+  max_cost_usd?: number;
   extra_executor_args: string[];
 }
 
@@ -51,6 +59,7 @@ export const DEFAULTS: Config = {
   commit_per_task: true,
   commit_message_template: "{id}: {title}",
   stop_on_blocked: false,
+  max_cost_usd: 0,
   extra_executor_args: [],
 };
 

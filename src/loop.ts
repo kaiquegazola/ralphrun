@@ -17,6 +17,7 @@ import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } fro
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
+import { formatCost, mergeCost, type CostTally } from "./stream.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
 
@@ -203,10 +204,34 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     setReporter((line) => tui!.update({ taskId: curTaskId, line, lineSource: "system" }));
     startTimeTicker();
   }
+  // Ceilings fall, never rise: read ONCE, before any task runs. The config menu
+  // is reachable mid-run and rewrites ralph.config.json, so a ceiling re-read
+  // per iteration would let a run raise its own budget from the inside.
+  const maxCostUsd = Math.max(0, cfg.max_cost_usd ?? 0);
+  const runCost: CostTally = { usd: 0, unknown: false };
+  // per task, kept across retries: a task that blocked after three attempts cost
+  // all three, and the run report is only honest if it says so
+  const taskCost = new Map<string, CostTally>();
+  let accepted = 0; // tasks that reached done THIS run — the denominator
+  let tasksRun = 0;
+
   const done = (): void => {
     if (timeTicker) clearInterval(timeTicker);
     setReporter(null);
     tui?.unmount();
+    // after unmount, so the accounting survives in the terminal instead of
+    // scrolling by inside a pane that is about to disappear
+    if (tasksRun === 0) return; // nothing ran: no accounting to report
+    log(
+      progress,
+      accepted > 0
+        ? t("loop.log.runCost", {
+            total: formatCost(runCost),
+            n: accepted,
+            per: formatCost({ usd: runCost.usd / accepted, unknown: runCost.unknown }),
+          })
+        : t("loop.log.runCostNoAccepted", { total: formatCost(runCost) }),
+    );
   };
   const pendingReviewFeedback = new Map<string, string>();
   // The worktree as it stood when each task STARTED. Two consumers: the review
@@ -221,6 +246,18 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     if (tuiAction === "quit" || tui?.control.shouldQuit()) {
       done();
       log(progress, t("loop.log.quit"));
+      return;
+    }
+
+    // Money is a run-level ceiling and it is checked BETWEEN tasks, never
+    // mid-task: killing a task that is already paid for throws the result away
+    // and still leaves the bill. Checked at the TOP so every path that loops
+    // back — including the review retry/approve `continue`s — passes through it.
+    // Logged BEFORE done() so the reason lands in the TUI pane, not only in
+    // progress.md.
+    if (maxCostUsd > 0 && runCost.usd >= maxCostUsd) {
+      log(progress, t("loop.log.stopBudget", { spent: formatCost(runCost), max: maxCostUsd.toFixed(2) }));
+      done();
       return;
     }
 
@@ -332,7 +369,9 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     const taskStartCommit = headCommit(workspace);
     const planBeforeRun = task.plan;
     const planKeyBeforeRun = task.planKey;
-    let result: RunTaskResult = { ok: false, reason: "failed" };
+    // unknown, not 0: if runTask throws before any executor settles, whatever it
+    // already spent was never reported to us
+    let result: RunTaskResult = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
     try {
       result = await runTask(task, prd, cfg, workspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
         const currentPrd = reload({ keepDoing: true });
@@ -355,12 +394,22 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       });
     } catch (e) {
       log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
-      result = { ok: false, reason: "failed" };
+      result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
     }
     const taskStopMs = performance.now();
     if (tui) elapsedTracker.setPaused(tui.control.isPaused(), taskStopMs);
     const elapsedMs = elapsedTracker.stopTask(taskStopMs);
     const elapsed = Math.round(elapsedMs / 1000);
+    tasksRun += 1;
+    const spent = taskCost.get(task.id) ?? { usd: 0, unknown: false };
+    mergeCost(spent, result.cost);
+    taskCost.set(task.id, spent);
+    mergeCost(runCost, result.cost);
+    // Silent when nothing was measured AND no budget is set: a line that says
+    // "unknown" on every task of every cli that does not report cost is noise.
+    if (spent.usd > 0 || maxCostUsd > 0) {
+      log(progress, t("loop.log.cost", { id: task.id, cost: formatCost(spent), total: formatCost(runCost) }));
+    }
     const taskEndCommit = headCommit(workspace);
     if (taskEndCommit && taskEndCommit !== taskStartCommit) {
       log(progress, t("loop.log.executorCommit", { id: task.id, hash: shortHash(taskEndCommit) }));
@@ -397,6 +446,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       savePRD(prdPath, fresh);
     } else if (result.ok) {
       freshTask.status = "done";
+      accepted += 1;
       log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
       emit({ taskId: task.id, status: "done", elapsedMs });
       savePRD(prdPath, fresh);
@@ -445,6 +495,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
         }
         if (action === "approve" && allowReviewOverride) {
           freshTask.status = "done";
+          accepted += 1; // a human accepted the change: same denominator as an auto-pass
           log(progress, t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason }));
           emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
           savePRD(prdPath, fresh);

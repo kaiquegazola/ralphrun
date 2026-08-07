@@ -76,7 +76,9 @@ describe("runTask NATIVE", () => {
     const c = cfg();
     const result = await runTask(task, prd, c, "/ws", "/prog");
     expect(result.ok).toBe(true);
-    expect(mExec).toHaveBeenCalledWith(c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined);
+    expect(mExec).toHaveBeenCalledWith(
+      c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined, expect.any(Function),
+    );
   });
 
   it("fails when verify fails even if executor ok", async () => {
@@ -152,7 +154,8 @@ describe("runTask CROSS", () => {
       .mockResolvedValueOnce({ approved: true, changes: "", diff: "D2" });
     const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 3 });
     const result = await runTask(task, prd, c, "/ws", "/prog");
-    expect(result).toEqual({ ok: true });
+    // the advisor is unmetered, so a run that used one can only report a floor
+    expect(result).toEqual({ ok: true, cost: { usd: 0, unknown: true } });
     expect(mLog).toHaveBeenCalledWith("/prog", expect.stringContaining("do X"));
     expect(mFeedback).toHaveBeenCalledWith(true, true, "", false, "do X");
     // The review feedback, not a user decision, drove the second executor run.
@@ -166,7 +169,7 @@ describe("runTask CROSS", () => {
   it("injects reviewer feedback into a human-requested retry prompt", async () => {
     const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
     expect(result.ok).toBe(true);
-    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined);
+    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function));
   });
 
   it("reuses plan if task.plan is already set", async () => {

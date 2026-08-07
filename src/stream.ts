@@ -14,6 +14,8 @@
 // have actually captured and can test against. A cli with no `stream` entry in
 // the registry keeps the plain-text behaviour.
 
+import { t } from "./i18n.js";
+
 /** what a single raw event line means to us */
 export interface StreamEvent {
   /** text to show / log, if any. Empty for events that are pure liveness. */
@@ -35,6 +37,65 @@ export interface StreamEvent {
    * agent's final answer, and treating them as work would silence a real block.
    */
   activity?: boolean;
+  /**
+   * What the cli says this turn cost, in USD. Absent when it reported nothing —
+   * NEVER 0, see reportedCostUsd.
+   *
+   * Deliberately neither `prose` nor `activity`: a cost tally is the harness
+   * billing us, not the agent working, and counting it either way would let
+   * telemetry that trails the final answer clear a real BLOCKED marker.
+   */
+  costUsd?: number;
+}
+
+/**
+ * The cli's own money figure for a turn, or undefined when it did not report
+ * one. Never estimated: a fabricated 0 would make a budget look satisfied when
+ * nothing was measured at all. Both spellings because claude streams
+ * `total_cost_usd` and the Cursor SDK speaks camelCase.
+ */
+export function reportedCostUsd(ev: unknown): number | undefined {
+  if (!ev || typeof ev !== "object") return undefined;
+  const o = ev as Record<string, unknown>;
+  const raw = o.total_cost_usd ?? o.totalCostUsd;
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * Money spent so far. `unknown` marks that at least one call reported no figure
+ * — only claude emits a cost today, and no cli meters the advisor — so `usd` is
+ * a FLOOR, never a total. Kept as a flag rather than folded into the number
+ * because a silent 0 is exactly the lie this feature exists to prevent.
+ */
+export interface CostTally {
+  usd: number;
+  unknown: boolean;
+}
+
+/**
+ * Reports what ONE executor call cost. Called exactly once per call, on every
+ * exit path — a timed-out or aborted turn was still billed, so skipping those
+ * would under-count precisely the runs that burned money for nothing — with
+ * undefined when the cli reported no figure at all.
+ */
+export type CostSink = (usd: number | undefined) => void;
+
+/** one cli call's outcome; `undefined` means that call reported no cost */
+export function addCost(tally: CostTally, usd: number | undefined): void {
+  if (usd === undefined) tally.unknown = true;
+  else tally.usd += usd;
+}
+
+/** roll a task's tally into the run's */
+export function mergeCost(dst: CostTally, src: CostTally): void {
+  dst.usd += src.usd;
+  dst.unknown ||= src.unknown;
+}
+
+/** "$1.2345", "≥$1.2345" when part of the spend was never reported, else unknown */
+export function formatCost(tally: CostTally): string {
+  if (tally.unknown && tally.usd === 0) return t("cost.unknown");
+  return `${tally.unknown ? "≥$" : "$"}${tally.usd.toFixed(4)}`;
 }
 
 // a single event line past this is not a real event; parsing multi-MB of JSON
@@ -140,7 +201,10 @@ export function parseClaudeStream(line: string): StreamEvent | null {
       // A successful one repeats the assistant text we already displayed, so it
       // is classified but not printed — otherwise every task ends twice.
       const failed = ev.is_error === true || (typeof ev.subtype === "string" && ev.subtype !== "success");
-      return { text: failed ? final : "", prose: failed || undefined, final };
+      // the money figure rides on this same event, and a FAILED turn was still
+      // billed — dropping its cost would under-count exactly the runs that
+      // burned budget for nothing
+      return { text: failed ? final : "", prose: failed || undefined, final, costUsd: reportedCostUsd(ev) };
     }
     // a tool result is invisible but it IS the agent working: it must end any
     // "my last word was the marker" state, same as a visible tool call

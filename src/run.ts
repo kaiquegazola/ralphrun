@@ -13,6 +13,7 @@ import { runVerify, assembleFeedback } from "./verify.js";
 import { emit } from "./tui/events.js";
 import { captureReviewBase } from "./git.js";
 import { advisorPlanKey, routeAdvisorPlan } from "./plan-cache.js";
+import { addCost, type CostTally } from "./stream.js";
 
 export type RunTaskFailureReason = "failed" | "review_changes" | "review_exhausted" | "review_stalled";
 
@@ -21,6 +22,8 @@ export interface RunTaskResult {
   reason?: RunTaskFailureReason;
   reviewChanges?: string;
   verificationPassed?: boolean;
+  /** every executor call this attempt made, including the fix rounds */
+  cost: CostTally;
 }
 
 export async function runTask(
@@ -39,6 +42,10 @@ export async function runTask(
   const native = supportsNativeAdvisor(execu.cli, advis?.cli);
   const standards = readStandards(workspace);
   const prompt = injectReviewRetryFeedback(buildPrompt(task, prd, standards), reviewRetryFeedback);
+  // one tally for the whole attempt: the fix rounds below are the same task's
+  // money, and a per-round figure would hide what a stubborn task really cost
+  const cost: CostTally = { usd: 0, unknown: false };
+  const onCost = (usd: number | undefined): void => addCost(cost, usd);
 
   // No verify command and no reviewer: "done" here means nothing more than "the
   // executor exited 0". That is a legitimate setup, but it is silent, and a PRD
@@ -52,10 +59,10 @@ export async function runTask(
     log(progress, t("run.log.native", { id: task.id, cli: execu.cli, model: execu.model, advisorModel: advis.model }));
     emit({ taskId: task.id, subphase: "executing", attempt });
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
-    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal);
+    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
     const passed = ok && (await runVerify(task, workspace, progress)).passed;
-    return { ok: passed, reason: passed ? undefined : "failed" };
+    return { ok: passed, reason: passed ? undefined : "failed", cost };
   }
 
   // CROSS: planner up front, then a unified fix loop — tests + review feed the
@@ -76,6 +83,10 @@ export async function runTask(
         log(progress, t("run.log.planSkipped", { id: task.id, reason: route.reason }));
       } else {
         emit({ taskId: task.id, subphase: "advising" });
+        // The advisor bills too and NOTHING meters it: it runs without the event
+        // stream, because its stdout IS its answer. Marking the tally unknown is
+        // what keeps the reported total honest as a floor instead of a total.
+        addCost(cost, undefined);
         const newAdvice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
         if (newAdvice) {
           activeAdvice = newAdvice;
@@ -89,7 +100,7 @@ export async function runTask(
   }
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
-  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal);
+  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost);
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -111,6 +122,7 @@ export async function runTask(
     // attempt, and the reviewer that does not see the test output re-derives it
     // by guessing. run.ts still gates on testOk itself below — the reviewer gets
     // it as evidence, never as an approval (see verificationBlock in prompts.ts).
+    if (reviewOn && advis) addCost(cost, undefined); // unmetered, same as the planner above
     const { approved, changes, diff = "" } =
       reviewOn && advis
         ? await advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase, {
@@ -123,7 +135,7 @@ export async function runTask(
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
     if (ok && testOk && approved) {
       log(progress, t("run.log.pass", { id: task.id, n: rnd }));
-      return { ok: true };
+      return { ok: true, cost };
     }
     if (ok && testOk && !approved) {
       log(progress, t("run.log.reviewChanges", { id: task.id, n: rnd }));
@@ -148,7 +160,7 @@ export async function runTask(
     if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
     fixPrompt += "\n\n" + feedback;
     emit({ taskId: task.id, subphase: "fixing" });
-    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal);
+    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost);
   }
 
   log(progress, t("run.log.exhausted", { id: task.id }));
@@ -159,10 +171,11 @@ export async function runTask(
       reason: failureReason === "review_stalled" ? "review_stalled" : "review_exhausted",
       reviewChanges: lastReviewChanges,
       verificationPassed: lastVerificationPassed,
+      cost,
     };
   }
   const passed = ok && (await runVerify(task, workspace, progress)).passed;
-  return { ok: passed, reason: passed ? undefined : "failed" };
+  return { ok: passed, reason: passed ? undefined : "failed", cost };
 }
 
 function injectReviewRetryFeedback(prompt: string, feedback?: string): string {

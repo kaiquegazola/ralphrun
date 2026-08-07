@@ -2,7 +2,7 @@
 // `claude -p ... --output-format stream-json --verbose`, not invented.
 import { describe, expect, it } from "vitest";
 
-import { parseClaudeStream } from "./stream.js";
+import { addCost, formatCost, mergeCost, parseClaudeStream, type CostTally } from "./stream.js";
 
 const assistant = (content: unknown[]): string =>
   JSON.stringify({ type: "assistant", message: { model: "claude-haiku-4-5", role: "assistant", content } });
@@ -211,5 +211,70 @@ describe("parseClaudeStream result events", () => {
       prose: undefined,
       final: "",
     });
+  });
+});
+
+describe("cost capture", () => {
+  // the figure rides on the SAME event the final answer does — this is the
+  // whole gap: it used to be parsed and thrown away
+  it("reads total_cost_usd off the result event", () => {
+    const ev = parseClaudeStream(JSON.stringify({ type: "result", subtype: "success", result: "Done.", total_cost_usd: 0.4213 }));
+    expect(ev!.costUsd).toBe(0.4213);
+  });
+
+  // a turn that failed was still billed; dropping its cost would under-count
+  // exactly the runs that burned budget for nothing
+  it("reads the cost off a FAILED result too", () => {
+    const ev = parseClaudeStream(
+      JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, result: "gave up", total_cost_usd: 1.5 }),
+    );
+    expect(ev!.costUsd).toBe(1.5);
+  });
+
+  // a cost tally is the harness billing us, not the agent working: counted as
+  // activity it would clear a BLOCKED marker and mark a failed task done
+  it("never classifies cost as activity or prose", () => {
+    const ev = parseClaudeStream(JSON.stringify({ type: "result", subtype: "success", result: "", total_cost_usd: 2 }));
+    expect(ev!.activity).toBeUndefined();
+    expect(ev!.prose).toBeUndefined();
+  });
+
+  // a cli that reported nothing must leave the spend UNKNOWN — a 0 here would
+  // make a budget look satisfied when nothing was ever measured
+  it.each([
+    ["absent", {}],
+    ["not a number", { total_cost_usd: "0.42" }],
+    ["negative", { total_cost_usd: -1 }],
+    ["NaN", { total_cost_usd: Number.NaN }],
+  ])("leaves the cost undefined when it is %s", (_name, extra) => {
+    const ev = parseClaudeStream(JSON.stringify({ type: "result", subtype: "success", result: "x", ...extra }));
+    expect(ev!.costUsd).toBeUndefined();
+  });
+});
+
+describe("cost tallies", () => {
+  it("adds reported spend and flags the unreported", () => {
+    const tally: CostTally = { usd: 0, unknown: false };
+    addCost(tally, 0.25);
+    addCost(tally, 0.25);
+    expect(tally).toEqual({ usd: 0.5, unknown: false });
+    addCost(tally, undefined);
+    expect(tally).toEqual({ usd: 0.5, unknown: true });
+  });
+
+  // one unmetered call taints the whole total: the run report must not claim a
+  // precise number when part of the spend was never measured
+  it("keeps `unknown` sticky when tallies merge", () => {
+    const run: CostTally = { usd: 1, unknown: false };
+    mergeCost(run, { usd: 2, unknown: true });
+    mergeCost(run, { usd: 3, unknown: false });
+    expect(run).toEqual({ usd: 6, unknown: true });
+  });
+
+  it("renders a floor, not a total, when part of the spend is unmeasured", () => {
+    expect(formatCost({ usd: 1.5, unknown: false })).toBe("$1.5000");
+    expect(formatCost({ usd: 1.5, unknown: true })).toBe("≥$1.5000");
+    // nothing measured at all reads as unknown, NEVER as $0.0000
+    expect(formatCost({ usd: 0, unknown: true })).toBe("unknown");
   });
 });

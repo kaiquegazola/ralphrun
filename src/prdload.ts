@@ -70,7 +70,9 @@ function findDepCycle(edges: Map<string, string[]>): string[] | null {
     if (s === "open") return path.slice(path.indexOf(id)).concat(id);
     state.set(id, "open");
     path.push(id);
-    for (const d of edges.get(id) ?? []) {
+    // the caller filtered every dep down to a key of this same map, so a lookup
+    // here cannot miss — and a `?? []` fallback would silently hide it if it did
+    for (const d of edges.get(id)!) {
       const cycle = visit(d);
       if (cycle) return cycle;
     }

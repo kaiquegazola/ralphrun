@@ -257,6 +257,16 @@ describe("agent manifests: a cli registered from JSON, without forking", () => {
     ]);
   });
 
+  // args/autoApproveArgs are the fields a first manifest leaves out: the cli
+  // takes its prompt positionally and has no permission flag to give. Absent must
+  // mean "add nothing", not an argv with an undefined spread into it.
+  it("builds an argv from a manifest that declares only the required fields", () => {
+    const def = only({ "mycli.json": { label: "My CLI", bin: "mycli", models: ["fast"], modelFlag: "-m" } });
+    expect(def.buildCmd!({ bin: "mycli", prompt: "P", model: "fast", cwd: "/w", autoApprove: true })).toEqual([
+      "mycli", "P", "-m", "fast",
+    ]);
+  });
+
   it("emits reviewArgs only on the review call", () => {
     const def = only({ "mycli.json": { ...VALID, reviewArgs: ["--read-only"] } });
     const args = { bin: "mycli", prompt: "P", model: "", cwd: "/w", autoApprove: false };
@@ -289,6 +299,7 @@ describe("agent manifests: a cli registered from JSON, without forking", () => {
     ["a non-string model", { ...VALID, models: [1] }, '"models"'],
     ["no modelFlag", { ...VALID, modelFlag: undefined }, '"modelFlag"'],
     ["a defaultModel outside models", { ...VALID, defaultModel: "ghost" }, '"defaultModel"'],
+    ["a non-string defaultModel", { ...VALID, defaultModel: 3 }, '"defaultModel"'],
     ["args that are not strings", { ...VALID, args: [{}] }, '"args"'],
     ["an unknown promptVia", { ...VALID, promptVia: "pipe" }, '"promptVia"'],
     ["a non-boolean promptLast", { ...VALID, promptLast: "yes" }, '"promptLast"'],
@@ -327,6 +338,24 @@ describe("agent manifests: a cli registered from JSON, without forking", () => {
     const { agents, refusals } = withManifests({ "good.json": VALID, "bad.json": "{" });
     expect(Object.keys(agents)).toEqual(["good"]);
     expect(refusals).toHaveLength(1);
+  });
+
+  // A refusal that only lands in an exported array is a manifest that quietly
+  // does nothing, and the preflight then blames the user's PATH for a cli that
+  // was never registered. Re-imports the module so the load-time pass runs again.
+  it("names a refused manifest on stderr at import time", async () => {
+    vi.mocked(readdirSync).mockReturnValue(["bad.json"] as unknown as ReturnType<typeof readdirSync>);
+    vi.mocked(readFileSync).mockReturnValue("{ nope" as unknown as ReturnType<typeof readFileSync>);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      vi.resetModules();
+      const fresh = await import("./agents.js");
+      expect(fresh.manifestRefusals).toHaveLength(1);
+      expect(err).toHaveBeenCalledWith(expect.stringContaining("ignoring agent manifest"));
+    } finally {
+      err.mockRestore();
+      vi.resetModules();
+    }
   });
 });
 

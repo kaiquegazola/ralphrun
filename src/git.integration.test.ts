@@ -13,7 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { captureReviewBase, commitPaths, headCommit, taskChangedPaths } from "./git.js";
-import { createTaskWorktree, mergeBackTaskWork, reapOrphanWorktrees, removeTaskWorktree } from "./worktree.js";
+import {
+  createTaskWorktree,
+  mergeBackTaskWork,
+  reapOrphanWorktrees,
+  removeTaskWorktree,
+  worktreeLoss,
+} from "./worktree.js";
 
 let ws: string;
 
@@ -287,6 +293,82 @@ describe("per-task worktrees", () => {
     expect(existsSync(join(first, "wip.txt"))).toBe(true);
     expect(headCommit(first)).toBe(base);
     expect(headCommit(second)).toBe(base);
+  });
+
+  // Discarding a cell is the rollback the serial loop never had, but it must not
+  // be silent: a commit survives in the shared object database and is recoverable
+  // by sha, while whatever the executor left uncommitted does not survive at all.
+  it("says what discarding a worktree would throw away", () => {
+    const base = seed();
+    const wt = createTaskWorktree(ws, "T1", [])!;
+    expect(worktreeLoss(wt, base)).toEqual({ head: null, dirty: false });
+
+    writeFileSync(join(wt, "wip.txt"), "in flight\n");
+    expect(worktreeLoss(wt, base)).toEqual({ head: null, dirty: true });
+
+    commitIn(wt, "wip.txt", "in flight\n", "T1");
+    expect(worktreeLoss(wt, base)).toEqual({ head: runIn(wt, "rev-parse", "HEAD").trim(), dirty: false });
+  });
+
+  it("returns null when git refuses the add, rather than costing the task a retry", () => {
+    seed();
+    const wt = createTaskWorktree(ws, "T1", [])!;
+    // a LOCKED leftover survives `prune`, so the path stays registered and `add`
+    // refuses it — infrastructure trouble no retry of the task could ever fix
+    run("worktree", "lock", wt);
+    rmSync(wt, { recursive: true, force: true });
+
+    expect(createTaskWorktree(ws, "T1", [])).toBeNull();
+  });
+
+  it("returns null when the worktree path itself is unusable", () => {
+    seed();
+    // a file where the directory belongs makes the pre-emptive cleanup throw
+    // before git is ever reached; the loop still has to degrade, not crash
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "worktrees"), "not a directory\n");
+
+    expect(createTaskWorktree(ws, "T1", [])).toBeNull();
+  });
+
+  it("reaps nothing, and does not throw, outside a repository", () => {
+    // --workspace can point at any directory, and the reap runs unconditionally
+    // at boot — git's empty answer there must read as "no orphans"
+    const plain = mkdtempSync(join(tmpdir(), "ralphrun-norepo-"));
+    try {
+      expect(reapOrphanWorktrees(plain)).toBe(0);
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
+  });
+
+  it("writes its exclude line whether or not info/exclude already exists", () => {
+    seed();
+    const exclude = join(ws, ".git", "info", "exclude");
+    unlinkSync(exclude);
+    createTaskWorktree(ws, "T1", []);
+    expect(readFileSync(exclude, "utf8")).toBe(".ralphrun/\n");
+
+    // a file with no trailing newline: appending blind yields "*.log.ralphrun/",
+    // which excludes nothing and silently sweeps the cells into the baseline
+    writeFileSync(exclude, "*.log");
+    createTaskWorktree(ws, "T2", []);
+    expect(readFileSync(exclude, "utf8")).toBe("*.log\n.ralphrun/\n");
+  });
+
+  it("excludes the right directory when ralphrun itself runs inside a linked worktree", () => {
+    const base = seed();
+    const outer = join(mkdtempSync(join(tmpdir(), "ralphrun-linked-")), "checkout");
+    run("worktree", "add", "--detach", outer, base);
+    try {
+      // from a linked worktree git answers --git-common-dir with an ABSOLUTE
+      // path; resolving that against the workspace would aim the exclude line at
+      // a directory that does not exist, and the write would be lost
+      expect(createTaskWorktree(outer, "T1", [])).toBeTruthy();
+      expect(readFileSync(join(ws, ".git", "info", "exclude"), "utf8")).toContain(".ralphrun/");
+    } finally {
+      rmSync(outer, { recursive: true, force: true });
+    }
   });
 
   it("returns null rather than throwing when the repo has no commit to branch from", () => {

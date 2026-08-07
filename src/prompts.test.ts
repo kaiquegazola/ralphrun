@@ -195,6 +195,16 @@ describe("reviewPrompt", () => {
     expect(out).toContain("do not spend your verdict");
   });
 
+  // A gate that passes silently is the common case (`tsc --noEmit` prints
+  // nothing), and an empty "Output (tail):" heading reads as output that was
+  // lost rather than output that never existed.
+  it("leaves the output heading out when the command printed nothing", () => {
+    const t: Task = { ...task, verify: "tsc --noEmit" };
+    const out = reviewPrompt(t, prd, "STD", "the diff", { passed: true, output: "  \n" });
+    expect(out).toContain("Result: PASSED");
+    expect(out).not.toContain("Output (tail)");
+  });
+
   // THE point of the section. run.ts gates on the same flag independently, so a
   // reviewer handed a green run and no instruction reads it as a verdict and
   // rubber-stamps — which quietly turns two gates back into one.

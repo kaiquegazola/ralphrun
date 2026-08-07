@@ -763,6 +763,30 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked" });
   });
 
+  // The status write re-reads prd.json because the review gate awaits, and an
+  // await is long enough for the file to change underneath it. A task that is no
+  // longer there gets no status written, rather than being resurrected into a
+  // backlog somebody deliberately edited.
+  it("writes no status for a task that left prd.json while the gate was open", async () => {
+    fastTimers();
+    setTTY(true);
+    const handle = makeHandle();
+    handle.waitReviewBlocked = vi.fn(async () => {
+      mRead.mockReturnValue(prdWith([{ ...TASK, id: "T9" }]));
+      return "block";
+    }) as unknown as Handle["waitReviewBlocked"];
+    mMount.mockReturnValue(handle);
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+
+    await runLoop({ prd: "prd.json" });
+
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    const wroteT1Blocked = writes.some((w) =>
+      (JSON.parse(w).tasks as { id: string; status: string }[]).some((x) => x.id === "T1" && x.status === "blocked"),
+    );
+    expect(wroteT1Blocked).toBe(false);
+  });
+
   it("TTY review retry passes reviewer feedback into the next runTask call", async () => {
     fastTimers();
     setTTY(true);
@@ -909,6 +933,43 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mCommitPaths).not.toHaveBeenCalled();
   });
 
+  // The conflicting sha is what makes the loser's work recoverable by hand, but
+  // it comes off a merge git may have refused before writing anything — the log
+  // line still has to render rather than print "undefined".
+  it("still reports a merge failure that came back without a sha", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mHeadCommit.mockReturnValue("base-sha");
+    mMergeBack.mockReturnValue({ status: "conflict", head: null });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("recoverable at"));
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("undefined"));
+  });
+
+  // The gate approved the change; the workspace never received it. Recording that
+  // as done writes a task into prd.json whose work exists only in a directory the
+  // finally block is about to delete.
+  it("blocks an approved task whose work could not be landed", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, review_blocked_policy: "accept" }));
+    mHeadCommit.mockReturnValue("base-sha");
+    mMergeBack.mockReturnValue({ status: "conflict", head: "loser-sha" });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
+
+    await runLoop({ prd: "prd.json" });
+
+    const saved = JSON.parse(mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.startsWith("{")).at(-1)!);
+    expect(saved.tasks[0].status).toBe("blocked");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("conflicted with work that landed first"));
+
+    // and a single-task run ends there: there is no next task to move on to
+    mRunTask.mockClear();
+    await runLoop({ prd: "prd.json", task: "T1" });
+    expect(mRunTask).toHaveBeenCalledTimes(1);
+  });
+
   it("names the sha when it discards a worktree that still holds committed work", async () => {
     fastTimers();
     mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
@@ -921,6 +982,30 @@ describe("runLoop real run (non-TTY fallback)", () => {
     // executor's work SILENTLY is worse than leaving it lying around
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("abandonedsha"));
     expect(mRemoveWorktree).toHaveBeenCalled();
+  });
+
+  // no commit at all: there is no sha to name and nothing survives the removal,
+  // which is the WORSE of the two losses and so the one that must not be silent
+  it("says the executor left uncommitted work when the discarded cell has no commit", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+    mRunTask.mockResolvedValue({ ok: false, reason: "failed", cost: NO_COST });
+    mWorktreeLoss.mockReturnValue({ head: null, dirty: true });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("uncommitted"));
+  });
+
+  // the CLI flag has to reach the resolved config, or `--on-review-blocked` is a
+  // documented option that silently does nothing
+  it("routes --on-review-blocked into the config as an override", async () => {
+    await runLoop({ prd: "prd.json", onReviewBlocked: "accept" });
+    expect(mLoadConfig).toHaveBeenCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ review_blocked_policy: "accept" }),
+    );
   });
 
   it("--task found → runs then returns (no commit when commit_per_task false)", async () => {
@@ -1440,6 +1525,53 @@ describe("runLoop parallel waves", () => {
     expect(mRunTask.mock.calls.map((c) => c[3])).toEqual(["/ws/.ralphrun/worktrees/A"]);
   });
 
+  // pickWave takes tasks in order and stops at the first unscoped one: an
+  // unscoped task has nothing proving it cannot collide with the tasks already in
+  // the wave, and it must not be dropped from the run either — it goes next.
+  it("cuts the wave short at the first task with no declared scope", async () => {
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("U")]);
+    dispatchOnce();
+    const conc = trackConcurrency();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(conc.peak()).toBe(1);
+    expect(read().A.status).toBe("done");
+    expect(read().U.status).toBe("todo");
+  });
+
+  // A wave collects settled results instead of awaiting each in turn, so a task
+  // that asked the RUN to stop has to be noticed after the fact — the whole
+  // point of "the workspace is the problem, every remaining task blocks too".
+  it("stops the run when any task in the wave asked it to", async () => {
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    mReadyTasks.mockImplementation(((p: { tasks: { status: string }[] }) =>
+      p.tasks.filter((x) => x.status === "todo")) as never);
+    mMergeBack.mockReturnValue({ status: "dirty", head: "stranded-sha" });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().A.status).toBe("blocked");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("workspace's, not the task's"));
+  });
+
+  // allSettled, not Promise.all: bailing on the first rejection would leave the
+  // siblings' rejections unhandled and their worktrees on disk. An agent crash is
+  // already caught per task, so what reaches here is a bug in the loop itself —
+  // it must surface, but only once every cell has been handed back to git.
+  it("cleans up every cell before rethrowing a crash from one of them", async () => {
+    livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+    mCreateWorktree.mockImplementation((_ws, id) => `/ws/.ralphrun/worktrees/${id}`);
+    mMergeBack.mockImplementation((_ws, dir) => {
+      if (String(dir).endsWith("A")) throw new Error("kaboom");
+      return { status: "ok", head: "wt-head" };
+    });
+
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("kaboom");
+    expect(mRemoveWorktree).toHaveBeenCalledTimes(2);
+  });
+
   it("warns about paths outside a task's declared scope without failing it", async () => {
     // scope is the planner's GUESS; the cherry-pick enforces the fact. Failing
     // on the guess would block nearly every task in this very repo.
@@ -1452,6 +1584,38 @@ describe("runLoop parallel waves", () => {
 
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("src/i18n.ts"));
+    expect(read().A.status).toBe("done");
+  });
+
+  // progress.md is all an unattended run leaves behind, so the warning names the
+  // count and a sample — a task that rewrote forty files must not paste forty
+  // paths into the log and bury every other line of the run.
+  it("truncates the escaped-path sample instead of pasting the whole list", async () => {
+    mLoadConfig.mockReturnValue(cfg());
+    livePrd([wtTask("A", ["src/api/**"])]);
+    dispatchOnce();
+    mTaskChangedPaths.mockReturnValue(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"]);
+
+    await runLoop({ prd: "prd.json" });
+
+    const line = mLog.mock.calls.map((c) => String(c[1])).find((s) => s.includes("outside its declared scope"))!;
+    expect(line).toContain("5 path(s)");
+    expect(line).toContain("a.ts, b.ts, c.ts, …");
+    expect(line).not.toContain("e.ts");
+  });
+
+  // taskChangedPaths answers null when there is no baseline to diff against (a
+  // workspace with no commit yet). "unknown" is not "escaped": warning there
+  // would fire on every task of a brand-new repository.
+  it("says nothing about scope when the changed paths are unknown", async () => {
+    mLoadConfig.mockReturnValue(cfg());
+    const read = livePrd([wtTask("A", ["src/api/**"])]);
+    dispatchOnce();
+    mTaskChangedPaths.mockReturnValue(null);
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
     expect(read().A.status).toBe("done");
   });
 });

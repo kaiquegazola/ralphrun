@@ -108,6 +108,15 @@ describe("routeAdvisorPlan", () => {
     expect(routeAdvisorPlan(tiny).reason).toBe("score 2 < 3 (acceptance:1 deps:0 scope:0 words:1)");
   });
 
+  // prd.json is normalized on load, but routeAdvisorPlan is also called on tasks
+  // straight off a hand-written backlog — an absent field must score 0, not crash
+  // the router on a `.length` of undefined before the task ever runs.
+  it("scores a task whose optional fields are absent at all", () => {
+    const bare = { id: "T1", title: "t", status: "todo", retries: 0, verify: "npm test" } as unknown as Task;
+    expect(routeAdvisorPlan(bare)).toMatchObject({ plan: false });
+    expect(routeAdvisorPlan(bare).reason).toBe("score 0 < 3 (acceptance:0 deps:0 scope:0 words:0)");
+  });
+
   it("is pure — it never touches the task", () => {
     const before = structuredClone(tiny);
     routeAdvisorPlan(tiny);

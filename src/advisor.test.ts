@@ -307,6 +307,26 @@ describe("advisorReview", () => {
     }
   });
 
+  // review_timeout is optional on Config — a config object assembled anywhere
+  // but load_config (which fills it from DEFAULTS) simply has no value for it.
+  // `undefined` seconds is a timer that never fires, so the executing reviewer
+  // would hang until the process died instead of until its budget ran out.
+  it("falls back to advisor_timeout when no review_timeout was resolved", async () => {
+    vi.useFakeTimers();
+    try {
+      diffMock.mockReturnValue("some diff");
+      const execCfg = { ...cfg, review_runs_commands: true, review_timeout: undefined } as unknown as Config;
+      const p = advisorReview(task, prd, advis, execCfg, "ws", "prog", "std");
+      vi.advanceTimersByTime(300_000);
+      expect(killTreeMock).toHaveBeenCalledWith(mockChild);
+      finishSpawn(1);
+      await p;
+      expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("300"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // The grant comes from the cli, not from us: telling a cli with no execution
   // flags that it may run things produces a reviewer that only fails at it.
   it("stays read-only when the cli has no execution grant, config or not", async () => {

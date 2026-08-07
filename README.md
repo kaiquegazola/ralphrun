@@ -18,7 +18,9 @@ UI in English and Português (pt-BR).
 | **NATIVE** | executor **and** advisor are both `claude` | one `claude -p ... --advisor <model>`; the advisor tool runs server-side, Claude decides when to consult mid-task and reviews before declaring done. |
 | **CROSS** | different CLIs (e.g. `grok`/`cursor` executor + `claude` advisor) | **planner before** → executor → **review-after** loop (`APPROVE` / `CHANGES`, re-run with fixes), up to `max_review_rounds`. |
 
-Both CLIs auth by their own subscription login — **no API keys**.
+Every CLI authenticates with its own subscription login — **no API keys**. The
+one exception is the optional in-process `cursorsdk` backend, which takes a
+`CURSOR_API_KEY` and nothing else (see [below](#cursorsdk--cursor-in-process-optional)).
 
 ## Install
 
@@ -598,9 +600,11 @@ and add build or integration tests when the task changes integration surface.
 
 `scope` is optional: the paths or globs the task is allowed to edit. Two tasks
 with no dependency path between them may not declare overlapping scope — see
-below. Nothing enforces it at run time yet; it is also declared so the reviewer
-gets a checkable contract (paths changed outside `scope`) instead of a
-judgement call.
+below. At run time it is **a warning, never a gate**: a task that edits outside
+its declared scope says so in `progress.md` and still passes, because `scope` is
+the planner's guess while the cherry-pick is what actually refuses a collision.
+It is also declared so the reviewer gets a checkable contract (paths changed
+outside `scope`) instead of a judgement call.
 
 `deps` is the other half of the plan's quality. Declare an edge only when a task
 **consumes** something the earlier one produces — "comes later in the narrative"

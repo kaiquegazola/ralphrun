@@ -158,7 +158,11 @@ function worktreePath(workspace: string, taskId: string): string {
  * trunk's own baseline and commits.
  */
 function excludeRalphrunDir(workspace: string): void {
-  const common = gitOut(workspace, "rev-parse", "--git-common-dir") ?? ".git";
+  // createTaskWorktree already read a commit out of this repository before
+  // calling, so rev-parse cannot come back empty — and if it somehow did, the
+  // throw lands in that same caller's catch and the task degrades to the main
+  // workspace, which is exactly what a silent ".git" guess would have hidden.
+  const common = gitOut(workspace, "rev-parse", "--git-common-dir")!;
   const info = join(isAbsolute(common) ? common : resolve(workspace, common), "info");
   const file = join(info, "exclude");
   const cur = existsSync(file) ? readFileSync(file, "utf8") : "";

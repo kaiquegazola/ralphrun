@@ -139,6 +139,19 @@ describe("overlappingScopePairs", () => {
     expect(overlappingScopePairs([st("A", [], ["src/*.ts"]), st("B", [], ["src/db.ts"])])).toHaveLength(1);
   });
 
+  // validatePrd filters deps down to declared ids before calling this, but the
+  // function is exported and takes whatever list it is given: a dangling id has
+  // to order nothing rather than throw halfway through the compile.
+  it("ignores a dep naming a task outside the list it was given", () => {
+    expect(overlappingScopePairs([st("A", ["ghost"], ["x.ts"]), st("B", [], ["x.ts"])])).toHaveLength(1);
+  });
+
+  it("matches a single-character wildcard, and reads a dot as a literal dot", () => {
+    expect(overlappingScopePairs([st("A", [], ["src/v?/api.ts"]), st("B", [], ["src/v2/api.ts"])])).toHaveLength(1);
+    // a scope is a glob, not a regex — the "." must not stand in for the "x"
+    expect(overlappingScopePairs([st("A", [], ["src/a.ts"]), st("B", [], ["src/axts"])])).toEqual([]);
+  });
+
   it("treats a trailing slash and a ./ prefix as the same directory", () => {
     expect(overlappingScopePairs([st("A", [], ["src/"]), st("B", [], ["./src/db.ts"])])).toHaveLength(1);
   });

@@ -477,6 +477,24 @@ describe("streaming mode", () => {
     expect(await p2).toBe(false);
   });
 
+  // A cli is free to report a figure per TURN. Assigning instead of summing would
+  // let the last turn silently replace everything the task spent before it, and
+  // the budget would then stop a run that was already well past its ceiling.
+  it("sums every reported cost and hands the total over exactly once", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: (number | undefined)[] = [];
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task, [], undefined, (usd) =>
+      seen.push(usd),
+    );
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "part one", total_cost_usd: 0.25 }));
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "part two", total_cost_usd: 0.5 }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    expect(seen).toEqual([0.75]);
+  });
+
   it("keeps the run alive on an oversized line instead of parsing megabytes", async () => {
     const proc = makeProc();
     spawnMock.mockReturnValue(proc);

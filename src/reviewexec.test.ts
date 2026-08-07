@@ -40,6 +40,13 @@ describe("reviewExecDecision — what a reviewer needs", () => {
   it("allows a reproduction script with no arguments at all", () => {
     expect(allows("node")).toBe(true);
   });
+
+  // `npm run` on its own prints the script list, which is how a reviewer finds
+  // out what this project's gates are even called. The release-script heuristic
+  // reads the word after `run`, and there isn't one.
+  it("allows a bare `npm run`, which only lists the scripts", () => {
+    expect(allows("npm", "run")).toBe(true);
+  });
 });
 
 describe("reviewExecDecision — external mutation", () => {

@@ -204,6 +204,24 @@ describe("runCursorSdkExecutor — happy path", () => {
     expect(agent.close).toHaveBeenCalled();
   });
 
+  // the SDK reports usage per turn, so a task that took three turns arrives as
+  // three figures — keeping only the last would under-report every long task,
+  // which is exactly the shape max_cost_usd exists to stop
+  it("sums the per-turn usage tallies and reports the total once", async () => {
+    const run = makeRun([
+      { type: "usage", totalCostUsd: 0.25 },
+      { type: "assistant", message: { content: [{ type: "text", text: "done" }] } },
+      { type: "usage", totalCostUsd: 0.5 },
+    ] as CursorMessage[]);
+    const create = makeCreate(makeAgent(run));
+    const seen: (number | undefined)[] = [];
+    const ok = await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, undefined, { create }, (usd) =>
+      seen.push(usd),
+    );
+    expect(ok).toBe(true);
+    expect(seen).toEqual([0.75]);
+  });
+
   it("emits blank lines to the pane but does not log them", async () => {
     const run = makeRun([{ type: "assistant", message: { content: [{ type: "text", text: "a\n\nb" }] } }]);
     const create = makeCreate(makeAgent(run));

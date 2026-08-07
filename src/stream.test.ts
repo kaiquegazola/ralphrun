@@ -2,7 +2,7 @@
 // `claude -p ... --output-format stream-json --verbose`, not invented.
 import { describe, expect, it } from "vitest";
 
-import { addCost, formatCost, mergeCost, parseClaudeStream, type CostTally } from "./stream.js";
+import { addCost, formatCost, mergeCost, parseClaudeStream, reportedCostUsd, type CostTally } from "./stream.js";
 
 const assistant = (content: unknown[]): string =>
   JSON.stringify({ type: "assistant", message: { model: "claude-haiku-4-5", role: "assistant", content } });
@@ -249,6 +249,14 @@ describe("cost capture", () => {
   ])("leaves the cost undefined when it is %s", (_name, extra) => {
     const ev = parseClaudeStream(JSON.stringify({ type: "result", subtype: "success", result: "x", ...extra }));
     expect(ev!.costUsd).toBeUndefined();
+  });
+
+  // the Cursor SDK hands its message objects straight to this, unparsed and
+  // untyped — a null or a bare string must read as "nothing reported" instead of
+  // throwing on a property access inside the executor's event handler
+  it("treats a non-object event as unreported", () => {
+    expect(reportedCostUsd(null)).toBeUndefined();
+    expect(reportedCostUsd("total_cost_usd")).toBeUndefined();
   });
 });
 

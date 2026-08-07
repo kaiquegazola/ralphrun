@@ -166,6 +166,18 @@ describe("runTask CROSS", () => {
     expect(mExec).toHaveBeenCalledTimes(2);
   });
 
+  // One tally for the whole attempt, fix rounds included: a per-round figure
+  // would hide what a stubborn task really cost, which is the number the budget
+  // ceiling is spending.
+  it("adds up what every executor round reported", async () => {
+    mExec.mockImplementation(async (...args) => {
+      (args[8] as (usd: number | undefined) => void)(0.5);
+      return true;
+    });
+    const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
+    expect(result.cost).toEqual({ usd: 0.5, unknown: false });
+  });
+
   it("injects reviewer feedback into a human-requested retry prompt", async () => {
     const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
     expect(result.ok).toBe(true);

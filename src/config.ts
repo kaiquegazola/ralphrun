@@ -12,6 +12,13 @@ export interface AgentSpec {
   model: string;
 }
 
+/**
+ * What a headless run does with a task the reviewer refused. "block" is what
+ * ralphrun has always done; "accept" is the policy form of the TUI's approve
+ * key. See review_blocked_policy.
+ */
+export type ReviewBlockedPolicy = "block" | "accept";
+
 export interface Config {
   executor: AgentSpec;
   advisor: AgentSpec | null;
@@ -41,6 +48,15 @@ export interface Config {
    * unmetered agent can bill. See README.
    */
   max_cost_usd?: number;
+  /**
+   * The approval gate for a review-blocked task, for runs with no TUI to ask.
+   * A headless run cannot wait on a human, so the gate is a policy rather than a
+   * prompt. "accept" is bounded by the SAME safety property as the TUI's approve
+   * key — verification must have passed — so no policy can ever accept a task
+   * whose tests failed. Default "block" = today's behaviour, so no existing
+   * setup silently starts auto-accepting.
+   */
+  review_blocked_policy?: ReviewBlockedPolicy;
   extra_executor_args: string[];
 }
 
@@ -60,6 +76,7 @@ export const DEFAULTS: Config = {
   commit_message_template: "{id}: {title}",
   stop_on_blocked: false,
   max_cost_usd: 0,
+  review_blocked_policy: "block",
   extra_executor_args: [],
 };
 
@@ -78,11 +95,9 @@ export function parseAgent(spec: string | undefined): AgentSpec | null {
   return { cli, model };
 }
 
-type Overrides = Partial<{
-  executor: AgentSpec;
-  advisor: AgentSpec | null;
-  review_after: boolean;
-}>;
+// Pick, not a hand-written shape: mergeDefined infers its T from here, so a key
+// that is optional in Config has to stay optional here or Config stops matching.
+type Overrides = Partial<Pick<Config, "executor" | "advisor" | "review_after" | "review_blocked_policy">>;
 
 // merge only DEFINED keys — undefined must never clobber a lower layer
 function mergeDefined<T extends object>(dst: T, src: Partial<T>): void {

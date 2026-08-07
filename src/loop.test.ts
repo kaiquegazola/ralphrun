@@ -670,6 +670,63 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(handle.waitReviewBlocked).toHaveBeenCalledWith(expect.any(String), false);
   });
 
+  // The gap this closes: the approval decision used to live inside the `if (tui)`
+  // branch, so a headless run had no gate at all — the task went blocked and the
+  // run moved on with nothing in the log saying a decision was even made.
+  it("headless review block logs the policy that refused it", async () => {
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    await runLoop({ prd: "prd.json" });
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked" });
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("review_blocked_policy=block"));
+  });
+
+  it("headless accept policy marks a verified review-blocked task done and commits it", async () => {
+    fastTimers();
+    mLoadConfig.mockReturnValue(cfg({ review_blocked_policy: "accept" }));
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
+
+    await runLoop({ prd: "prd.json" });
+
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "done", retries: 0 });
+    // a policy-accepted change commits through the same scoped path as a clean pass
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], expect.stringContaining("T1"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("headless gate accepted"));
+  });
+
+  // The safety property: a policy is allowed to override a REVIEWER, never the
+  // objective verify gate. If this ever passes with status done, an unattended
+  // run can ship code whose tests failed.
+  it("headless accept policy still blocks a task whose verification failed", async () => {
+    mLoadConfig.mockReturnValue(cfg({ review_blocked_policy: "accept" }));
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: false });
+
+    await runLoop({ prd: "prd.json" });
+
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked", retries: 0 });
+    expect(mCommitPaths).not.toHaveBeenCalled();
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("verify did not pass"));
+  });
+
+  // The TUI owns the decision when there is one, so the policy must not reach in
+  // and pre-empt the human it exists to stand in for.
+  it("accept policy is ignored on a TTY — the dashboard still asks", async () => {
+    fastTimers();
+    setTTY(true);
+    const handle = makeHandle({ reviewAction: "block" });
+    mMount.mockReturnValue(handle);
+    mLoadConfig.mockReturnValue(cfg({ review_blocked_policy: "accept" }));
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(handle.waitReviewBlocked).toHaveBeenCalledWith(expect.any(String), true);
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked" });
+  });
+
   it("TTY review retry passes reviewer feedback into the next runTask call", async () => {
     fastTimers();
     setTTY(true);

@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 
 import { resolveLocale, setLocale, t } from "./i18n.js";
 import { runLoop } from "./loop.js";
@@ -60,6 +60,9 @@ program
   .option("--task <id>", t("cli.opt.task"))
   .option("--lang <en|pt-br>", t("cli.opt.lang"))
   .option("-y, --yes", t("cli.opt.yes"))
+  // .choices() so a typo fails loudly here instead of silently resolving to the
+  // safe default — the flag exists for CI, where nobody reads the log for it.
+  .addOption(new Option("--on-review-blocked <block|accept>", t("cli.opt.onReviewBlocked")).choices(["block", "accept"]))
   .action(async (opts) => {
     setLocale(resolveLocale(opts.lang)); // idempotent after the import-time peek; never saved
     console.clear();
@@ -89,6 +92,7 @@ program
       dryRun: opts.dryRun,
       task: opts.task,
       skipConfirm: opts.yes,
+      onReviewBlocked: opts.onReviewBlocked,
     });
   });
 

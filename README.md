@@ -82,6 +82,9 @@ ralphrun --prd ./prd.json --workspace ~/proj/src --task T2-data-model
 
 # disable the review-after loop (on by default in CROSS mode)
 ralphrun --prd ./prd.json --no-review-after
+
+# headless: accept a review-blocked task whose tests passed instead of blocking it
+ralphrun --prd ./prd.json --on-review-blocked accept
 ```
 
 Long runs (survive closing the terminal):
@@ -110,6 +113,7 @@ tail -f ralph.out
   "commit_per_task": true,
   "stop_on_blocked": false,
   "max_cost_usd": 0,
+  "review_blocked_policy": "block",
   "extra_executor_args": []
 }
 ```
@@ -146,6 +150,23 @@ tail -f ralph.out
   therefore bounds only the spend ralphrun can *see* — with an unmetered executor
   it never fires at all. It is a backstop against a runaway loop, not a billing
   limit; your provider's own spend cap is the only real one.
+
+- `review_blocked_policy` is the approval gate for a task the reviewer refused,
+  on runs with no dashboard to ask. On a TTY you get the prompt you always got —
+  retry, approve, quit. Headless there used to be no gate at all: the task simply
+  went blocked and the run moved on, because the decision lived in the UI layer
+  and therefore did not exist without a UI. A headless run cannot wait on a human,
+  so its gate is a *policy*: `"block"` (the default, and exactly today's behaviour)
+  or `"accept"`, which marks the task done and commits it. `--on-review-blocked
+  block|accept` sets it per run.
+
+- **`"accept"` cannot accept a task whose tests failed.** It is bounded by the
+  same rule as the dashboard's approve key: the override is only ever offered
+  when verification passed, so `"accept"` overrides a *reviewer's* judgement and
+  never an objective gate. A task that fails `verify` blocks under every policy.
+  Every headless decision — accepted, or refused and why — is written to
+  `progress.md`, since that log is the only audit trail a run nobody watched
+  leaves behind.
 
 There is deliberately **no** idle timeout. A silence-based kill sounds obvious
 but measurement says otherwise: a buffered CLI is silent for the entire task, and

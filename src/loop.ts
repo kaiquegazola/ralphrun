@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { supportsNativeAdvisor } from "./agents.js";
 import { anyTaskUsesBrowser, BROWSER_INSTALL_HINT, BROWSER_TOOL, BROWSER_UPDATE_HINT, browserStatus } from "./browser.js";
-import { loadConfig, parseAgent, type AgentSpec, type Config } from "./config.js";
+import { loadConfig, parseAgent, type AgentSpec, type Config, type ReviewBlockedPolicy } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
 import { createElapsedTracker } from "./elapsed.js";
 import { t } from "./i18n.js";
@@ -31,6 +31,7 @@ export interface RunOptions {
   task?: string;
   noReviewAfter?: boolean;
   skipConfirm?: boolean;
+  onReviewBlocked?: ReviewBlockedPolicy;
 }
 
 function savePRD(path: string, prd: PRD): void {
@@ -48,13 +49,19 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   const progress = resolve(dirname(prdPath), "progress.md");
   if (!existsSync(progress)) writeFileSync(progress, "");
 
-  const overrides: { executor?: AgentSpec; advisor?: AgentSpec | null; review_after?: boolean } = {};
+  const overrides: {
+    executor?: AgentSpec;
+    advisor?: AgentSpec | null;
+    review_after?: boolean;
+    review_blocked_policy?: ReviewBlockedPolicy;
+  } = {};
   if (opts.executor) {
     const ex = parseAgent(opts.executor);
     if (ex) overrides.executor = ex;
   }
   if (opts.advisor !== undefined) overrides.advisor = parseAgent(opts.advisor);
   if (opts.noReviewAfter) overrides.review_after = false;
+  if (opts.onReviewBlocked) overrides.review_blocked_policy = opts.onReviewBlocked;
   let cfg: Config;
   try {
     cfg = loadConfig(prdPath, opts.config, overrides);
@@ -476,40 +483,43 @@ export async function runLoop(opts: RunOptions): Promise<void> {
         log(progress, t("loop.log.planInvalidated", { id: task.id }));
       }
       const allowReviewOverride = result.verificationPassed === true;
-      if (tui) {
-        const action = await tui.waitReviewBlocked(displayReason, allowReviewOverride);
-        if (action === "quit") {
+      const action = await reviewBlockedGate(tui, cfg, progress, task.id, displayReason, allowReviewOverride);
+      if (action === "quit") {
+        done();
+        log(progress, t("loop.log.quit"));
+        return;
+      }
+      if (action === "retry") {
+        freshTask.status = "todo";
+        const feedback = result.reviewChanges?.trim() || reason;
+        pendingReviewFeedback.set(task.id, feedback);
+        log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
+        emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
+        savePRD(prdPath, fresh);
+        await sleep(1000);
+        continue;
+      }
+      if (action === "approve" && allowReviewOverride) {
+        freshTask.status = "done";
+        accepted += 1; // accepted change, whoever accepted it: same denominator as an auto-pass
+        log(
+          progress,
+          tui
+            ? t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason })
+            : t("loop.log.headlessAccepted", { id: task.id, s: elapsed, reason: displayReason }),
+        );
+        emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
+        savePRD(prdPath, fresh);
+        if (cfg.commit_per_task) {
+          logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
+        }
+        taskBaselines.delete(task.id);
+        if (opts.task) {
           done();
-          log(progress, t("loop.log.quit"));
           return;
         }
-        if (action === "retry") {
-          freshTask.status = "todo";
-          const feedback = result.reviewChanges?.trim() || reason;
-          pendingReviewFeedback.set(task.id, feedback);
-          log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
-          emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
-          savePRD(prdPath, fresh);
-          await sleep(1000);
-          continue;
-        }
-        if (action === "approve" && allowReviewOverride) {
-          freshTask.status = "done";
-          accepted += 1; // a human accepted the change: same denominator as an auto-pass
-          log(progress, t("loop.log.reviewAccepted", { id: task.id, s: elapsed, reason: displayReason }));
-          emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
-          savePRD(prdPath, fresh);
-          if (cfg.commit_per_task) {
-            logTaskCommit(workspace, progress, task.id, task.title, cfg, taskBaselines.get(task.id));
-          }
-          taskBaselines.delete(task.id);
-          if (opts.task) {
-            done();
-            return;
-          }
-          await sleep(1000);
-          continue;
-        }
+        await sleep(1000);
+        continue;
       }
       taskBaselines.delete(task.id);
       freshTask.status = "blocked";
@@ -545,6 +555,42 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     }
     await sleep(1000);
   }
+}
+
+/**
+ * The one decision point for a task the reviewer refused. It used to live inside
+ * `if (tui)`, which meant the gate existed only in the UI layer: a headless run
+ * had no gate at all and the task just went blocked. Both callers of the same
+ * decision now route through here.
+ *
+ * Headless cannot prompt — nobody is watching, and a run that waits forever for
+ * an answer is worse than one that decides — so its gate is a POLICY. It obeys
+ * the same safety property as the TUI's approve key: `verified` is the only door
+ * to "approve", so no policy can accept a task whose tests failed.
+ *
+ * Every headless refusal is logged with WHY, because progress.md is the only
+ * audit trail a run nobody watched leaves behind. An acceptance is logged by the
+ * caller, which is where the elapsed time and the commit are.
+ */
+async function reviewBlockedGate(
+  tui: TuiHandle | null,
+  cfg: Config,
+  progress: string,
+  id: string,
+  displayReason: string,
+  verified: boolean,
+): Promise<"retry" | "approve" | "block" | "quit"> {
+  if (tui) return tui.waitReviewBlocked(displayReason, verified);
+  const wantsAccept = cfg.review_blocked_policy === "accept";
+  if (wantsAccept && verified) return "approve";
+  log(
+    progress,
+    t("loop.log.headlessBlocked", {
+      id,
+      why: wantsAccept ? t("loop.reason.policyNeedsVerify") : t("loop.reason.policyBlock"),
+    }),
+  );
+  return "block";
 }
 
 function sleep(ms: number): Promise<void> {

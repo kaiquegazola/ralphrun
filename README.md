@@ -218,13 +218,24 @@ tail -f ralph.out
 
 - **`worktree_link` is not optional if your project needs it.** A fresh worktree
   contains **tracked files only** — no `node_modules`, no `.venv`, no `target/`.
-  Every listed name is symlinked in from the workspace, and the default
+  Every listed name is seeded into each cell, and the default
   (`["node_modules"]`) is Node-shaped: a Python, Rust, Go or Java project must
   set its own before enabling worktrees, or every task fails its gate for a
-  reason it cannot fix. The linked directory is **shared**, so a `verify` that
-  runs `npm install` mutates it for everyone — and with `max_parallel_tasks > 1`
-  two of those at once corrupt the real tree in your workspace, which discarding
-  a worktree cannot undo. Keep installs out of `verify` when running waves.
+  reason it cannot fix.
+
+  Seeding is a **copy-on-write clone** (APFS `cp -c`, or `--reflink` on
+  btrfs/xfs/ext4): the whole tree in milliseconds, costing disk only for what
+  changes, and **isolated** — an install inside a cell cannot reach your real
+  dependencies. Note this is not a git property. A worktree is isolated because
+  it holds no ignored files at all; the clone is what makes it *usable* without
+  giving that isolation back.
+
+  On a filesystem that cannot clone, seeding falls back to a **symlink at the
+  real directory**, which is shared. That is fine serially — it is what you would
+  have run by hand — but with `max_parallel_tasks > 1` two installs at once
+  corrupt the tree, and discarding a worktree cannot undo it. ralphrun probes the
+  filesystem at startup and **refuses the run** when all three hold at once
+  (shared tree, parallel tasks, and a `verify` that installs), naming the tasks.
 
 - **What happens when the pick fails.** If the work conflicts with something
   that landed first, the task goes back into the normal retry ladder and the

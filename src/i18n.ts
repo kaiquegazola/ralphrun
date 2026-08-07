@@ -47,6 +47,8 @@ const en = {
     "worktree_per_task requires commit_per_task: the commit is how a task's work leaves its worktree.",
   "loop.err.parallelNeedsWorktree":
     "max_parallel_tasks > 1 requires worktree_per_task: two executors in one checkout overwrite each other.",
+  "loop.err.sharedInstall":
+    "This filesystem cannot copy-on-write clone, so worktree_link ({links}) is shared between parallel tasks by symlink — and these tasks install into it: {ids}. Two installs at once corrupt your real dependency tree, which discarding a worktree cannot undo. Set max_parallel_tasks to 1, drop the installing command from those verify gates, or empty worktree_link and let each task install its own.",
 
   // loop.ts — --dry-run report
   "loop.dry.next": "next: {id} — {title}",
@@ -377,6 +379,8 @@ const ptBr: Record<MsgKey, string> = {
     "worktree_per_task exige commit_per_task: o commit é como o trabalho de uma task sai da worktree dela.",
   "loop.err.parallelNeedsWorktree":
     "max_parallel_tasks > 1 exige worktree_per_task: dois executores no mesmo checkout se sobrescrevem.",
+  "loop.err.sharedInstall":
+    "Este filesystem não faz clone copy-on-write, então worktree_link ({links}) fica compartilhado entre tasks paralelas por symlink — e estas tasks instalam nele: {ids}. Dois installs ao mesmo tempo corrompem a sua árvore de dependências real, e descartar uma worktree não desfaz isso. Ponha max_parallel_tasks em 1, tire o comando de install desses verify, ou esvazie worktree_link e deixe cada task instalar a sua.",
 
   "loop.dry.next": "próxima: {id} — {title}",
   "loop.dry.mode": "modo: {mode} | executor {executor} | advisor {advisor}",

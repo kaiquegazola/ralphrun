@@ -9,6 +9,7 @@
 // asked about even with disjoint scopes. Do not "optimize" the worktree away
 // for tasks whose scopes do not overlap; the scopes are not what it is for.
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
@@ -17,6 +18,69 @@ import { git, gitOut, headCommit } from "./git.js";
 const WORKTREES = join(".ralphrun", "worktrees");
 
 export type MergeBackStatus = "ok" | "conflict" | "dirty" | "nothing";
+
+/** how a gitignored directory got into a cell — "linked" is the SHARED one */
+export type SeedResult = "cloned" | "linked" | "absent";
+
+/**
+ * Copy-on-write clone of a directory: the whole tree in constant time, sharing
+ * blocks with the original until something writes.
+ *
+ * This is what makes per-task `node_modules` affordable. A plain recursive copy
+ * of a real dependency tree is hundreds of megabytes and tens of seconds per
+ * task; a clone is milliseconds and costs disk only for what changes. Refuses
+ * rather than degrading to a slow copy — the caller has a cheaper fallback and
+ * needs to KNOW which one it got.
+ */
+/**
+ * The clone flags for a platform. Exported because they are the whole mechanism
+ * and they are not interchangeable: BSD `cp` has no --reflink and GNU `cp` has
+ * no -c, so the wrong arm does not clone slowly — it fails outright, silently
+ * dropping every cell back to a shared symlink.
+ */
+export function cloneArgs(platform: string, src: string, dst: string): string[] {
+  // -c is APFS clonefile; --reflink=always is btrfs/xfs/ext4. Both FAIL rather
+  // than falling back to a byte copy, which is the point: a silent 400MB copy
+  // per task would look like a hang.
+  return platform === "darwin" ? ["-c", "-R", src, dst] : ["-R", "--reflink=always", src, dst];
+}
+
+export function cloneDir(src: string, dst: string): boolean {
+  return spawnSync("cp", cloneArgs(process.platform, src, dst), { stdio: "ignore" }).status === 0;
+}
+
+/**
+ * Put a gitignored directory (node_modules and friends) into a fresh cell.
+ *
+ * A worktree holds TRACKED files only, so these are absent and `verify: "npm
+ * test"` fails on every task before anything interesting runs. The fix used to
+ * be a symlink at the real directory, which made every cell share ONE dependency
+ * tree: a wave whose verify runs `npm ci` had two installs mutating the user's
+ * real tree at once, and no worktree discard rolls that back.
+ *
+ * A clone is the same convenience with none of the sharing. The symlink survives
+ * only as the fallback for a filesystem without copy-on-write, and the caller is
+ * told which it got — because "shared" is the state that has to be refused when
+ * a wave might install.
+ */
+export function seedIgnoredDir(
+  workspace: string,
+  dir: string,
+  name: string,
+  /** injected only by tests: a filesystem that clones cannot exercise the fallback */
+  clone: (src: string, dst: string) => boolean = cloneDir,
+): SeedResult {
+  const src = join(workspace, name);
+  const dst = join(dir, name);
+  if (!existsSync(src) || existsSync(dst)) return "absent";
+  if (clone(src, dst)) return "cloned";
+  // Left to throw on purpose: createTaskWorktree catches it and the task
+  // degrades to the main workspace. A cell that could be seeded with NEITHER
+  // shape has no dependencies, so every verify in it fails — reporting that as a
+  // usable worktree would burn the task's whole retry budget on an empty tree.
+  symlinkSync(src, dst);
+  return "linked";
+}
 
 /**
  * A detached worktree at HEAD, or `null` when isolation is not available: no
@@ -36,22 +100,51 @@ export function createTaskWorktree(workspace: string, taskId: string, links: str
     rmSync(dir, { recursive: true, force: true });
     git(workspace, "worktree", "prune");
     if (git(workspace, "worktree", "add", "--detach", dir, base) !== 0) return null;
-    for (const name of links) {
-      // A fresh worktree holds TRACKED files only, so node_modules is absent and
-      // `verify: "npm test"` fails on every task before anything interesting is
-      // exercised. ponytail: one shared node_modules, so a verify that runs
-      // `npm install` mutates every sibling's dependencies — and in a WAVE two
-      // installs at once corrupt the real tree in the main workspace, which no
-      // worktree discard can roll back (that is why the reviewer is refused an
-      // install at all, see reviewexec.ts). Per-worktree installs cost minutes
-      // per task; add them when a backlog genuinely needs a verify that installs.
-      const src = join(workspace, name);
-      if (existsSync(src) && !existsSync(join(dir, name))) symlinkSync(src, join(dir, name));
-    }
+    for (const name of links) seedIgnoredDir(workspace, dir, name);
     return dir;
   } catch {
     return null;
   }
+}
+
+/**
+ * Would this workspace's gitignored directories be SHARED between cells?
+ *
+ * Answered by trying the real thing in the real place — a clone can fail for the
+ * filesystem, the platform, or a `cp` that does not take the flag, and only an
+ * attempt distinguishes those from a guess. Cheap: one empty directory.
+ *
+ * True is what makes a wave whose verify installs unsafe, so this is the probe
+ * behind that refusal rather than a platform check that would be wrong on a
+ * repository sitting on a mounted volume.
+ */
+export function ignoredDirsWouldBeShared(workspace: string): boolean {
+  const probe = join(workspace, ".ralphrun", "cow-probe");
+  const src = join(probe, "src");
+  const dst = join(probe, "dst");
+  const clean = (): void => {
+    // its own guard: a cleanup that throws would REPLACE the answer the catch
+    // below already decided, turning "assume shared" into a crash
+    try {
+      rmSync(probe, { recursive: true, force: true });
+    } catch {
+      /* a probe directory we could not remove is not worth failing a run over */
+    }
+  };
+  // The unsafe answer stands unless the probe positively disproves it, so a
+  // throw anywhere below leaves it. Written as a variable rather than a
+  // `finally` because the cleanup has to run on BOTH paths and a `return`
+  // inside `try` makes that an implicit branch nothing can exercise.
+  let shared = true;
+  try {
+    clean();
+    mkdirSync(src, { recursive: true });
+    shared = !cloneDir(src, dst);
+  } catch {
+    /* cannot even probe: keep the unsafe answer */
+  }
+  clean();
+  return shared;
 }
 
 /**
@@ -99,10 +192,13 @@ export function worktreeLoss(dir: string, base: string | null): { head: string |
 }
 
 /**
- * --force because the executor leaves build output behind and the symlinks make
- * the tree look dirty. The removal unlinks a symlink rather than following it,
- * so the real node_modules is untouched — worth a test, because getting that
- * wrong deletes the user's dependencies.
+ * --force because the executor leaves build output behind and the seeded
+ * directories make the tree look dirty.
+ *
+ * Safe for BOTH seeding shapes, which is worth a test because getting it wrong
+ * deletes the user's dependencies: a clone is this cell's own copy and removing
+ * it is the point, and on the symlink fallback `rm` unlinks the link rather than
+ * following it into the real directory.
  */
 export function removeTaskWorktree(workspace: string, dir: string): void {
   git(workspace, "worktree", "remove", "--force", dir);
@@ -137,6 +233,47 @@ export function reapOrphanWorktrees(workspace: string): number {
   // administrative entry whose directory is already gone. Both crash shapes.
   if (n > 0) git(workspace, "worktree", "prune");
   return n;
+}
+
+// Each manager and the sub-commands of it that WRITE the dependency tree. Bare
+// `yarn` is in the list because classic yarn with no arguments installs.
+const INSTALL_VERBS: Record<string, string[]> = {
+  npm: ["ci", "install", "i", "add"],
+  pnpm: ["install", "i", "add"],
+  yarn: ["install", "add"],
+  bun: ["install", "i", "add"],
+};
+
+/**
+ * Does this verify command write the dependency tree?
+ *
+ * Tokenised per shell segment rather than matched as a substring, so `npm run
+ * install-check` and `echo "npm ci"` are not installs — a false positive here
+ * refuses a backlog that was fine, which is worse than the hazard when the tree
+ * is not actually shared.
+ */
+export function verifyInstallsDeps(verify: string): boolean {
+  for (const segment of verify.split(/&&|\|\||;|\||\n/)) {
+    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const verbs = INSTALL_VERBS[tokens[0]];
+    if (!verbs) continue;
+    if (tokens.length === 1) {
+      if (tokens[0] === "yarn") return true;
+      continue;
+    }
+    if (verbs.includes(tokens[1])) return true;
+  }
+  return false;
+}
+
+/**
+ * The ids whose verify installs. Combined by the caller with "the tree is
+ * actually shared" and "more than one task runs at a time", those three
+ * together are the only combination that corrupts the user's real node_modules
+ * — and it is the one thing here no worktree discard can roll back.
+ */
+export function tasksInstallingDeps(tasks: { id: string; verify?: string }[]): string[] {
+  return tasks.filter((t) => t.verify && verifyInstallsDeps(t.verify)).map((t) => t.id);
 }
 
 /** Derived from the id, so crash recovery needs no bookkeeping file. */

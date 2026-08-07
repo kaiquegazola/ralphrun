@@ -18,7 +18,15 @@ import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
-import { createTaskWorktree, mergeBackTaskWork, reapOrphanWorktrees, removeTaskWorktree, worktreeLoss } from "./worktree.js";
+import {
+  createTaskWorktree,
+  ignoredDirsWouldBeShared,
+  mergeBackTaskWork,
+  reapOrphanWorktrees,
+  removeTaskWorktree,
+  tasksInstallingDeps,
+  worktreeLoss,
+} from "./worktree.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
 
@@ -179,6 +187,26 @@ export async function runLoop(opts: RunOptions): Promise<void> {
   // The initial menu can replace an unavailable default agent. Once the user
   // starts, every configured agent must pass the same preflight gate.
   if (!opts.dryRun) prepareRun(cfg, workspace);
+
+  // A cell seeds node_modules by copy-on-write clone, which isolates it. Where
+  // the filesystem cannot clone, the fallback is a symlink at the REAL tree —
+  // and two concurrent installs into that corrupt the user's own dependencies,
+  // which discarding a worktree cannot undo. Refuse the combination at load,
+  // naming the tasks, rather than discovering it as a broken node_modules.
+  const seeded = cfg.worktree_link ?? [];
+  if (
+    !opts.dryRun &&
+    cfg.worktree_per_task &&
+    (cfg.max_parallel_tasks ?? 1) > 1 &&
+    seeded.length > 0 &&
+    ignoredDirsWouldBeShared(workspace)
+  ) {
+    const hazard = tasksInstallingDeps(prd0.tasks);
+    if (hazard.length > 0) {
+      console.error(t("loop.err.sharedInstall", { ids: hazard.join(", "), links: seeded.join(", ") }));
+      process.exit(1);
+    }
+  }
 
   if (!opts.dryRun) {
     // Unconditional, not gated on worktree_per_task: at boot no ralphrun

@@ -14,10 +14,13 @@ import { join } from "node:path";
 
 import { captureReviewBase, commitPaths, headCommit, taskChangedPaths } from "./git.js";
 import {
+  cloneDir,
   createTaskWorktree,
+  ignoredDirsWouldBeShared,
   mergeBackTaskWork,
   reapOrphanWorktrees,
   removeTaskWorktree,
+  seedIgnoredDir,
   worktreeLoss,
 } from "./worktree.js";
 
@@ -375,5 +378,91 @@ describe("per-task worktrees", () => {
     // prepareRun inits a repo with no commit, and a task must degrade to the
     // main workspace instead of failing on infrastructure it cannot fix
     expect(createTaskWorktree(ws, "T1", [])).toBeNull();
+  });
+});
+
+// A gitignored directory is absent from a fresh worktree, so a cell has to be
+// SEEDED with one or `verify: "npm test"` fails on every task. How it is seeded
+// decides whether two parallel installs corrupt the user's real tree, and only
+// a real filesystem can answer which shape you got.
+describe("seeding a cell's gitignored directories", () => {
+  function seedRepo(): void {
+    write("a.txt", "x\n");
+    mkdirSync(join(ws, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(ws, "node_modules", "dep", "index.js"), "module.exports = 1\n");
+    writeFileSync(join(ws, ".gitignore"), "node_modules/\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "base");
+  }
+
+  it("clones node_modules into the cell, isolated from the real one", () => {
+    seedRepo();
+    const dir = createTaskWorktree(ws, "T1", ["node_modules"])!;
+
+    // present, so a verify that runs the test suite works at all
+    expect(existsSync(join(dir, "node_modules", "dep", "index.js"))).toBe(true);
+
+    // and ISOLATED: an install inside the cell must not reach the real tree.
+    // This is the whole point — a symlink passes the line above and fails here.
+    writeFileSync(join(dir, "node_modules", "dep", "index.js"), "module.exports = 2\n");
+    expect(readFileSync(join(ws, "node_modules", "dep", "index.js"), "utf8")).toBe("module.exports = 1\n");
+  });
+
+  it("removing a cell leaves the real dependency tree alone", () => {
+    seedRepo();
+    const dir = createTaskWorktree(ws, "T1", ["node_modules"])!;
+    removeTaskWorktree(ws, dir);
+    // true for both seeding shapes: a clone is the cell's own copy, and `rm`
+    // unlinks a symlink rather than following it. Getting this wrong deletes
+    // the user's dependencies.
+    expect(existsSync(join(ws, "node_modules", "dep", "index.js"))).toBe(true);
+  });
+
+  it("skips a name that is absent, and never overwrites one already there", () => {
+    seedRepo();
+    const dir = createTaskWorktree(ws, "T1", [])!;
+    expect(seedIgnoredDir(ws, dir, "not-here")).toBe("absent");
+
+    mkdirSync(join(dir, "node_modules"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", "mine.js"), "kept\n");
+    expect(seedIgnoredDir(ws, dir, "node_modules")).toBe("absent");
+    expect(readFileSync(join(dir, "node_modules", "mine.js"), "utf8")).toBe("kept\n");
+  });
+
+  // This machine's filesystem clones, so the fallback is unreachable without
+  // injecting the failure — and it is the branch that decides whether cells
+  // share one dependency tree, so it cannot go untested.
+  it("falls back to a symlink when the clone cannot be made", () => {
+    seedRepo();
+    const dir = createTaskWorktree(ws, "T1", [])!;
+    expect(seedIgnoredDir(ws, dir, "node_modules", () => false)).toBe("linked");
+
+    // it is a LINK, so writing through it reaches the real tree — which is
+    // exactly the hazard the load-time refusal exists to catch
+    writeFileSync(join(dir, "node_modules", "dep", "index.js"), "shared\n");
+    expect(readFileSync(join(ws, "node_modules", "dep", "index.js"), "utf8")).toBe("shared\n");
+  });
+
+  it("cloneDir refuses rather than degrading to a byte copy", () => {
+    seedRepo();
+    // a silent slow copy would look like a hang at hundreds of megabytes per
+    // task, so failure has to be visible to the caller
+    expect(cloneDir(join(ws, "does-not-exist"), join(ws, "dst"))).toBe(false);
+    expect(existsSync(join(ws, "dst"))).toBe(false);
+  });
+
+  it("probes the real filesystem for whether cells would share, and cleans up", () => {
+    seedRepo();
+    // on any dev machine this repo lives on a cloning filesystem (APFS, btrfs,
+    // xfs, ext4); the assertion that matters everywhere is that the probe leaves
+    // nothing behind, since it writes inside the user's workspace
+    ignoredDirsWouldBeShared(ws);
+    expect(existsSync(join(ws, ".ralphrun", "cow-probe"))).toBe(false);
+  });
+
+  it("assumes the unsafe answer when it cannot probe at all", () => {
+    // no repo, no writable workspace: a probe that cannot run must not report
+    // "isolated", because that is the answer that lets the hazard through
+    expect(ignoredDirsWouldBeShared(join(ws, "nope", "\0bad"))).toBe(true);
   });
 });

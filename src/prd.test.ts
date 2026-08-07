@@ -1,6 +1,7 @@
 // prd.test.ts — nextTask, findTask (normalize/recovery cases live in prdload.test.ts)
 import { describe, it, expect } from "vitest";
 import { nextTask, findTask, readyTasks, sessionRunnableIds } from "./prd.js";
+import { cloneArgs, tasksInstallingDeps, verifyInstallsDeps } from "./worktree.js";
 import type { PRD, Task } from "./prd.js";
 
 function t(partial: Partial<Task> & { id: string }): Task {
@@ -84,5 +85,73 @@ describe("sessionRunnableIds", () => {
   it("INCLUDES that chain on a TTY, where the blocked dep can be promoted", () => {
     const p = prd([t({ id: "A", status: "blocked" }), t({ id: "B", deps: ["A"] }), t({ id: "C" })]);
     expect(sessionRunnableIds(p, true)).toEqual(new Set(["A", "B", "C"]));
+  });
+});
+
+// Two parallel installs into one shared dependency tree corrupt the user's real
+// node_modules, and no worktree discard undoes that. This is the detector behind
+// the refusal, so a false NEGATIVE lets the corruption through and a false
+// POSITIVE refuses a backlog that was fine.
+describe("verifyInstallsDeps", () => {
+  it.each([
+    "npm ci",
+    "npm install",
+    "npm i",
+    "npm add left-pad",
+    "pnpm install --frozen-lockfile",
+    "pnpm i",
+    "yarn install",
+    "yarn add left-pad",
+    "yarn", // classic yarn with no arguments installs
+    "bun install",
+    "bun i",
+    "npm run build && npm ci && npm test", // not the first segment
+    "npm test; npm install",
+    "npm test\nnpm ci", // a multi-line verify
+  ])("detects %j as an install", (cmd) => {
+    expect(verifyInstallsDeps(cmd)).toBe(true);
+  });
+
+  it.each([
+    "npm test",
+    "npm run test",
+    "npm run install-check", // `run` makes the next token a SCRIPT name
+    "npm run build",
+    "pnpm test",
+    "yarn test",
+    "yarn run install-deps",
+    "bun test",
+    "cargo test",
+    "echo npm ci", // named, not run
+    "npm", // a manager with no sub-command installs nothing...
+    "pnpm",
+    "bun",
+    "",
+    "   ",
+  ])("does not flag %j", (cmd) => {
+    expect(verifyInstallsDeps(cmd)).toBe(false);
+  });
+});
+
+// BSD cp has no --reflink and GNU cp has no -c, so the wrong arm does not clone
+// slowly — it fails, and every cell silently falls back to a shared symlink.
+describe("cloneArgs", () => {
+  it("uses APFS clonefile on darwin and reflink everywhere else", () => {
+    expect(cloneArgs("darwin", "a", "b")).toEqual(["-c", "-R", "a", "b"]);
+    expect(cloneArgs("linux", "a", "b")).toEqual(["-R", "--reflink=always", "a", "b"]);
+    expect(cloneArgs("win32", "a", "b")).toEqual(["-R", "--reflink=always", "a", "b"]);
+  });
+});
+
+describe("tasksInstallingDeps", () => {
+  it("names only the tasks whose verify installs, and skips those with none", () => {
+    expect(
+      tasksInstallingDeps([
+        { id: "A", verify: "npm test" },
+        { id: "B", verify: "npm ci && npm test" },
+        { id: "C" }, // no verify at all
+        { id: "D", verify: "yarn" },
+      ]),
+    ).toEqual(["B", "D"]);
   });
 });

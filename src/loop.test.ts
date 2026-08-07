@@ -45,6 +45,9 @@ vi.mock("./worktree.js", () => ({
   removeTaskWorktree: vi.fn(),
   reapOrphanWorktrees: vi.fn(() => 0),
   worktreeLoss: vi.fn(() => ({ head: null, dirty: false })),
+  // false = this filesystem clones, so cells are isolated and there is no hazard
+  ignoredDirsWouldBeShared: vi.fn(() => false),
+  tasksInstallingDeps: vi.fn(() => []),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
 // only the key is stubbed — invalidatePlan is pure, and the stall tests are
@@ -70,9 +73,11 @@ import { log, setReporter } from "./log.js";
 import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths } from "./git.js";
 import {
   createTaskWorktree,
+  ignoredDirsWouldBeShared,
   mergeBackTaskWork,
   reapOrphanWorktrees,
   removeTaskWorktree,
+  tasksInstallingDeps,
   worktreeLoss,
 } from "./worktree.js";
 import { runTask } from "./run.js";
@@ -114,6 +119,8 @@ const mMergeBack = vi.mocked(mergeBackTaskWork);
 const mReapWorktrees = vi.mocked(reapOrphanWorktrees);
 const mRemoveWorktree = vi.mocked(removeTaskWorktree);
 const mWorktreeLoss = vi.mocked(worktreeLoss);
+const mDepsShared = vi.mocked(ignoredDirsWouldBeShared);
+const mTasksInstalling = vi.mocked(tasksInstallingDeps);
 const mRunTask = vi.mocked(runTask);
 const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
 const mMount = vi.mocked(mount);
@@ -221,6 +228,8 @@ beforeEach(() => {
   mMergeBack.mockReturnValue({ status: "ok", head: "wt-head" });
   mReapWorktrees.mockReturnValue(0);
   mWorktreeLoss.mockReturnValue({ head: null, dirty: false });
+  mDepsShared.mockReturnValue(false);
+  mTasksInstalling.mockReturnValue([]);
   mMount.mockReturnValue(makeHandle());
   mSelect.mockResolvedValue("start" as never);
   mPickModel.mockResolvedValue("claude:sonnet");
@@ -832,6 +841,55 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mReapWorktrees.mockReturnValue(2);
     await runLoop({ prd: "prd.json" });
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("2 orphan worktree"));
+  });
+
+  // Two parallel installs into ONE dependency tree corrupt the user's real
+  // node_modules, and discarding a worktree cannot undo that. The three
+  // conditions have to hold together, so each one alone must let the run start.
+  describe("the shared-install refusal", () => {
+    const parallelCfg = () => cfg({ worktree_per_task: true, max_parallel_tasks: 2, worktree_link: ["node_modules"] });
+
+    it("refuses when the tree is shared AND a wave task installs, naming the tasks", async () => {
+      mLoadConfig.mockReturnValue(parallelCfg());
+      mDepsShared.mockReturnValue(true);
+      mTasksInstalling.mockReturnValue(["T1", "T4"]);
+      await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("T1, T4"));
+      expect(mRunTask).not.toHaveBeenCalled();
+    });
+
+    it("starts when the filesystem clones, however many tasks install", async () => {
+      mLoadConfig.mockReturnValue(parallelCfg());
+      mDepsShared.mockReturnValue(false); // cells are isolated: no hazard at all
+      mTasksInstalling.mockReturnValue(["T1"]);
+      await runLoop({ prd: "prd.json" });
+      expect(mRunTask).toHaveBeenCalled();
+    });
+
+    it("starts when the tree is shared but nothing installs into it", async () => {
+      mLoadConfig.mockReturnValue(parallelCfg());
+      mDepsShared.mockReturnValue(true);
+      mTasksInstalling.mockReturnValue([]);
+      await runLoop({ prd: "prd.json" });
+      expect(mRunTask).toHaveBeenCalled();
+    });
+
+    it("does not even probe when tasks run one at a time", async () => {
+      // serial installs into a shared tree are FINE — they are what the user
+      // would have run by hand — so the probe is wasted work, not just harmless
+      mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, worktree_link: ["node_modules"] }));
+      mTasksInstalling.mockReturnValue(["T1"]);
+      await runLoop({ prd: "prd.json" });
+      expect(mDepsShared).not.toHaveBeenCalled();
+      expect(mRunTask).toHaveBeenCalled();
+    });
+
+    it("does not probe when nothing is seeded into the cells", async () => {
+      mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, max_parallel_tasks: 2, worktree_link: [] }));
+      mTasksInstalling.mockReturnValue(["T1"]);
+      await runLoop({ prd: "prd.json" });
+      expect(mDepsShared).not.toHaveBeenCalled();
+    });
   });
 
   it("runs the task inside its worktree and cherry-picks the result back", async () => {

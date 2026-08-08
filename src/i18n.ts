@@ -49,6 +49,10 @@ const en = {
     "max_parallel_tasks > 1 requires worktree_per_task: two executors in one checkout overwrite each other.",
   "loop.err.sharedInstall":
     "This filesystem cannot copy-on-write clone, so worktree_link ({links}) is shared between parallel tasks by symlink — and these tasks install into it: {ids}. Two installs at once corrupt your real dependency tree, which discarding a worktree cannot undo. Set max_parallel_tasks to 1, drop the installing command from those verify gates, or empty worktree_link and let each task install its own.",
+  "loop.label.wave": "wave",
+  "loop.log.waveVerify": "  verifying the merged result of {n} landed tasks ({ids})",
+  "loop.log.waveBroken":
+    "WAVE BROKE INTEGRATION — {ids} each passed alone and fail together. Failing command: {cmd}. Their commits are in history and are NOT reverted; fix forward or revert them, then re-run.",
 
   // loop.ts — --dry-run report
   "loop.dry.next": "next: {id} — {title}",
@@ -381,6 +385,10 @@ const ptBr: Record<MsgKey, string> = {
     "max_parallel_tasks > 1 exige worktree_per_task: dois executores no mesmo checkout se sobrescrevem.",
   "loop.err.sharedInstall":
     "Este filesystem não faz clone copy-on-write, então worktree_link ({links}) fica compartilhado entre tasks paralelas por symlink — e estas tasks instalam nele: {ids}. Dois installs ao mesmo tempo corrompem a sua árvore de dependências real, e descartar uma worktree não desfaz isso. Ponha max_parallel_tasks em 1, tire o comando de install desses verify, ou esvazie worktree_link e deixe cada task instalar a sua.",
+  "loop.label.wave": "onda",
+  "loop.log.waveVerify": "  verificando o resultado merged de {n} tasks que aterrissaram ({ids})",
+  "loop.log.waveBroken":
+    "A ONDA QUEBROU A INTEGRAÇÃO — {ids} passaram sozinhas e falham juntas. Comando que falhou: {cmd}. Os commits delas estão no histórico e NÃO foram revertidos; corrija adiante ou reverta, e rode de novo.",
 
   "loop.dry.next": "próxima: {id} — {title}",
   "loop.dry.mode": "modo: {mode} | executor {executor} | advisor {advisor}",

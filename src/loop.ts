@@ -13,6 +13,7 @@ import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } fro
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
+import { runVerifyCommand } from "./verify.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
 import { configureAgents, runMode, startRun, type RunOptions } from "./startrun.js";
 import { createTaskWorktree, mergeBackTaskWork, removeTaskWorktree, worktreeLoss } from "./worktree.js";
@@ -555,6 +556,51 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     return wave;
   };
 
+  /**
+   * The gate a wave needs and a serial run does not.
+   *
+   * Every cell verified against the trunk it was CUT from, so N tasks can each
+   * pass alone and be collectively broken the moment they land together: A
+   * renames a function, B adds a caller of the old name, their scopes never
+   * overlap, both are green, the merged trunk is not. Nothing else catches
+   * that — the cherry-pick only refuses TEXTUAL conflicts, and the reviewer saw
+   * one task's diff.
+   *
+   * The planner is told to place anchor tasks at convergence points, but that is
+   * advice: a planner that forgets produces a wave with no integration check at
+   * all. This is the gate, and it needs no configuring because the commands are
+   * already in the backlog — re-run the DISTINCT verify commands of the tasks
+   * that landed, now in the trunk. Distinct because a wave whose five tasks all
+   * say `npm test` deserves one run, not five.
+   *
+   * Only the tasks that reached `done` count. A task that blocked did not land,
+   * and holding the wave responsible for it would report the same failure twice.
+   *
+   * false = the run is over and done() has been called. It STOPS rather than
+   * reverting: the work is merged and each task's commit is its own, so undoing
+   * it is the user's call, not ours. Continuing is the worse option — every
+   * later wave is cut from the broken trunk and fails the same way, at full
+   * agent price, which is the same reasoning as the merge-refused stop.
+   */
+  const waveIntegrationHolds = async (batch: Task[]): Promise<boolean> => {
+    const after = reload({ keepDoing: true });
+    if (!after) return true; // a corrupt reload is already handled by the cells
+    const landed = batch.filter((tk) => after.tasks.find((x) => x.id === tk.id)?.status === "done");
+    const commands = [...new Set(landed.map((tk) => tk.verify).filter((c): c is string => !!c))];
+    if (landed.length < 2 || commands.length === 0) return true;
+
+    log(progress, t("loop.log.waveVerify", { n: landed.length, ids: landed.map((tk) => tk.id).join(", ") }));
+    for (const cmd of commands) {
+      const { passed } = await runVerifyCommand(cmd, t("loop.label.wave"), workspace, progress);
+      if (!passed) {
+        log(progress, t("loop.log.waveBroken", { ids: landed.map((tk) => tk.id).join(", "), cmd }));
+        done();
+        return false;
+      }
+    }
+    return true;
+  };
+
   while (true) {
     if (tui) setElapsedPaused(tui.control.isPaused());
     const tuiAction = tui ? await tui.waitConfigOrResume() : "resume";
@@ -683,6 +729,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       const crashed = settled.find((r) => r.status === "rejected");
       if (crashed) throw crashed.reason;
       if (settled.some((r) => r.status === "fulfilled" && r.value === "stop")) return;
+      if (!(await waveIntegrationHolds(batch))) return;
     }
     await sleep(1000);
   }

@@ -24,13 +24,30 @@ const MAX_OUTPUT_CHARS = 200_000;
 export function runVerify(task: Task, workspace: string, progress: string): Promise<{ passed: boolean; output: string }> {
   const cmd = task.verify;
   if (!cmd) return Promise.resolve({ passed: true, output: "" });
+  return runVerifyCommand(cmd, task.id, workspace, progress);
+}
 
+/**
+ * The same gate, addressed by COMMAND rather than by task.
+ *
+ * Split out for the wave integration gate, which re-runs a wave's verify
+ * commands in the trunk after the merge. There is no single task to attribute
+ * that result to — each cell verified against the trunk it was CUT from, and
+ * what is being judged is the combination — so `label` is what the log lines
+ * name in place of a task id.
+ */
+export function runVerifyCommand(
+  cmd: string,
+  label: string,
+  workspace: string,
+  progress: string,
+): Promise<{ passed: boolean; output: string }> {
   return new Promise((resolve) => {
     let proc;
     try {
       proc = spawn(cmd, [], { cwd: workspace, shell: true, stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
-      log(progress, t("verify.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
+      log(progress, t("verify.crashed", { id: label, msg: e instanceof Error ? e.message : String(e) }));
       return resolve({ passed: false, output: String(e) });
     }
 
@@ -51,8 +68,8 @@ export function runVerify(task: Task, workspace: string, progress: string): Prom
       clearTimeout(timer);
       clearTimeout(grace);
       const tail = out.slice(-4000);
-      if (timedOut) log(progress, t("verify.timeout", { id: task.id, s: VERIFY_TIMEOUT_MS / 1000 }));
-      else if (status !== 0) log(progress, t("verify.failed", { id: task.id, status: String(status) }) + `\n${tail.slice(-1500)}`);
+      if (timedOut) log(progress, t("verify.timeout", { id: label, s: VERIFY_TIMEOUT_MS / 1000 }));
+      else if (status !== 0) log(progress, t("verify.failed", { id: label, status: String(status) }) + `\n${tail.slice(-1500)}`);
       resolve({ passed: !timedOut && status === 0, output: tail });
     };
 
@@ -71,7 +88,7 @@ export function runVerify(task: Task, workspace: string, progress: string): Prom
       settled = true;
       clearTimeout(timer);
       clearTimeout(grace);
-      log(progress, t("verify.crashed", { id: task.id, msg: err.message }));
+      log(progress, t("verify.crashed", { id: label, msg: err.message }));
       resolve({ passed: false, output: String(err) });
     });
   });

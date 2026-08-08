@@ -50,6 +50,9 @@ vi.mock("./worktree.js", () => ({
   tasksInstallingDeps: vi.fn(() => []),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
+// the wave integration gate shells out for real otherwise — every existing wave
+// test happens to have tasks with no verify, which is exactly the case that skips
+vi.mock("./verify.js", () => ({ runVerifyCommand: vi.fn(async () => ({ passed: true, output: "" })) }));
 // only the key is stubbed — invalidatePlan is pure, and the stall tests are
 // about the plan actually leaving prd.json, not about a spy having been called
 vi.mock("./plan-cache.js", async (importOriginal) => ({
@@ -81,6 +84,7 @@ import {
   worktreeLoss,
 } from "./worktree.js";
 import { runTask } from "./run.js";
+import { runVerifyCommand } from "./verify.js";
 import { advisorPlanKey } from "./plan-cache.js";
 import { mount } from "./tui/mount.js";
 import { pickModel } from "./configcmd.js";
@@ -122,6 +126,7 @@ const mWorktreeLoss = vi.mocked(worktreeLoss);
 const mDepsShared = vi.mocked(ignoredDirsWouldBeShared);
 const mTasksInstalling = vi.mocked(tasksInstallingDeps);
 const mRunTask = vi.mocked(runTask);
+const mVerifyCmd = vi.mocked(runVerifyCommand);
 const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
 const mMount = vi.mocked(mount);
 const mPickModel = vi.mocked(pickModel);
@@ -230,6 +235,7 @@ beforeEach(() => {
   mWorktreeLoss.mockReturnValue({ head: null, dirty: false });
   mDepsShared.mockReturnValue(false);
   mTasksInstalling.mockReturnValue([]);
+  mVerifyCmd.mockResolvedValue({ passed: true, output: "" });
   mMount.mockReturnValue(makeHandle());
   mSelect.mockResolvedValue("start" as never);
   mPickModel.mockResolvedValue("claude:sonnet");
@@ -1468,6 +1474,95 @@ describe("runLoop parallel waves", () => {
     expect(read().A.status).toBe("done");
     expect(read().B.status).toBe("done");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE of 2"));
+  });
+
+  // Each cell verified against the trunk it was CUT from, so N tasks can each
+  // pass alone and be broken together the moment they land. Nothing else sees
+  // that: the cherry-pick only refuses TEXTUAL conflicts, and the reviewer read
+  // one task's diff.
+  describe("the wave integration gate", () => {
+    const verified = (id: string, scope: string[], verify: string) => ({ ...wtTask(id, scope), verify });
+
+    it("re-runs the landed tasks' verify in the trunk, once per DISTINCT command", async () => {
+      livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm test")]);
+      dispatchOnce();
+      trackConcurrency();
+
+      await runLoop({ prd: "prd.json" });
+
+      // one run, not two: a wave whose tasks all say `npm test` deserves one
+      expect(mVerifyCmd).toHaveBeenCalledTimes(1);
+      expect(mVerifyCmd).toHaveBeenCalledWith("npm test", expect.any(String), resolve("."), expect.any(String));
+    });
+
+    it("runs each distinct command when the tasks verify differently", async () => {
+      livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm run e2e")]);
+      dispatchOnce();
+      trackConcurrency();
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mVerifyCmd.mock.calls.map((c) => c[0]).sort()).toEqual(["npm run e2e", "npm test"]);
+    });
+
+    it("stops the run when the merged result fails, and does NOT undo the commits", async () => {
+      const read = livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm test")]);
+      dispatchOnce();
+      trackConcurrency();
+      mVerifyCmd.mockResolvedValue({ passed: false, output: "1 failing" });
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE BROKE INTEGRATION"));
+      // both landed and their work is in history — calling them undone would be a
+      // lie, and re-running them would replay work that is already merged
+      expect(read().A.status).toBe("done");
+      expect(read().B.status).toBe("done");
+    });
+
+    it("skips the gate when only one task of the wave landed", async () => {
+      // the other one blocked, so nothing new combined with anything — holding the
+      // wave responsible would report the same failure a second time
+      livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm test")]);
+      dispatchOnce();
+      let n = 0;
+      mRunTask.mockImplementation(async () => (++n === 1 ? { ok: true, cost: NO_COST } : { ok: false, reason: "failed", cost: NO_COST }));
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mVerifyCmd).not.toHaveBeenCalled();
+    });
+
+    // The gate re-reads prd.json to learn which tasks actually landed. If the
+    // executor corrupted it, the cells already reported that and stopped the
+    // run — the gate must not report it a second time as an integration failure.
+    it("checks nothing when prd.json became unreadable after the wave", async () => {
+      let content = prdWith([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm test")]);
+      let poisoned = false;
+      mRead.mockImplementation(() => (poisoned ? "{ not json" : content));
+      mWrite.mockImplementation((p, data) => {
+        if (!String(p).endsWith("prd.json")) return;
+        content = String(data);
+        // both settled, so the NEXT read is the gate's
+        if (JSON.parse(content).tasks.every((x: { status: string }) => x.status === "done")) poisoned = true;
+      });
+      dispatchOnce();
+      trackConcurrency();
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mVerifyCmd).not.toHaveBeenCalled();
+    });
+
+    it("skips the gate when the wave's tasks declare no verify at all", async () => {
+      livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+      dispatchOnce();
+      trackConcurrency();
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mVerifyCmd).not.toHaveBeenCalled();
+    });
   });
 
   it("gives each task its own worktree, and removes both", async () => {

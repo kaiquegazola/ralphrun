@@ -237,6 +237,24 @@ tail -f ralph.out
   filesystem at startup and **refuses the run** when all three hold at once
   (shared tree, parallel tasks, and a `verify` that installs), naming the tasks.
 
+- **The wave integration gate.** Every cell verifies against the trunk it was
+  *cut from*, so two tasks can each pass alone and be broken the moment they land
+  together — A renames a function, B adds a caller of the old name, their scopes
+  never overlap, both are green, the merged trunk is not. The cherry-pick only
+  refuses *textual* conflicts and the reviewer only saw one task's diff, so
+  nothing else catches it.
+
+  After a wave lands, ralphrun re-runs the **distinct** `verify` commands of the
+  tasks that reached `done`, in the main workspace. Nothing to configure — the
+  commands are already in the backlog — and a wave whose five tasks all say
+  `npm test` costs one run, not five. Only fires for a real wave: with one task
+  in flight there is nothing to combine.
+
+  If it fails, the **run stops** and the commits are **not reverted**. They are
+  merged and each task's commit is its own, so undoing them is your call. Going
+  on is the worse option: every later wave is cut from the broken trunk and fails
+  the same way, at full agent price.
+
 - **What happens when the pick fails.** If the work conflicts with something
   that landed first, the task goes back into the normal retry ladder and the
   next attempt is cut from the new `HEAD` — re-execution on top of the result,

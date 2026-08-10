@@ -145,7 +145,9 @@ describe("cursorSdkEvent", () => {
         type: "assistant",
         message: { content: [{ type: "text", text: "hi" }, { type: "tool_use", name: "Write", input: { file_path: "src/a.ts" } }] },
       },
-      { text: "hi\n→ Write(src/a.ts)", prose: true, activity: true },
+      // proseText splits the agent's own words out, so the handoff tail can
+      // leave the tool summary behind — see stream.ts
+      { text: "hi\n→ Write(src/a.ts)", prose: true, activity: true, proseText: "hi" },
     ],
     ["assistant with non-array content", { type: "assistant", message: {} }, { text: "", activity: true }],
     // typeof null === "object": the guard has to survive it

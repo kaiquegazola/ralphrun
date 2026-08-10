@@ -81,7 +81,14 @@ describe("parseClaudeStream", () => {
         { type: "text", text: "and here is why" },
       ]),
     );
-    expect(ev).toEqual({ text: "→ Read(a.ts)\nand here is why", prose: true, activity: true });
+    // and the agent's OWN words are split out: `prose` is one boolean for the
+    // pair, so the handoff tail has no other way to leave the summary behind
+    expect(ev).toEqual({
+      text: "→ Read(a.ts)\nand here is why",
+      prose: true,
+      activity: true,
+      proseText: "and here is why",
+    });
   });
 
   it("treats every other event kind as liveness only", () => {

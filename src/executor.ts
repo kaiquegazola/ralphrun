@@ -137,7 +137,11 @@ export function runExecutor(
           lastWasProse = ev.prose === true;
           // prose only: a tool summary ("→ Edit(x)") is the harness narrating,
           // and the next attempt can read the diff for what was edited
-          if (ev.prose) {
+          // proseText, not the line: a turn that speaks AND calls a tool renders
+          // both into `text` under one `prose` flag, so pushing by line would
+          // hand the retry a "→ Edit(x)" the diff already shows. No parser means
+          // no summaries to separate, and there `text` is all the agent said.
+          if (ev.prose && (ev.proseText ?? ev.text).split("\n").includes(line)) {
             proseTail.push(line.trim());
             if (proseTail.length > MAX_TAIL_LINES) proseTail.shift();
           }

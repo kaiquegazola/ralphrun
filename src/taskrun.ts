@@ -703,13 +703,24 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     if (landed.length < 2 || commands.length === 0) return true;
 
     log(progress, t("loop.log.waveVerify", { n: landed.length, ids: landed.map((tk) => tk.id).join(", ") }));
-    for (const cmd of commands) {
-      const { passed } = await runVerifyCommand(cmd, t("loop.label.wave"), workspace, progress);
-      if (!passed) {
-        log(progress, t("loop.log.waveBroken", { ids: landed.map((tk) => tk.id).join(", "), cmd }));
-        done();
-        return false;
+    // Its OWN controller: every cell of the wave ended its signal on the way out,
+    // so without one this gate is the last thing a run does that a skip or quit
+    // cannot reach — and it can hold a full verify timeout after the user asked
+    // to stop. Ended in `finally` for the same reason a task ends its own: a
+    // settled phase must stop being one a keypress has to abort.
+    const gateSignal = ctx.tui?.control.beginTask();
+    try {
+      for (const cmd of commands) {
+        if (gateSignal?.aborted) return true; // abandoned, not broken
+        const { passed } = await runVerifyCommand(cmd, t("loop.label.wave"), workspace, progress, gateSignal);
+        if (!passed) {
+          log(progress, t("loop.log.waveBroken", { ids: landed.map((tk) => tk.id).join(", "), cmd }));
+          done();
+          return false;
+        }
       }
+    } finally {
+      if (gateSignal) ctx.tui?.control.endTask(gateSignal);
     }
     return true;
   };

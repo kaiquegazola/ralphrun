@@ -1648,7 +1648,47 @@ describe("runLoop parallel waves", () => {
 
       // one run, not two: a wave whose tasks all say `npm test` deserves one
       expect(mVerifyCmd).toHaveBeenCalledTimes(1);
-      expect(mVerifyCmd).toHaveBeenCalledWith("npm test", expect.any(String), resolve("."), expect.any(String));
+      // the 5th arg is the gate's OWN abort signal: every cell ended its own on the
+      // way out, so without one this is the last thing a run does that a skip
+      // cannot reach
+      expect(mVerifyCmd).toHaveBeenCalledWith("npm test", expect.any(String), resolve("."), expect.any(String), undefined);
+    });
+
+    // Every cell ended its own signal on the way out, so without one of its own
+    // this gate is the last thing a run does that a skip or quit cannot reach —
+    // and it can hold a full verify timeout after the user asked to stop.
+    it("runs under its own abort controller, and gives it back after", async () => {
+      setTTY(true);
+      const handle = makeHandle();
+      mMount.mockReturnValue(handle);
+      livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm test")]);
+      dispatchOnce();
+      trackConcurrency();
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mVerifyCmd).toHaveBeenCalledWith("npm test", expect.any(String), expect.any(String), expect.any(String), SIG);
+      // a settled phase must stop being one a keypress has to abort
+      expect(handle.control.endTask).toHaveBeenCalledWith(SIG);
+    });
+
+    it("checks nothing more once the run was abandoned mid-gate", async () => {
+      setTTY(true);
+      const aborted = new AbortController();
+      aborted.abort();
+      const handle = makeHandle();
+      handle.control.beginTask = vi.fn(() => aborted.signal);
+      mMount.mockReturnValue(handle);
+      livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm run e2e")]);
+      dispatchOnce();
+      trackConcurrency();
+
+      await runLoop({ prd: "prd.json" });
+
+      // abandoned is not broken: the wave is not reported as an integration
+      // failure just because the user stopped watching it
+      expect(mVerifyCmd).not.toHaveBeenCalled();
+      expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE BROKE"));
     });
 
     it("runs each distinct command when the tasks verify differently", async () => {

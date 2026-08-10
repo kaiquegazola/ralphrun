@@ -46,6 +46,19 @@ export interface StreamEvent {
    * telemetry that trails the final answer clear a real BLOCKED marker.
    */
   costUsd?: number;
+  /**
+   * Only the agent's OWN words from this event, with the tool summaries left
+   * out — `text` renders both, and `prose` is one boolean for the pair, so a
+   * turn that says something AND calls a tool cannot be split by either.
+   *
+   * The handoff tails need that split: a "→ Edit(x)" line is the harness
+   * narrating, and the next attempt reads the diff for what was edited.
+   *
+   * Absent whenever it would equal `text` — a turn that only spoke, and every
+   * event from a cli with no parser, where each line is the agent's by
+   * definition. Consumers fall back to `text`, which is right in both.
+   */
+  proseText?: string;
 }
 
 /**
@@ -117,12 +130,14 @@ const MAX_EVENT_CHARS = 256_000;
 export function assistantEvent(content: unknown): StreamEvent {
   if (!Array.isArray(content)) return { text: "", activity: true };
   const out: string[] = [];
+  const spoken: string[] = [];
   let prose = false;
   for (const block of content) {
     if (!block || typeof block !== "object") continue; // a null entry is valid JSON
     const b = block as Record<string, unknown>;
     if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
       out.push(b.text);
+      spoken.push(b.text);
       prose = true;
     } else if (b.type === "tool_use" && typeof b.name === "string") {
       out.push(toolSummary(b.name, b.input));
@@ -130,7 +145,15 @@ export function assistantEvent(content: unknown): StreamEvent {
     // "thinking" is deliberately dropped: it is long, it is not the
     // agent's answer, and echoing it would bury the actual work
   }
-  return { text: out.join("\n"), prose, activity: true };
+  const text = out.join("\n");
+  const proseText = spoken.join("\n");
+  // Present ONLY on a turn that BOTH spoke and called a tool — the one shape the
+  // `prose` boolean cannot describe. A turn that only spoke has proseText ===
+  // text, and one that only called tools has no prose for a consumer to want;
+  // both fall back to `text`, which is right for them.
+  return prose && proseText !== text
+    ? { text, prose, activity: true, proseText }
+    : { text, prose, activity: true };
 }
 
 /** a tool call rendered compactly: the arg that says WHICH thing it touched */

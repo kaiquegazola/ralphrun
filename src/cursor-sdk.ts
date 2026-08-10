@@ -497,7 +497,11 @@ export async function runCursorSdkExecutor(
           if (line.trim()) {
             lastLine = line.trim();
             lastWasProse = ev.prose === true;
-            if (ev.prose) {
+            // proseText, not the line: a turn that speaks AND calls a tool renders
+            // both into `text` under one `prose` flag, so pushing by line would
+            // hand the retry a "→ Edit(x)" the diff already shows. No parser means
+            // no summaries to separate, and there `text` is all the agent said.
+            if (ev.prose && (ev.proseText ?? ev.text).split("\n").includes(line)) {
               proseTail.push(line.trim());
               if (proseTail.length > MAX_TAIL_LINES) proseTail.shift();
             }

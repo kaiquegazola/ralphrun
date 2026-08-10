@@ -1691,6 +1691,29 @@ describe("runLoop parallel waves", () => {
       expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE BROKE"));
     });
 
+    // An abort mid-command kills it and settles as `passed: false` — correct for
+    // a gate that never finished, wrong as an answer to "did this wave break the
+    // build". The already-aborted case never reaches the command at all, so it
+    // cannot cover this.
+    it("does not call an abandoned wave broken when the skip lands mid-check", async () => {
+      setTTY(true);
+      const ac = new AbortController();
+      const handle = makeHandle();
+      handle.control.beginTask = vi.fn(() => ac.signal);
+      mMount.mockReturnValue(handle);
+      livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm test")]);
+      dispatchOnce();
+      trackConcurrency();
+      mVerifyCmd.mockImplementation(async () => {
+        ac.abort(); // the keypress lands while the suite is running
+        return { passed: false, output: "" };
+      });
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE BROKE"));
+    });
+
     it("runs each distinct command when the tasks verify differently", async () => {
       livePrd([verified("A", ["src/a/**"], "npm test"), verified("B", ["src/b/**"], "npm run e2e")]);
       dispatchOnce();

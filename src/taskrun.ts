@@ -713,6 +713,12 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       for (const cmd of commands) {
         if (gateSignal?.aborted) return true; // abandoned, not broken
         const { passed } = await runVerifyCommand(cmd, t("loop.label.wave"), workspace, progress, gateSignal);
+        // Checked AGAIN, after the await: an abort that lands mid-command kills
+        // it and settles as `passed: false`, which is right for a gate that
+        // never finished and wrong as an answer to "did this wave break the
+        // build". Without this the user pressing skip is told their tasks broke
+        // integration, and the run stops saying so.
+        if (gateSignal?.aborted) return true;
         if (!passed) {
           log(progress, t("loop.log.waveBroken", { ids: landed.map((tk) => tk.id).join(", "), cmd }));
           done();

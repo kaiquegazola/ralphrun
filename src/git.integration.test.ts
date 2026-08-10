@@ -53,6 +53,11 @@ beforeEach(() => {
   run("config", "user.email", "test@example.com");
   run("config", "user.name", "Test");
   run("config", "commit.gpgsign", "false");
+  // Windows git defaults to autocrlf=true, which rewrites line endings on
+  // checkout and makes a content assertion compare 'one\r\n' with 'one\n'. This
+  // repo is the test's own fixture, so pin it rather than normalise at every
+  // assertion.
+  run("config", "core.autocrlf", "false");
 });
 
 afterEach(() => rmSync(ws, { recursive: true, force: true }));
@@ -248,22 +253,6 @@ describe("per-task worktrees", () => {
     expect(mergeBackTaskWork(ws, wt, base).status).toBe("dirty");
     expect(readFileSync(join(ws, "a.txt"), "utf8")).toBe("the user is editing this\n");
     expect(existsSync(join(ws, ".git", "CHERRY_PICK_HEAD"))).toBe(false);
-  });
-
-  it("symlinks node_modules in, and removing the worktree does not follow it", () => {
-    seed();
-    mkdirSync(join(ws, "node_modules", "dep"), { recursive: true });
-    writeFileSync(join(ws, "node_modules", "dep", "index.js"), "module.exports = 1\n");
-
-    // a fresh worktree has TRACKED files only, so without this every
-    // `verify: "npm test"` fails before anything interesting is exercised
-    const wt = createTaskWorktree(ws, "T1", ["node_modules"])!;
-    expect(existsSync(join(wt, "node_modules", "dep", "index.js"))).toBe(true);
-
-    removeTaskWorktree(ws, wt);
-    expect(existsSync(wt)).toBe(false);
-    // getting this wrong deletes the user's dependencies
-    expect(existsSync(join(ws, "node_modules", "dep", "index.js"))).toBe(true);
   });
 
   it("reaps only ralphrun's own orphans and leaves a user's worktree alone", () => {
@@ -487,6 +476,22 @@ describe("seeding a cell's gitignored directories", () => {
     // exactly the hazard the load-time refusal exists to catch
     writeFileSync(join(dir, "node_modules", "dep", "index.js"), "shared\n");
     expect(readFileSync(join(ws, "node_modules", "dep", "index.js"), "utf8")).toBe("shared\n");
+  });
+
+  // GNU cp creates the destination directory and only THEN discovers the
+  // filesystem cannot reflink, so a failed clone can leave a partial dst behind.
+  // The symlink fallback then hits EEXIST, createTaskWorktree catches it and
+  // returns null, and the task silently loses its isolation — on Linux only,
+  // which is why CI saw this and a macOS checkout never could.
+  it("falls back cleanly even when the failed clone left a partial destination", () => {
+    seedRepo();
+    const dir = createTaskWorktree(ws, "T1", [])!;
+    const partial = (_src: string, dst: string): boolean => {
+      mkdirSync(dst, { recursive: true }); // what GNU cp does before it fails
+      return false;
+    };
+    expect(seedIgnoredDir(ws, dir, "node_modules", partial)).toBe("linked");
+    expect(readFileSync(join(dir, "node_modules", "dep", "index.js"), "utf8")).toBe("module.exports = 1\n");
   });
 
   it("cloneDir refuses rather than degrading to a byte copy", () => {

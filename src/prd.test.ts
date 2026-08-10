@@ -1,7 +1,7 @@
 // prd.test.ts — nextTask, findTask (normalize/recovery cases live in prdload.test.ts)
 import { describe, it, expect } from "vitest";
 import { nextTask, findTask, readyTasks, sessionRunnableIds } from "./prd.js";
-import { cloneArgs, tasksInstallingDeps, verifyInstallsDeps } from "./worktree.js";
+import { cloneArgs, linkKind, tasksInstallingDeps, verifyInstallsDeps } from "./worktree.js";
 import type { PRD, Task } from "./prd.js";
 
 function t(partial: Partial<Task> & { id: string }): Task {
@@ -140,6 +140,16 @@ describe("cloneArgs", () => {
     expect(cloneArgs("darwin", "a", "b")).toEqual(["-c", "-R", "a", "b"]);
     expect(cloneArgs("linux", "a", "b")).toEqual(["-R", "--reflink=always", "a", "b"]);
     expect(cloneArgs("win32", "a", "b")).toEqual(["-R", "--reflink=always", "a", "b"]);
+  });
+});
+
+// On Windows a DIRECTORY symlink needs elevation, so the wrong arm here is not a
+// slower cell — it is no cell at all, and NTFS cannot reflink either.
+describe("linkKind", () => {
+  it("asks for a junction on win32 and a plain symlink everywhere else", () => {
+    expect(linkKind("win32")).toBe("junction");
+    expect(linkKind("darwin")).toBeUndefined();
+    expect(linkKind("linux")).toBeUndefined();
   });
 });
 

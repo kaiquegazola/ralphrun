@@ -23,16 +23,6 @@ export type MergeBackStatus = "ok" | "conflict" | "dirty" | "nothing";
 export type SeedResult = "cloned" | "linked" | "absent";
 
 /**
- * Copy-on-write clone of a directory: the whole tree in constant time, sharing
- * blocks with the original until something writes.
- *
- * This is what makes per-task `node_modules` affordable. A plain recursive copy
- * of a real dependency tree is hundreds of megabytes and tens of seconds per
- * task; a clone is milliseconds and costs disk only for what changes. Refuses
- * rather than degrading to a slow copy — the caller has a cheaper fallback and
- * needs to KNOW which one it got.
- */
-/**
  * The clone flags for a platform. Exported because they are the whole mechanism
  * and they are not interchangeable: BSD `cp` has no --reflink and GNU `cp` has
  * no -c, so the wrong arm does not clone slowly — it fails outright, silently
@@ -43,6 +33,27 @@ export function cloneArgs(platform: string, src: string, dst: string): string[] 
   // than falling back to a byte copy, which is the point: a silent 400MB copy
   // per task would look like a hang.
   return platform === "darwin" ? ["-c", "-R", src, dst] : ["-R", "--reflink=always", src, dst];
+}
+
+/**
+ * Copy-on-write clone of a directory: the whole tree in constant time, sharing
+ * blocks with the original until something writes.
+ *
+ * This is what makes per-task `node_modules` affordable — a plain recursive copy
+ * of a real dependency tree is hundreds of megabytes and tens of seconds per
+ * task. Refuses rather than degrading to a slow copy: the caller has a cheaper
+ * fallback and needs to KNOW which one it got, and a silent 400MB copy per task
+ * would look like a hang.
+ */
+/**
+ * The link flavour a platform needs for a DIRECTORY.
+ *
+ * Exported for the same reason as cloneArgs: it is the whole mechanism, and the
+ * wrong arm does not degrade — on Windows a plain directory symlink throws EPERM
+ * for an unelevated user, which is not a slower cell but no cell at all.
+ */
+export function linkKind(platform: string): "junction" | undefined {
+  return platform === "win32" ? "junction" : undefined;
 }
 
 export function cloneDir(src: string, dst: string): boolean {
@@ -74,11 +85,23 @@ export function seedIgnoredDir(
   const dst = join(dir, name);
   if (!existsSync(src) || existsSync(dst)) return "absent";
   if (clone(src, dst)) return "cloned";
-  // Left to throw on purpose: createTaskWorktree catches it and the task
-  // degrades to the main workspace. A cell that could be seeded with NEITHER
-  // shape has no dependencies, so every verify in it fails — reporting that as a
+  // A failed clone is not always a clone that wrote nothing: GNU cp creates the
+  // destination directory and only then discovers the filesystem cannot reflink,
+  // so the fallback below would hit EEXIST — on exactly the filesystems the
+  // fallback exists for. Whatever it left is a fragment of a copy nobody wants.
+  rmSync(dst, { recursive: true, force: true });
+  // "junction" on Windows, and it is not a nicety: a DIRECTORY symlink there
+  // needs elevation or Developer Mode, so plain symlinkSync throws EPERM for an
+  // ordinary user — and since NTFS cannot reflink either, that left Windows with
+  // no way at all to seed a cell. A junction needs no privilege and behaves the
+  // same for this purpose. It is also why the type is passed explicitly rather
+  // than left to node's guess, which would pick "file" for a missing target.
+  //
+  // Left to throw on purpose when even that fails: createTaskWorktree catches it
+  // and the task degrades to the main workspace. A cell seeded with NEITHER
+  // shape has no dependencies, so every verify in it fails — calling that a
   // usable worktree would burn the task's whole retry budget on an empty tree.
-  symlinkSync(src, dst);
+  symlinkSync(src, dst, linkKind(process.platform));
   return "linked";
 }
 
@@ -272,7 +295,11 @@ function pidAlive(pid: number): boolean {
 }
 
 export function reapOrphanWorktrees(workspace: string): number {
-  const marker = sep + WORKTREES + sep;
+  // `git worktree list --porcelain` prints POSIX separators even on Windows,
+  // while WORKTREES is built with join() and so uses the platform's. Comparing
+  // them directly matched nothing on Windows, which silently disabled crash
+  // recovery there — the reap counted zero and left every orphan cell behind.
+  const marker = "/" + WORKTREES.split(sep).join("/") + "/";
   let n = 0;
   for (const line of gitOut(workspace, "worktree", "list", "--porcelain")?.split("\n") ?? []) {
     if (!line.startsWith("worktree ")) continue;
@@ -280,7 +307,7 @@ export function reapOrphanWorktrees(workspace: string): number {
     // path match rather than realpath comparison: a repo checked out under a
     // symlinked temp dir reports its real path, and a user's own worktree
     // elsewhere is not ours to delete.
-    if (!dir.includes(marker)) continue;
+    if (!dir.split(sep).join("/").includes(marker)) continue;
     removeTaskWorktree(workspace, dir);
     n += 1;
   }

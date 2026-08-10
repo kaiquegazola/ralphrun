@@ -15,7 +15,7 @@ import { log } from "./log.js";
 import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
 import { killTree, releasePipes, spawn, writePrompt } from "./spawn.js";
-import type { CostSink } from "./stream.js";
+import { MAX_TAIL_CHARS, MAX_TAIL_LINES, type CostSink } from "./stream.js";
 import { emit } from "./tui/events.js";
 
 // after a kill, a surviving grandchild can hold the stdout pipe open so 'close'
@@ -24,9 +24,6 @@ const KILL_GRACE_MS = 5_000;
 // how long to wait after the process exits for readline to hand over a final,
 // newline-less line before classifying the run anyway
 const DRAIN_GRACE_MS = 2_000;
-// how much of a cli's closing output is worth handing the next attempt
-const MAX_TAIL_LINES = 20;
-const MAX_TAIL_CHARS = 2_000;
 
 export function runExecutor(
   execu: AgentSpec,
@@ -72,6 +69,15 @@ export function runExecutor(
     // Both halves matter: tracking only prose would leave a stale marker line
     // standing after the agent carried on with tool calls, and not tracking
     // prose-ness would let a tool argument quoting the marker fail a good run.
+    //
+    // Both halves need a PARSER, though. With no `stream` entry (only claude has
+    // one) or with stream_output off, line 106 below synthesises
+    // `{ text: raw, prose: true }` for every line: `prose` is then always true,
+    // `activity` never fires, and the marker check degrades to "the last
+    // non-empty line of merged stdout+stderr". Staleness is still mostly covered
+    // there — any later displayed line overwrites this one — but tool-argument
+    // immunity is not available at all, because there is no schema to tell a
+    // tool argument from prose.
     let lastLine = "";
     let lastWasProse = false;
     // undefined until a cli actually reports a figure: "nobody measured" and

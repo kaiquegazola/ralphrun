@@ -234,8 +234,82 @@ describe("runCursorSdkExecutor — happy path", () => {
     expect(seen).toEqual(["changed a.ts\nthe SDK rejects an empty model id"]);
   });
 
-  // a run that timed out or errored still said something, and what it said is
-  // precisely what the next attempt should not have to re-derive
+  // `result` is hardcoded empty on every path that did not reach wait(), so the
+  // streamed prose is the only account those exits have — and a timed-out
+  // attempt is the expensive one whose dead ends must not be re-derived.
+  it("hands over the streamed prose when a timeout leaves no result", async () => {
+    vi.useFakeTimers();
+    try {
+      const run = makeRun(
+        [
+          { type: "tool_call", status: "running", name: "Edit", args: { file_path: "auth.ts" } },
+          { type: "assistant", message: { content: [{ type: "text", text: "the auth handler was the wrong layer" }] } },
+        ],
+        FINISHED,
+        { wait: never },
+      );
+      const create = makeCreate(makeAgent(run));
+      const seen: string[] = [];
+      const p = runCursorSdkExecutor(EXECU, "p", makeCfg({ task_timeout: 1 }), "ws", "prog", TASK, undefined, { create }, undefined, (text) =>
+        seen.push(text),
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(await p).toBe(false);
+      // prose only: the tool summary is the harness narrating, and the next
+      // attempt can read the diff for what was edited
+      expect(seen).toEqual(["the auth handler was the wrong layer"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands over the streamed prose when the user skips the task", async () => {
+    const ac = new AbortController();
+    const run = makeRun([], FINISHED, {
+      wait: never,
+      stream: async function* () {
+        yield { type: "assistant", message: { content: [{ type: "text", text: "the migration needs a down step" }] } };
+        ac.abort();
+        yield { type: "assistant", message: { content: [{ type: "text", text: "never reached" }] } };
+      },
+    });
+    const create = makeCreate(makeAgent(run));
+    const seen: string[] = [];
+    const ok = await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, ac.signal, { create }, undefined, (text) =>
+      seen.push(text),
+    );
+    expect(ok).toBe(false);
+    expect(seen).toEqual(["the migration needs a down step"]);
+  });
+
+  it("keeps only the last 20 prose lines of the fallback tail", async () => {
+    const text = Array.from({ length: 25 }, (_, i) => `line ${i + 1}`).join("\n");
+    const run = makeRun([{ type: "assistant", message: { content: [{ type: "text", text }] } }], {
+      status: "finished",
+      result: "",
+    });
+    const create = makeCreate(makeAgent(run));
+    const seen: string[] = [];
+    await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, undefined, { create }, undefined, (t) => seen.push(t));
+    expect(seen[0].split("\n")).toHaveLength(20);
+    expect(seen[0].split("\n")[0]).toBe("line 6");
+  });
+
+  // the spawn path bounds this and this one did not: an agent that ends by
+  // pasting a file must not hand the retry a prompt-sized wall of it
+  it("bounds the handoff at 2000 chars, keeping the end", async () => {
+    const run = makeRun([], { status: "finished", result: "x".repeat(1990) + "THE ACTUAL POINT" });
+    const create = makeCreate(makeAgent(run));
+    const seen: string[] = [];
+    await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, undefined, { create }, undefined, (text) =>
+      seen.push(text),
+    );
+    expect(seen[0]).toHaveLength(2000);
+    expect(seen[0].endsWith("THE ACTUAL POINT")).toBe(true);
+  });
+
+  // the one non-finished shape that still carries a `result` — an SDK-reported
+  // run error. The exits that carry none are covered above.
   it("hands it over even when the run did not finish", async () => {
     const run = makeRun([], { status: "error", result: "got as far as the auth handler", error: { message: "boom" } });
     const create = makeCreate(makeAgent(run));

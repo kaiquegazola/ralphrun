@@ -102,7 +102,7 @@ describe("runTask CROSS", () => {
     const c = cfg({ advisor: { cli: "grok", model: "g" } });
     await runTask(task, prd, c, "/ws", "/prog", undefined, undefined, "task-start");
     expect(mReview).toHaveBeenCalledWith(
-      task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start", { passed: true, output: "out" },
+      task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start", { passed: true, output: "out" }, undefined,
     );
   });
 
@@ -116,7 +116,7 @@ describe("runTask CROSS", () => {
     await runTask(task, prd, c, "/ws", "/prog");
     expect(mReview).toHaveBeenCalledWith(
       task, prd, c.advisor, c, "/ws", "/prog", "STD", "base-tree",
-      { passed: false, output: "1 failing: expected 2 got 3" },
+      { passed: false, output: "1 failing: expected 2 got 3" }, undefined,
     );
   });
 
@@ -309,6 +309,40 @@ describe("runTask CROSS", () => {
     mFeedback.mockReturnValue("FEEDBACK");
     const r = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
     expect(r.handoff).toBe("second round said this");
+  });
+
+  // The review-rejection retry is the one that needs the account most: it is
+  // also handed reviewRetryFeedback, and in worktree mode the attempt it is
+  // being asked about was rolled back with its cell. This return used to be the
+  // one return in the file that dropped it, which made taskrun's
+  // `if (result.handoff)` on the retry door dead code.
+  it("returns the closing account when the reviewer never approves", async () => {
+    mExec.mockReset();
+    mExec.mockImplementation(async (...a: unknown[]) => {
+      (a[9] as (t: string) => void)?.("tried the cache layer first");
+      return true;
+    });
+    mReview.mockResolvedValue({ approved: false, changes: "not yet", diff: "D" });
+    mFeedback.mockReturnValue("FEEDBACK");
+    const r = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1 }), "/ws", "/prog");
+    expect(r.reason).toBe("review_exhausted");
+    expect(r.handoff).toBe("tried the cache layer first");
+  });
+
+  // A skip or quit kills the child, but runExecutor still returns and a failed
+  // exec always assembles feedback — so without this the loop spends every
+  // remaining round re-verifying and re-reviewing an abandoned attempt.
+  it("stops opening new review rounds once the run is aborted", async () => {
+    const ac = new AbortController();
+    mExec.mockImplementation(async () => {
+      ac.abort();
+      return false;
+    });
+    mFeedback.mockReturnValue("FEEDBACK");
+    const r = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog", ac.signal);
+    expect(r.ok).toBe(false);
+    expect(mVerify).not.toHaveBeenCalled();
+    expect(mReview).not.toHaveBeenCalled();
   });
 
   it("exhaust with approved, final exec ok and final verify passes → true", async () => {

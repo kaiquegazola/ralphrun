@@ -68,12 +68,14 @@ const GIT_READ_ONLY = ["blame", "describe", "diff", "grep", "log", "ls-files", "
 const RELEASE_VERBS = ["publish", "unpublish", "deploy", "release", "login", "logout", "adduser", "token", "version"];
 
 /**
- * Installs, on any runner. Not a workspace-local write like a build artifact:
- * every worktree in a wave SHARES one physical node_modules (worktree.ts links
- * it), so an install from a reviewer rewrites the dependency tree of the user's
- * main checkout and of every sibling task mid-run — the one mutation here that
- * survives a worktree being discarded. The cell already has the dependencies
- * linked in, so a reviewer never needs this.
+ * Installs, on any runner. Not a workspace-local write like a build artifact.
+ * worktree_per_task is OFF by default, so the reviewer usually runs in the
+ * user's own checkout and an install rewrites it outright. Even with cells, a
+ * cell's gitignored dirs are only CLONED where the filesystem can copy-on-write
+ * and are SHARED by symlink where it cannot (worktree.ts seedIgnoredDir /
+ * ignoredDirsWouldBeShared) — so the mutation can outlive the worktree being
+ * discarded. An install is also minutes of wall clock, and the cell already has
+ * its dependencies seeded, so a reviewer never needs this.
  */
 const INSTALL_VERBS = ["install", "ci", "add", "remove", "uninstall", "update", "upgrade", "sync"];
 
@@ -207,10 +209,12 @@ export function reviewExecDecision(program: string, args: string[] = []): ExecDe
   const release = verbs.find((v) => RELEASE_VERBS.includes(v));
   if (release) return deny(`${name} ${release} mutates something outside this workspace`);
   // A global install writes into a shared prefix; a LOCAL one is no safer here,
-  // because the node_modules a worktree sees is a symlink to the user's own (see
-  // INSTALL_VERBS). "i" is npm's alias and is not spelled out in the cross above.
+  // because the reviewer's cwd is usually the user's own checkout and, in a
+  // cell, node_modules is a symlink to it whenever the filesystem cannot clone
+  // (see INSTALL_VERBS). "i" is npm's alias and is not spelled out in the cross
+  // above.
   if (RUNNERS.includes(name) && (INSTALL_VERBS.includes(verb) || verb === "i"))
-    return deny(`${name} ${verb} rewrites a dependency tree every task shares`);
+    return deny(`${name} ${verb} rewrites a dependency tree outside this attempt`);
   // `run <script>` executes whatever the manifest says, which we cannot read.
   // ponytail: the script NAME is the only signal there is; a release script
   // called something else gets through. Reading package.json here would make

@@ -15,7 +15,7 @@ UI in English and Português (pt-BR).
 
 | Mode | When | How |
 |---|---|---|
-| **NATIVE** | executor **and** advisor are both `claude` | one `claude -p ... --advisor <model>`; the advisor tool runs server-side, Claude decides when to consult mid-task and reviews before declaring done. |
+| **NATIVE** | executor **and** advisor are both `claude` | one `claude -p ... --advisor <model>`; the advisor tool runs server-side, Claude decides when to consult mid-task and reviews before declaring done. No ralphrun-side review call, so no review round counters and no `## Learned during runs` notes. |
 | **CROSS** | different CLIs (e.g. `grok`/`cursor` executor + `claude` advisor) | **planner before** → executor → **review-after** loop (`APPROVE` / `CHANGES`, re-run with fixes), up to `max_review_rounds`. |
 
 Every CLI authenticates with its own subscription login — **no API keys**. The
@@ -126,6 +126,10 @@ tail -f ralph.out
 }
 ```
 
+- `task_timeout` bounds **one executor call**, not a whole task. See the note on
+  idle timeouts further down for the other two clocks — the advisor/review
+  budgets, and the fixed 600s cap on every `verify` command.
+
 - `advisor_plan_threshold` is how much task a plan has to be worth. CROSS scores
   every task on measured facts — acceptance criteria, deps, declared `scope`
   paths, description length — and calls the advisor when the score reaches this
@@ -137,9 +141,14 @@ tail -f ralph.out
 - `stream_output` turns on the executor CLI's own event stream, so the live pane
   shows tool calls and answers **as they happen**. Without it a `-p` style CLI
   buffers everything and delivers it in one chunk when the turn ends — measured
-  at 25s of total silence for a 25s task. Only applied to CLIs with a verified
-  event parser (today: `claude`); the rest ignore it. The advisor never streams,
-  because its stdout *is* its verdict.
+  at 25s of total silence for a 25s task. It applies to the **spawn** backends
+  that have a verified event parser (today: `claude`); the in-process
+  `cursorsdk` backend always streams through its own parser, and the rest ignore
+  the knob. The advisor never streams, because its stdout *is* its verdict.
+
+  It is **not only a display setting**: the cost figure rides on that same event
+  stream and on nothing else, so turning it off for `claude` also turns off the
+  only spend metering a spawn backend has — see `max_cost_usd` below.
 
 - `max_cost_usd` stops the run once the measured spend reaches that many dollars.
   `0` (the default) is no ceiling, so an existing setup keeps running exactly as
@@ -151,13 +160,18 @@ tail -f ralph.out
   Each task logs its own cost, and the run ends with the total and the cost per
   accepted change.
 
-- **The reported total is a floor, not a total.** `total_cost_usd` comes from
-  `claude` and from nothing else today, and *no* CLI meters the advisor, so part
-  of nearly every run is unmeasured: costs print as `≥$1.2345` when some of the
-  spend was never reported and `unknown` when none of it was. `max_cost_usd`
-  therefore bounds only the spend ralphrun can *see* — with an unmetered executor
-  it never fires at all. It is a backstop against a runaway loop, not a billing
-  limit; your provider's own spend cap is the only real one.
+- **The reported total is a floor, not a total.** The ceiling only counts spend
+  the executor *reports*, which today is `claude` **with the event stream on**:
+  `total_cost_usd` rides on that stream, so `stream_output: false` turns
+  `claude`'s reporting off along with its live pane, and no other backend reports
+  a USD figure at all — the in-process `cursorsdk` gets token counts from the SDK,
+  not dollars, whatever `stream_output` says. *No* CLI meters the advisor either,
+  so part of nearly every run is unmeasured: costs print as `≥$1.2345` when some
+  of the spend was never reported and `unknown` when none of it was.
+  `max_cost_usd` therefore bounds only the spend ralphrun can *see* — with an
+  unmetered executor, or a metered one with the stream off, it never fires at
+  all. It is a backstop against a runaway loop, not a billing limit; your
+  provider's own spend cap is the only real one.
 
 - `review_blocked_policy` is the approval gate for a task the reviewer refused,
   on runs with no dashboard to ask. On a TTY you get the prompt you always got —
@@ -325,7 +339,15 @@ but measurement says otherwise: a buffered CLI is silent for the entire task, an
 even a streaming one goes quiet while a tool runs — a 40s foreground command
 produced a 25.9s gap with no events at all, and that gap grows with the command.
 Any value small enough to catch a wedged run is small enough to kill a healthy
-test suite, so only `task_timeout` bounds a task.
+test suite.
+
+The clocks that *do* bound a task are wall-clock ones, and `task_timeout` is not
+the only one. It bounds **a single executor call**, not a task: in CROSS mode a
+task pays it once up front and once per fix round, so an attempt can legitimately
+run up to `max_review_rounds + 1` times that, plus its advisor and review calls
+(`advisor_timeout`, `review_timeout`). And every `verify` command is killed at a
+**fixed 600s** — not configurable, so a suite that takes longer than ten minutes
+fails its gate on every backend and in every mode.
 
 Inspect or edit interactively:
 
@@ -544,7 +566,8 @@ default-deny:
   `terraform`, `aws`, `ssh`, `curl` and every deploy tool shipped next year land
   without anyone maintaining a denylist. Plus, explicitly: `git push`/`commit`/
   `reset`/`clean`, `npm publish`, `npm version`, *any* install (`npm ci`,
-  `pnpm add`, … — every worktree in a wave shares one physical `node_modules`),
+  `pnpm add`, … — the reviewer usually runs in your own checkout, and even in a
+  cell a `node_modules` the filesystem could not clone is a symlink to it),
   inline interpreter code (`node -e`, `python3 -c`: a shell by another name), and
   any command carrying a shell metacharacter — `npm test; git push` is not the
   command it claims to be.
@@ -571,11 +594,15 @@ On a TTY the run loop mounts a fullscreen Ink dashboard: task sidebar with
 overall progress, the current task's subphase (advising → executing →
 verifying → reviewing → fixing), review round / attempt counters, gate results,
 elapsed-vs-timeout — with `[p]ause` (no confirm), `[s]kip` and `[q]uit` (both
-confirmed; skip kills the running executor and moves on). Piped/CI runs fall
+confirmed; skip kills whichever child is running — executor, `verify` command or
+reviewer — and moves on). Piped/CI runs fall
 back to plain log lines.
 
-Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
-(the durable log — English, stable format).
+Everything is also appended to `progress.md` behind a stable `- [HH:MM:SS] `
+prefix — the durable log. The lines themselves are the same strings the dashboard
+shows, so they render in the **active UI language**, which resolves from `--lang`,
+then your saved `language`, then your system locale. Run with `--lang en` if you
+need the log in English; the samples below are the `en` rendering.
 
 - **Live executor stream**: the executor CLI's output is echoed line-by-line as
   it runs (`  T1› …`), not buffered until the task ends.
@@ -601,6 +628,13 @@ Everything is also appended to `progress.md` with an `[HH:MM:SS]` timestamp
   **only the paths that task changed** — measured against a snapshot taken when
   it started — so files you already had uncommitted stay yours instead of
   landing in a commit named after a task that never touched them.
+
+  **With one fallback.** When the scoped stage itself fails — git refuses the
+  pathspec, most commonly for a file that was untracked when the task started and
+  removed by it — the loop stages everything (`git add -A`) and says so in the
+  log rather than losing the task's work. That commit *can* sweep in unrelated
+  dirty files. Committing beats dropping the work; in worktree mode the sweep is
+  confined to the cell anyway.
 - **The review gate fails closed**: a reviewer that timed out or crashed, and an
   answer that is neither `APPROVE` nor `CHANGES`, both count as *not approved*.
   Each used to pass as an approval, which let a task reach `done` with nothing
@@ -626,13 +660,19 @@ Fresh context = the executor forgets everything between tasks. All durable state
 must live in `prd.json`, especially `architecture_notes`. Anything not written
 there gets reinvented next task. Keep those notes short and load-bearing.
 
-**A run can now write there too.** When the reviewer approves a task, it may add
-one line under a `## Learned during runs` heading — but only for a fact a later
-task would waste an agent run without: a constraint you can only learn by hitting
-it, an approach that cannot work here and why. It is gated hard against the
-obvious failure, which is a reviewer that narrates. What the task did, where code
-lives, which library is used, that the tests pass — none of those are notes, and
-writing nothing is the correct and usual answer.
+**A run can now write there too — in CROSS mode.** When the reviewer approves a
+task, it may add one line under a `## Learned during runs` heading — but only for
+a fact a later task would waste an agent run without: a constraint you can only
+learn by hitting it, an approach that cannot work here and why. It is gated hard
+against the obvious failure, which is a reviewer that narrates. What the task
+did, where code lives, which library is used, that the tests pass — none of those
+are notes, and writing nothing is the correct and usual answer.
+
+It rides on the review call the task already makes, so it costs no extra model
+call — which is also why **NATIVE mode never writes one**. There the advisor runs
+server-side inside the single `claude` process and ralphrun has no review call of
+its own to carry the note back on; buying one would be the extra call the design
+refuses.
 
 The section is **capped**. Past the cap the run stops appending and says so,
 rather than dropping the oldest line — you may have promoted that one there
@@ -747,7 +787,11 @@ src/
   run.ts        # NATIVE vs CROSS per task
   startrun.ts   # everything true BEFORE the first task: config, intake, menu,
                 #   preflight, workspace lock, dashboard mount
-  loop.ts       # the loop itself: waves, worktrees, gates, retry, commit
+  loop.ts       # the outer loop: budget ceiling between waves, wave dispatch,
+                #   dry-run, stalled/manual-retry, config-menu remount
+  taskrun.ts    # one task cell end to end: worktree, scope gate, retry ladder,
+                #   review-blocked gate, scoped commit — plus pickWave and the
+                #   wave integration gate
   wizard.ts     # ralphrun init glue (non-TTY fallback + finalize writes)
   configcmd.ts  # ralphrun config show/edit (+ --global show/reset)
   picker.ts     # fuzzy file search ('@' picker) + attachment reader

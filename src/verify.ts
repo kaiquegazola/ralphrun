@@ -21,10 +21,15 @@ const MAX_OUTPUT_CHARS = 200_000;
  * running — and on POSIX those children also hold the pipes, so nothing was
  * cleaned up. killTree takes the whole group, exactly like the executor.
  */
-export function runVerify(task: Task, workspace: string, progress: string): Promise<{ passed: boolean; output: string }> {
+export function runVerify(
+  task: Task,
+  workspace: string,
+  progress: string,
+  signal?: AbortSignal,
+): Promise<{ passed: boolean; output: string }> {
   const cmd = task.verify;
   if (!cmd) return Promise.resolve({ passed: true, output: "" });
-  return runVerifyCommand(cmd, task.id, workspace, progress);
+  return runVerifyCommand(cmd, task.id, workspace, progress, signal);
 }
 
 /**
@@ -35,14 +40,22 @@ export function runVerify(task: Task, workspace: string, progress: string): Prom
  * that result to — each cell verified against the trunk it was CUT from, and
  * what is being judged is the combination — so `label` is what the log lines
  * name in place of a task id.
+ *
+ * `signal` is the TUI's skip/quit control. It has to reach this gate and not
+ * only the executor: a verify command runs for up to VERIFY_TIMEOUT_MS, so a
+ * control that kills the executor and then waits ten minutes for a suite the
+ * user already abandoned is not the "takes effect now" it promises.
  */
 export function runVerifyCommand(
   cmd: string,
   label: string,
   workspace: string,
   progress: string,
+  signal?: AbortSignal,
 ): Promise<{ passed: boolean; output: string }> {
   return new Promise((resolve) => {
+    // never start one after the abort: the caller is already unwinding
+    if (signal?.aborted) return resolve({ passed: false, output: "" });
     let proc;
     try {
       proc = spawn(cmd, [], { cwd: workspace, shell: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -67,6 +80,7 @@ export function runVerifyCommand(
       settled = true;
       clearTimeout(timer);
       clearTimeout(grace);
+      signal?.removeEventListener("abort", onAbort);
       const tail = out.slice(-4000);
       if (timedOut) log(progress, t("verify.timeout", { id: label, s: VERIFY_TIMEOUT_MS / 1000 }));
       else if (status !== 0) log(progress, t("verify.failed", { id: label, status: String(status) }) + `\n${tail.slice(-1500)}`);
@@ -80,6 +94,15 @@ export function runVerifyCommand(
       grace.unref?.();
     }, VERIFY_TIMEOUT_MS);
 
+    // Same shape as the timeout above minus the grace window: the run is being
+    // abandoned, so there is no verdict left to wait for. It settles as a
+    // failure, which is what an unfinished gate is.
+    const onAbort = (): void => {
+      killTree(proc);
+      finish(null);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
     proc.on("close", (code) => finish(code));
     proc.on("error", (err) => {
       // the settled check comes FIRST: a stream error arriving after the command
@@ -88,6 +111,7 @@ export function runVerifyCommand(
       settled = true;
       clearTimeout(timer);
       clearTimeout(grace);
+      signal?.removeEventListener("abort", onAbort);
       log(progress, t("verify.crashed", { id: label, msg: err.message }));
       resolve({ passed: false, output: String(err) });
     });

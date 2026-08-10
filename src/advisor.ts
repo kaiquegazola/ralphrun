@@ -47,10 +47,13 @@ function runAdvisorCli(
   workspace: string,
   taskId: string,
   source: "advisor" | "review",
+  signal?: AbortSignal,
 ): Promise<string | null> {
   // An in-process backend has no command line, and its RunResult IS the stdout
-  // the spawn path below accumulates — same contract, same return type.
-  if (agentDef(advis.cli)?.sdk) return runCursorSdkText(advis, prompt, cfg, workspace, taskId, source);
+  // the spawn path below accumulates — same contract, same return type. The
+  // signal goes with it: a control honoured on the spawn reviewer and not on the
+  // sdk one is the same one-backend wiring the handoff already got wrong once.
+  if (agentDef(advis.cli)?.sdk) return runCursorSdkText(advis, prompt, cfg, workspace, taskId, source, undefined, signal);
   // autoApprove stays FALSE on both calls — the advisor must not be able to write.
   // The review additionally asks for the cli's read-only tools: the diff it judges
   // is cut at 12k chars and can be empty, and a reviewer with no way to open a file
@@ -63,6 +66,8 @@ function runAdvisorCli(
   // read-only review still dies when it always did.
   const timeoutSecs = exec ? (cfg.review_timeout ?? cfg.advisor_timeout) : cfg.advisor_timeout;
   return new Promise((resolve) => {
+    // never start one after the abort: the caller is already unwinding
+    if (signal?.aborted) return resolve(null);
     try {
       const viaStdin = promptViaStdin(advis.cli);
       const proc = spawn(cmd[0], cmd.slice(1), {
@@ -91,10 +96,25 @@ function runAdvisorCli(
         settled = true;
         clearTimeout(timeout);
         clearTimeout(grace);
+        signal?.removeEventListener("abort", onAbort);
         outRl.close();
         errRl.close();
         resolve(v);
       };
+
+      // The skip/quit key, on the phase that owns the longest budget in the
+      // product (review_timeout, 900s with an executing reviewer). Same kill as
+      // the timeout below, minus the grace window: nobody is waiting for the
+      // verdict any more, and "no verdict" already means not approved.
+      const onAbort = (): void => {
+        killTree(proc);
+        outRl.close();
+        errRl.close();
+        proc.stdout?.destroy();
+        proc.stderr?.destroy();
+        finish(null);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       const timeout = setTimeout(() => {
         killTree(proc);
@@ -123,9 +143,10 @@ export async function getAdvice(
   workspace: string,
   progress: string,
   standards: string,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const prompt = advisorPrompt(task, prd, standards);
-  const advice = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "advisor");
+  const advice = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "advisor", signal);
   if (advice === null) {
     log(progress, t("advisor.failed", { id: task.id }));
     return null;
@@ -145,6 +166,7 @@ export async function advisorReview(
   standards: string,
   reviewBase?: string | null,
   verification?: VerificationEvidence,
+  signal?: AbortSignal,
 ): Promise<AdvisorReviewResult> {
   // The reviewer is a GATE, so "no verdict" is not a verdict. Each branch below
   // used to return approved:true, which is how a task reached `done` with
@@ -160,7 +182,7 @@ export async function advisorReview(
   // expensive has to say so in the durable log, not only in the config file.
   if (runs) log(progress, t("advisor.reviewExec", { id: task.id, s: cfg.review_timeout ?? cfg.advisor_timeout }));
   const prompt = reviewPrompt(task, prd, standards, diff, verification, runs);
-  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review");
+  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal);
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the
     // executor nothing to fix, so the fix loop breaks out (run.ts) and the task

@@ -109,7 +109,7 @@ export async function runTask(
         // stream, because its stdout IS its answer. Marking the tally unknown is
         // what keeps the reported total honest as a floor instead of a total.
         addCost(cost, undefined);
-        const newAdvice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards);
+        const newAdvice = await getAdvice(task, prd, advis, cfg, workspace, progress, standards, signal);
         if (newAdvice) {
           activeAdvice = newAdvice;
           task.plan = newAdvice;
@@ -136,8 +136,14 @@ export async function runTask(
   const maxStalledRounds = Math.max(0, cfg.max_stalled_review_rounds ?? 2);
 
   for (let rnd = 1; rnd <= cfg.max_review_rounds; rnd++) {
+    // A skip or quit kills the child, but runExecutor still RETURNS — and a
+    // failed exec always assembles feedback, so the loop would otherwise spend
+    // every remaining round re-verifying and re-reviewing an attempt the user
+    // already abandoned. The phases below are individually interruptible too;
+    // this is what stops the next round from starting at all.
+    if (signal?.aborted) break;
     emit({ taskId: task.id, subphase: "verifying", round: { n: rnd, max: cfg.max_review_rounds } });
-    const { passed: testOk, output: testOut } = await runVerify(task, workspace, progress);
+    const { passed: testOk, output: testOut } = await runVerify(task, workspace, progress, signal);
     lastVerificationPassed = testOk;
     emit({ taskId: task.id, subphase: "reviewing" });
     // The verify verdict goes WITH the diff: these two gates judge the same
@@ -147,10 +153,18 @@ export async function runTask(
     if (reviewOn && advis) addCost(cost, undefined); // unmetered, same as the planner above
     const { approved, changes, diff = "", note } =
       reviewOn && advis
-        ? await advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase, {
-            passed: testOk,
-            output: testOut,
-          })
+        ? await advisorReview(
+            task,
+            prd,
+            advis,
+            cfg,
+            workspace,
+            progress,
+            standards,
+            taskReviewBase,
+            { passed: testOk, output: testOut },
+            signal,
+          )
         : { approved: true, changes: "", diff: "" };
     lastApproved = approved;
     if (changes.trim()) lastReviewChanges = changes;
@@ -199,6 +213,11 @@ export async function runTask(
       // passing one, and a task no gate ever judged would reach done.
       verificationPassed: !!task.verify && lastVerificationPassed,
       cost,
+      // The review-refused retry is the one that needs this MOST: it is handed
+      // the reviewer's complaint but, without the account, none of what the
+      // rejected attempt already tried — and in worktree mode that attempt was
+      // rolled back, so the workspace cannot tell it either.
+      handoff: lastHandoff,
     };
   }
   const passed = ok && (await runVerify(task, workspace, progress)).passed;

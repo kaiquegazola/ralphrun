@@ -140,6 +140,50 @@ describe("runVerify", () => {
     }
   });
 
+  // The skip/quit key aborts the executor child; it has to reach this gate too,
+  // or the "takes effect now" control leaves the user watching a suite they
+  // already abandoned run to its 600s cap.
+  it("kills the command and fails the gate when the run is aborted", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const ac = new AbortController();
+    const p = runVerify(task(), "/w", "prog", ac.signal);
+    ac.abort();
+    expect(killTreeMock).toHaveBeenCalledWith(proc);
+    expect(await p).toMatchObject({ passed: false });
+  });
+
+  it("never spawns a verify command once the run is already aborted", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    expect(await runVerify(task(), "/w", "prog", ac.signal)).toEqual({ passed: false, output: "" });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  // the listener has to come off on the ordinary paths too — run.ts calls this
+  // once per fix round with the same per-task signal
+  it("drops its abort listener once the command settles", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const ac = new AbortController();
+    const p = runVerify(task(), "/w", "prog", ac.signal);
+    proc.emit("close", 0);
+    expect(await p).toMatchObject({ passed: true });
+    ac.abort(); // too late: nothing left to kill
+    expect(killTreeMock).not.toHaveBeenCalled();
+  });
+
+  it("drops its abort listener when the command errors out", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const ac = new AbortController();
+    const p = runVerify(task(), "/w", "prog", ac.signal);
+    proc.emit("error", new Error("ENOENT"));
+    expect(await p).toMatchObject({ passed: false });
+    ac.abort();
+    expect(killTreeMock).not.toHaveBeenCalled();
+  });
+
   it("fails and logs when the command cannot be spawned", async () => {
     const proc = makeProc();
     spawnMock.mockReturnValue(proc);

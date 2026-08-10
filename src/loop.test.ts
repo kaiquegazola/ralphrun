@@ -897,8 +897,11 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mRunTask.mock.calls[1]?.[9]).toBe("the webhook is unreachable from CI");
   });
 
-  // the TUI retry is a second door to the same retry, and it must carry the
-  // account too or a user-driven retry starts blinder than an automatic one
+  // The TUI retry is a second door to the same retry, and it must carry the
+  // account too or a user-driven retry starts blinder than an automatic one.
+  // The reason is one run.ts can actually return: this used to be pinned on
+  // `review_changes`, a shape no producer emits, so it stayed green while the
+  // real review-refused path handed over nothing.
   it("hands the account over on a user-chosen review retry as well", async () => {
     fastTimers();
     setTTY(true);
@@ -908,7 +911,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mRunTask
       .mockResolvedValueOnce({
         ok: false,
-        reason: "review_changes",
+        reason: "review_exhausted",
         verificationPassed: true,
         cost: NO_COST,
         handoff: "tried the cache layer first",
@@ -1960,5 +1963,22 @@ describe("runLoop parallel waves", () => {
 
     expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
     expect(read().A.status).toBe("done");
+  });
+
+  // The gate's only input is the start-of-task baseline, and that used to be
+  // captured for review or commit_per_task alone — so a run with both off had
+  // scopes documented as enforced and never checked at all.
+  it("gates scope with no reviewer and no per-task commit", async () => {
+    mLoadConfig.mockReturnValue(cfg({ commit_per_task: false, review_after: false, advisor: null }));
+    const read = livePrd([wtTask("A", ["src/api/**"])]);
+    dispatchOnce();
+    // as git.ts really answers: no baseline, no footprint
+    mTaskChangedPaths.mockImplementation(((_ws: string, base?: string | null) =>
+      base ? ["src/api/h.ts", "src/i18n.ts"] : null) as never);
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
+    expect(read().A.status).not.toBe("done");
   });
 });

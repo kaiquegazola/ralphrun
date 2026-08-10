@@ -113,8 +113,48 @@ describe("getAdvice", () => {
   it("routes an sdk advisor to the SDK runner instead of spawning", async () => {
     const sdk: AgentSpec = { cli: "cursorsdk", model: "composer-2" };
     expect(await getAdvice(task, prd, sdk, cfg, "ws", "prog", "std")).toBe("ADVICE");
-    expect(runCursorSdkText).toHaveBeenCalledWith(sdk, "ap", cfg, "ws", "T1", "advisor");
+    expect(runCursorSdkText).toHaveBeenCalledWith(sdk, "ap", cfg, "ws", "T1", "advisor", undefined, undefined);
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  // Same control, same wiring, both backends — the handoff already shipped once
+  // wired on a single backend, and a skip that only interrupts the spawn advisor
+  // is that bug again.
+  it("hands the abort signal to the sdk advisor too", async () => {
+    const sdk: AgentSpec = { cli: "cursorsdk", model: "composer-2" };
+    const ac = new AbortController();
+    await getAdvice(task, prd, sdk, cfg, "ws", "prog", "std", ac.signal);
+    expect(runCursorSdkText).toHaveBeenCalledWith(sdk, "ap", cfg, "ws", "T1", "advisor", undefined, ac.signal);
+  });
+
+  // The advisor and review calls own the longest budgets in the product
+  // (advisor_timeout, and review_timeout with an executing reviewer). A skip
+  // that only kills the executor leaves the user waiting them out.
+  it("kills the advisor child and answers null when the run is aborted", async () => {
+    const ac = new AbortController();
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std", ac.signal);
+    ac.abort();
+    expect(killTreeMock).toHaveBeenCalled();
+    expect(await p).toBeNull();
+  });
+
+  it("never spawns an advisor once the run is already aborted", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    expect(await getAdvice(task, prd, advis, cfg, "ws", "prog", "std", ac.signal)).toBeNull();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  // one signal serves every call of a task, so a listener left behind piles up
+  // one per fix round
+  it("drops its abort listener once the advisor settles", async () => {
+    const ac = new AbortController();
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std", ac.signal);
+    mockChild.stdout.end("advice\n");
+    finishSpawn(0);
+    expect(await p).toBe("advice");
+    ac.abort();
+    expect(killTreeMock).not.toHaveBeenCalled();
   });
 });
 

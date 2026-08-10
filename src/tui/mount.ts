@@ -58,8 +58,12 @@ export function mount(
       const wasPaused = state.paused;
       state = reducer(state, a);
       if (state.paused !== wasPaused) onPausedChange?.(state.paused);
-      // side-effect: a confirmed skip OR quit aborts the running tasks' executor
-      // children so the control takes effect now, not after the task finishes.
+      // Side-effect: a confirmed skip OR quit aborts the running tasks' signal,
+      // so the control takes effect now rather than after the task finishes.
+      // Every phase that spawns a child honours it — the executor, the verify
+      // command and the advisor/review call — and run.ts stops opening further
+      // review rounds. Anything less would leave the control waiting out a 600s
+      // verify or a 900s review it had already killed the executor for.
       // Deliberately coarse: it kills the WHOLE wave, because the dashboard has
       // no per-task selection to aim a skip at.
       if (state.skipRequested || state.quit) for (const ac of acs.values()) ac.abort();

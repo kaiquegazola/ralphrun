@@ -57,15 +57,21 @@ export function normalizePrd(obj: unknown, opts?: NormalizePrdOptions): boolean 
 }
 
 /**
- * EVERY dependency cycle in the graph, each as the path that closes it
- * (T1→T2→T1). Iterative colours would be cheaper to reason about, but a backlog
- * is tens of tasks deep, so recursion is fine and the path falls out of the
- * stack.
+ * One cycle per BACK EDGE — the path that closes at each edge pointing back into
+ * the current stack — not every simple cycle. Enumerating those is Johnson's,
+ * exponential, and not worth it for a validator that already fails closed on the
+ * first cycle it reports.
  *
- * Reporting one at a time turns untangling a knotted backlog into a round trip
- * per cycle: fix the reported one, re-run, discover the next. The walk still
- * stops descending into a node it has already closed, so each cycle is reported
- * once and a diamond (A→B, A→C, B/C→D) is not mistaken for one.
+ * That still avoids the round trip this exists to avoid, because every cycle
+ * contains a back edge and every back edge is reported: cut the LAST arrow of
+ * every reported path and the backlog is acyclic in ONE pass. Cut a different
+ * arrow of a reported path instead (A→B rather than B→A in A→B→A, with C→B also
+ * present) and the leftover loop only surfaces on the next run.
+ *
+ * Iterative colours would be cheaper to reason about, but a backlog is tens of
+ * tasks deep, so recursion is fine and the path falls out of the stack. The walk
+ * stops descending into a node it has already closed, so a diamond (A→B, A→C,
+ * B/C→D) is not mistaken for a cycle.
  */
 function findDepCycles(edges: Map<string, string[]>): string[][] {
   const state = new Map<string, "open" | "closed">();
@@ -128,7 +134,7 @@ function patternsOverlap(a: string, b: string): boolean {
 /**
  * Paths a task actually touched that its declared `scope` does not cover.
  *
- * This is a GATE (see loop.ts): a task that edits outside its declared scope
+ * This is a GATE (see taskrun.ts): a task that edits outside its declared scope
  * invalidated the proof its wave was scheduled on, so the merge is no longer
  * known to be safe and the task fails.
  *

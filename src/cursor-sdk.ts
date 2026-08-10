@@ -17,7 +17,15 @@ import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
-import { assistantEvent, reportedCostUsd, toolSummary, type CostSink, type StreamEvent } from "./stream.js";
+import {
+  assistantEvent,
+  MAX_TAIL_CHARS,
+  MAX_TAIL_LINES,
+  reportedCostUsd,
+  toolSummary,
+  type CostSink,
+  type StreamEvent,
+} from "./stream.js";
 import { emit } from "./tui/events.js";
 
 // Structural mirrors of @cursor/sdk, covering ONLY the fields this module
@@ -443,6 +451,14 @@ export async function runCursorSdkExecutor(
   let lastWasProse = false;
   // see executor.ts: undefined stays undefined until a cli reports a figure
   let costUsd: number | undefined;
+  // The fallback handoff, for every exit where the SDK hands back no
+  // RunResult.result — which is EVERY path but a run that reached wait(): a
+  // timeout, a TUI skip, a hung create()/send() the deadline abandoned. Those
+  // are the expensive attempts, so their findings are exactly the ones the next
+  // attempt must not re-derive. Prose only, and bounded, for executor.ts's
+  // reasons: a tool summary is the harness narrating, and an agent that ends by
+  // pasting a file must not hand the retry a prompt-sized wall of it.
+  const proseTail: string[] = [];
 
   // there is no command line to append them to, and silently dropping a knob the
   // user set is worse than one line saying so
@@ -481,6 +497,10 @@ export async function runCursorSdkExecutor(
           if (line.trim()) {
             lastLine = line.trim();
             lastWasProse = ev.prose === true;
+            if (ev.prose) {
+              proseTail.push(line.trim());
+              if (proseTail.length > MAX_TAIL_LINES) proseTail.shift();
+            }
           }
           emit({ taskId: task.id, line, lineSource: "executor" });
           // already emitted to the TUI above; keep it in progress.md without
@@ -494,7 +514,12 @@ export async function runCursorSdkExecutor(
     // BEFORE the status branches, so it reports on every exit path exactly as
     // the spawn path does: a run that timed out or errored still said something,
     // and what it said is precisely what the next attempt should not re-derive.
-    if (out.result.trim()) onFinal?.(out.result.trim());
+    // `result` is hardcoded empty on every path that did not reach wait(), which
+    // is why the streamed prose is kept — same rule as executor.ts's proseTail,
+    // same 2000-char bound on both. Still nothing to hand over when the agent
+    // never spoke (a bad model spec, a missing key, a pre-flight abort).
+    const handoff = (out.result.trim() || proseTail.join("\n")).slice(-MAX_TAIL_CHARS).trim();
+    if (handoff) onFinal?.(handoff);
     // Divergence from the spawn path on purpose: executor.ts logs exec.skipped
     // only from its abort listener and stays silent when the signal was already
     // aborted. There is one code path here, and the asymmetry bought nothing.
@@ -542,12 +567,15 @@ export async function runCursorSdkText(
   taskId: string,
   source: "advisor" | "review",
   seams?: CursorSdkSeams,
+  /** the TUI skip/quit control — runCursorSdk cancels the in-flight run on it */
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const out = await runCursorSdk({
     model: advis.model,
     prompt,
     cwd: workspace,
     timeoutSecs: cfg.advisor_timeout,
+    signal,
     // chat-only posture, matching buildCmd(..., autoApprove: false) on the CLI path
     mode: "plan",
     onEvent: (ev) => {

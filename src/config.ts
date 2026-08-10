@@ -35,7 +35,12 @@ export interface Config {
    */
   advisor_plan_threshold?: number;
   heartbeat_secs: number;
-  /** false = do not turn on the cli event stream (plain buffered output) */
+  /**
+   * false = do not turn on the cli event stream (plain buffered output). Only
+   * the SPAWN backends with a parser read this — the in-process cursorsdk one
+   * always streams, through its own. NOT only a display knob: max_cost_usd is
+   * metered off the same stream, so turning it off unmeters claude too.
+   */
   stream_output?: boolean;
   commit_per_task: boolean;
   commit_message_template: string;
@@ -43,9 +48,11 @@ export interface Config {
   /**
    * Stop the run once the measured spend reaches this many USD. 0 (the default)
    * or absent = no ceiling, so every existing setup keeps running exactly as it
-   * did. Only spend that a cli actually REPORTED counts — claude does, nothing
-   * else does yet — so this is a ceiling on what we can see, never on what an
-   * unmetered agent can bill. See README.
+   * did. Only spend that a cli actually REPORTED counts, which today is claude
+   * WITH stream_output on — the figure rides on the event stream and nowhere
+   * else, so turning the stream off unmeters the one metered spawn backend. No
+   * other cli reports USD at all. This is a ceiling on what we can see, never on
+   * what an unmetered agent can bill. See README.
    */
   max_cost_usd?: number;
   /**

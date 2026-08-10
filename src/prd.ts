@@ -10,11 +10,14 @@ export interface Task {
   retries: number;
   description: string;
   acceptance: string[];
-  // paths or globs this task is allowed to edit. Declared, not enforced yet: it
-  // exists so (a) the plan compiler can refuse overlapping editor scopes between
-  // tasks with no dependency edge between them, and (b) the reviewer gets a
-  // verifiable contract — taskChangedPaths outside scope is an objective
-  // violation instead of an LLM judgement call.
+  // paths or globs this task is allowed to edit. ENFORCED: taskrun.ts fails an
+  // otherwise-passing task that edited outside it, before the work lands, and
+  // feeds the escaped paths into its next attempt. It also exists so (a) the
+  // plan compiler can refuse overlapping editor scopes between tasks with no
+  // dependency edge between them, and (b) the reviewer gets a verifiable
+  // contract — taskChangedPaths outside scope is an objective violation instead
+  // of an LLM judgement call. An empty scope declares nothing and so gates
+  // nothing (nor does a workspace with no git baseline to diff against).
   scope?: string[];
   verify?: string;
   plan?: string;

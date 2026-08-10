@@ -231,7 +231,9 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     emit({ taskId: task.id, title: task.title, status: "doing" });
 
     // per-task AbortController from the mount handle: the TUI skip control aborts
-    // this signal → runExecutor SIGKILLs the child. No TUI → no cancellation.
+    // this signal → whichever child is live (executor, verify command, advisor or
+    // reviewer) is SIGKILLed and run.ts stops opening review rounds. No TUI → no
+    // cancellation.
     const signal = ctx.tui ? ctx.tui.control.beginTask() : undefined;
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
@@ -242,7 +244,13 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
 
     let taskReviewBase: string | null | undefined;
     const reviewOn = ctx.cfg.review_after && !!ctx.cfg.advisor;
-    if (reviewOn || ctx.cfg.commit_per_task) {
+    // A declared `scope` is a THIRD, independent reason to need the baseline:
+    // the gate below measures the task's footprint against it, and with no
+    // baseline taskChangedPaths answers null, which the gate reads as "nothing
+    // moved" and passes every escape. Without this clause a run with
+    // commit_per_task off and review off has scopes that are documented as
+    // enforced and are not checked at all.
+    if (reviewOn || ctx.cfg.commit_per_task || (task.scope?.length ?? 0) > 0) {
       if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(taskWorkspace));
     }
     if (reviewOn) taskReviewBase = taskBaselines.get(task.id);

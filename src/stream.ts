@@ -80,6 +80,13 @@ export interface CostTally {
  */
 export type CostSink = (usd: number | undefined) => void;
 
+// How much of a cli's closing output is worth handing the next attempt. Lives
+// HERE, not in executor.ts, because both executor backends need the same bound
+// and executor.ts already imports cursor-sdk.ts — importing back would be a
+// cycle, and a second copy of the numbers is how the two paths drift apart.
+export const MAX_TAIL_LINES = 20;
+export const MAX_TAIL_CHARS = 2_000;
+
 /** one cli call's outcome; `undefined` means that call reported no cost */
 export function addCost(tally: CostTally, usd: number | undefined): void {
   if (usd === undefined) tally.unknown = true;

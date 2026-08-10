@@ -525,6 +525,38 @@ describe("streaming mode", () => {
     expect(seen).toEqual([]);
   });
 
+  // executor.ts used the final message for its last LINE only, to check the
+  // blocked marker, and discarded the rest. The rest is the handoff.
+  it("hands over the WHOLE final message, not just its last line", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(
+      execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task, [], undefined, undefined, undefined, undefined,
+      (text) => seen.push(text),
+    );
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "changed src/a.ts\nwebhook is unreachable from CI" }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    expect(seen).toEqual(["changed src/a.ts\nwebhook is unreachable from CI"]);
+  });
+
+  it("hands over nothing when the run said nothing final", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(
+      execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task, [], undefined, undefined, undefined, undefined,
+      (text) => seen.push(text),
+    );
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "   " }));
+    await tick();
+    closeProc(proc, 0);
+    await p;
+    expect(seen).toEqual([]);
+  });
+
   it("keeps the run alive on an oversized line instead of parsing megabytes", async () => {
     const proc = makeProc();
     spawnMock.mockReturnValue(proc);

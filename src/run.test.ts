@@ -8,6 +8,7 @@ vi.mock("./prompts.js", () => ({
   advisorPrompt: vi.fn(() => "ADVISOR_PROMPT"),
   buildPrompt: vi.fn(() => "PROMPT"),
   injectAdvice: vi.fn(() => "PROMPT+ADVICE"),
+  injectHandoff: vi.fn((p: string) => p),
   readStandards: vi.fn(() => "STD"),
 }));
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
@@ -77,7 +78,8 @@ describe("runTask NATIVE", () => {
     const result = await runTask(task, prd, c, "/ws", "/prog");
     expect(result.ok).toBe(true);
     expect(mExec).toHaveBeenCalledWith(
-      c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined, expect.any(Function),
+      c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined,
+      expect.any(Function), expect.any(Function), undefined, expect.any(Function),
     );
   });
 
@@ -181,7 +183,7 @@ describe("runTask CROSS", () => {
   it("injects reviewer feedback into a human-requested retry prompt", async () => {
     const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
     expect(result.ok).toBe(true);
-    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function), expect.any(Function));
+    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function), expect.any(Function), undefined, expect.any(Function));
   });
 
   it("reuses plan if task.plan is already set", async () => {
@@ -328,6 +330,22 @@ describe("runTask CROSS", () => {
 
     // a cli that never reported one cannot be resumed, and inventing a flag for
     // it would fail the round outright
+    it("returns the executor's closing account, from the LAST round", async () => {
+      mExec.mockReset();
+      mExec.mockImplementationOnce(async (...a: unknown[]) => {
+        (a[11] as (t: string) => void)?.("first round said this");
+        return false;
+      });
+      mExec.mockImplementationOnce(async (...a: unknown[]) => {
+        (a[11] as (t: string) => void)?.("second round said this");
+        return true;
+      });
+      mFeedback.mockReturnValue("FEEDBACK");
+      const r = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
+      // the next attempt wants the most recent account, not the first
+      expect(r.handoff).toBe("second round said this");
+    });
+
     it("sends the whole prompt again when the cli reported no session", async () => {
       mExec.mockReset();
       mExec.mockResolvedValueOnce(false).mockResolvedValue(true);

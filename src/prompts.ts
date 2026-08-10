@@ -72,6 +72,12 @@ Rules:
   looks generated; and git history — no reset, rebase, amend, revert,
   force-push, and no \`git clean\` (it deletes ignored files, which is where
   local credentials and dev data live).
+- Close your final message with two or three lines: what you changed, and
+  anything you learned that the diff does not show — a constraint you hit, an
+  approach you tried that did not work, a fact about this environment. If this
+  attempt fails, the NEXT one is handed those lines, so they are the difference
+  between it continuing and it starting the same investigation over. Keep them
+  short and factual; skip praise and skip restating the task.
 - If the only way forward is off limits, do NOT ask and do NOT pretend the task
   is done. End your turn with a final line of exactly this shape:
   ${BLOCKED_MARKER} <one line saying what is blocked and why>
@@ -209,6 +215,26 @@ Run what the verify command does NOT cover: the acceptance scenario end to end, 
 the edge case, the input nothing asserts on. A green suite and a broken feature coexist easily,
 and that gap is the only reason you are allowed to run anything at all. Report what you actually
 observed, not what you expect the code to do.`;
+}
+
+/**
+ * Hand the previous attempt's closing words to this one.
+ *
+ * A retry starts a brand-new session in a workspace whose previous attempt may
+ * have been rolled back, so without this it re-derives the dead ends the last
+ * one already paid for. Framed as a REPORT, not as instructions: it is one
+ * agent's account of a run that failed, so it can be wrong, and a retry that
+ * treats it as fact inherits the mistake that caused the failure.
+ */
+export function injectHandoff(prompt: string, handoff?: string): string {
+  const trimmed = handoff?.trim();
+  if (!trimmed) return prompt;
+  return `${prompt}
+
+## What the previous attempt reported
+This is that attempt's own account of what it did and found. Treat it as a lead, not as fact — it describes a run that did NOT succeed, so anything in it may be exactly what went wrong. Verify against the workspace before relying on it, and do not repeat an approach it reports as a dead end.
+
+${trimmed}`;
 }
 
 export function reviewPrompt(

@@ -69,6 +69,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     elapsedTracker,
     trackers,
     pendingReviewFeedback: new Map(),
+    pendingHandoff: new Map(),
     // The worktree as it stood when each task STARTED. Two consumers: the review
     // diffs against it, and the commit stages only what moved since it. Keyed by
     // task so a retry still measures from the task own start, not the retry own.

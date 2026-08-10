@@ -43,6 +43,13 @@ export function runExecutor(
   onSession?: (sessionId: string) => void,
   /** continue THIS conversation instead of starting one (see run.ts) */
   resumeSession?: string,
+  /**
+   * The agent's whole final message. The next attempt gets it as a handoff, so
+   * it does not re-derive what this one already found — see run.ts. Only the
+   * last LINE of it is used for the blocked-marker check; the rest was being
+   * thrown away.
+   */
+  onFinal?: (text: string) => void,
 ): Promise<boolean> {
   // in-process backend: it owns its own heartbeat and marker classification,
   // because there is no child process to attach readline to
@@ -78,6 +85,7 @@ export function runExecutor(
     // "measured zero" must not collapse into the same number
     let costUsd: number | undefined;
     let sessionId: string | undefined;
+    let finalText: string | undefined;
 
     const viaStdin = promptViaStdin(execu.cli);
     const proc = spawn(cmd[0], cmd.slice(1), {
@@ -111,6 +119,7 @@ export function runExecutor(
       // `result`) hands it over here even though it is never displayed, so a
       // blocked marker that appears ONLY there is still heard.
       if (ev.final !== undefined) {
+        finalText = ev.final;
         const tail = ev.final.split("\n").filter((l) => l.trim()).pop();
         if (tail) {
           lastLine = tail.trim();
@@ -166,6 +175,7 @@ export function runExecutor(
       // path — including the timeout and abort ones, which were still billed
       onCost?.(costUsd);
       if (sessionId) onSession?.(sessionId);
+      if (finalText?.trim()) onFinal?.(finalText.trim());
       resolve(v);
     };
     // kill the whole tree, then settle on 'close' — or on the grace timer if a

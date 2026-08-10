@@ -147,6 +147,18 @@ tail -f ralph.out
   restates the task loses context a full prompt would have carried if the CLI's
   session expired mid-task.
 
+- **Every attempt hands off to the next one.** The executor is asked to close
+  with what it changed and what it learned that the diff does not show — a
+  constraint it hit, an approach that did not work. Those lines are handed to the
+  next attempt of the same task, so a retry continues an investigation instead of
+  restarting it. It costs nothing extra: that final message was already being
+  received and discarded except for its last line.
+
+  It is framed to the retry as a **lead, not a fact** — it describes an attempt
+  that failed, so anything in it may be exactly what went wrong. This works on
+  every CLI, needs no configuration, and unlike `reuse_conversation` it survives
+  a retry, where the session is gone and the worktree was discarded.
+
 - `stream_output` turns on the executor CLI's own event stream, so the live pane
   shows tool calls and answers **as they happen**. Without it a `-p` style CLI
   buffers everything and delivers it in one chunk when the turn ends — measured

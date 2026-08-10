@@ -7,6 +7,7 @@ import {
   buildPrompt,
   advisorPrompt,
   injectAdvice,
+  injectHandoff,
   reviewPrompt,
   parseReview,
 } from "./prompts.js";
@@ -98,6 +99,14 @@ describe("buildPrompt", () => {
   // the loop commits the task's own files under the project's convention; an
   // executor that commits itself splits one task across several commits and
   // leaves them behind even when the task ends up blocked
+  // the next attempt is handed these lines; without them it re-derives the dead
+  // ends this one already paid for
+  it("asks the executor to close with what it changed and what it learned", () => {
+    const out = buildPrompt(task, prd).replace(/\s+/g, " ");
+    expect(out).toContain("what you changed");
+    expect(out).toContain("anything you learned that the diff does not show");
+  });
+
   it("tells the executor to leave committing to the loop", () => {
     const p = buildPrompt(task, prd);
     expect(p).toContain("Do NOT run `git add` or `git commit`");
@@ -302,5 +311,30 @@ describe("parseReview", () => {
   });
   it("no APPROVE / no CHANGES -> NOT approved, with nothing to hand the executor", () => {
     expect(parseReview("looks fine to me")).toEqual({ approved: false, changes: "" });
+  });
+});
+
+// A retry starts a brand-new session in a workspace whose previous attempt may
+// have been rolled back, so without this it re-derives the dead ends the last
+// one already paid for.
+describe("injectHandoff", () => {
+  it("appends the previous attempt's account", () => {
+    const out = injectHandoff("BASE", "tried the webhook, unreachable from CI");
+    expect(out).toContain("BASE");
+    expect(out).toContain("## What the previous attempt reported");
+    expect(out).toContain("unreachable from CI");
+  });
+
+  // it describes a run that did NOT succeed, so a retry that treats it as fact
+  // inherits the mistake that caused the failure
+  it("frames it as a lead, never as fact", () => {
+    const out = injectHandoff("BASE", "x").replace(/\s+/g, " ");
+    expect(out).toContain("Treat it as a lead, not as fact");
+    expect(out).toContain("may be exactly what went wrong");
+  });
+
+  it("changes nothing when there was no previous attempt", () => {
+    expect(injectHandoff("BASE", undefined)).toBe("BASE");
+    expect(injectHandoff("BASE", "   ")).toBe("BASE");
   });
 });

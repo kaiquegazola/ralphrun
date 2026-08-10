@@ -545,7 +545,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
     expect(mParseAgent).toHaveBeenCalled();
     expect(mMount).not.toHaveBeenCalled(); // non-TTY: no dashboard
-    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree", expect.any(Function));
+    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree", expect.any(Function), undefined);
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "init");
     // scoped to the task's own paths, so a file the user already had dirty is
     // never swept into a commit named after this task
@@ -868,6 +868,64 @@ describe("runLoop real run (non-TTY fallback)", () => {
     // a claim left behind makes the NEXT run diagnose a stale pid instead of
     // just starting
     expect(mReleaseLock).toHaveBeenCalled();
+  });
+
+  // A retry gets a brand-new session and, in worktree mode, a workspace where
+  // the failed attempt was rolled back. Without the handoff it re-derives the
+  // dead ends the last one already paid for.
+  it("hands the failed attempt's account to the retry", async () => {
+    fastTimers();
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
+    mRunTask
+      .mockResolvedValueOnce({ ok: false, reason: "failed", cost: NO_COST, handoff: "the webhook is unreachable from CI" })
+      .mockResolvedValue({ ok: true, cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask.mock.calls[1]?.[9]).toBe("the webhook is unreachable from CI");
+  });
+
+  // the TUI retry is a second door to the same retry, and it must carry the
+  // account too or a user-driven retry starts blinder than an automatic one
+  it("hands the account over on a user-chosen review retry as well", async () => {
+    fastTimers();
+    setTTY(true);
+    mMount.mockReturnValue(makeHandle({ reviewAction: "retry" }));
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
+    mRunTask
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: "review_changes",
+        verificationPassed: true,
+        cost: NO_COST,
+        handoff: "tried the cache layer first",
+      })
+      .mockResolvedValue({ ok: true, cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask.mock.calls[1]?.[9]).toBe("tried the cache layer first");
+  });
+
+  it("hands nothing to a FIRST attempt", async () => {
+    fastTimers();
+    await runLoop({ prd: "prd.json" });
+    expect(mRunTask.mock.calls[0]?.[9]).toBeUndefined();
+  });
+
+  // a task that passed has nothing to hand anyone, and one that blocked is not
+  // about to run again — a leftover account would be stale by the time it did
+  it("does not keep an account after the task settled", async () => {
+    fastTimers();
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
+    mRunTask.mockResolvedValue({ ok: true, cost: NO_COST, handoff: "did the thing" });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask.mock.calls[1]?.[9]).toBeUndefined();
   });
 
   it("reclaims orphan worktrees at boot even with the feature off", async () => {
@@ -1248,7 +1306,7 @@ describe("runLoop TTY dashboard", () => {
     // reporter routed into the TUI as an event carrying the current task id
     expect(handle.update).toHaveBeenCalledWith({ taskId: "T1", line: "mid", lineSource: "system" });
     // per-task abort signal came from the handle
-    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), SIG, undefined, "base-tree", expect.any(Function));
+    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), SIG, undefined, "base-tree", expect.any(Function), undefined);
     expect(handle.control.takeSkip).toHaveBeenCalled();
     expect(handle.unmount).toHaveBeenCalled();
   });

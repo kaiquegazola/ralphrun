@@ -47,6 +47,12 @@ export interface TaskRunnerCtx {
   elapsedTracker: ElapsedTracker;
   trackers: Set<ElapsedTracker>;
   pendingReviewFeedback: Map<string, string>;
+  /**
+   * The last attempt's own closing account, per task. A retry gets a brand-new
+   * session and, in worktree mode, a workspace where that attempt was rolled
+   * back — without this it re-derives the dead ends the last one paid for.
+   */
+  pendingHandoff: Map<string, string>;
   /** the worktree as it stood when each task STARTED, kept across its retries */
   taskBaselines: Map<string, string | null>;
   taskCost: Map<string, CostTally>;
@@ -136,7 +142,7 @@ function logTaskCommit(
   base?: string | null,
 ): boolean {
   const before = headCommit(workspace);
-  // function replacers: a literal id/title is used verbatim (a "export function createTaskRunner("/"$1" in a
+  // function replacers: a literal id/title is used verbatim (a "$&"/"$1" in a
   // task title must not be interpreted as a replacement pattern).
   const msg = (cfg.commit_message_template || "{id}: {title}").replace(/{id}/g, () => id).replace(/{title}/g, () => title);
   // Stage only what THIS task moved. `git add -A` also swept up whatever the
@@ -171,7 +177,7 @@ function shortHash(hash: string): string {
 
 export function createTaskRunner(ctx: TaskRunnerCtx) {
   const { opts, prdPath, workspace, progress, reload, savePRD, done } = ctx;
-  const { elapsedTracker, trackers, pendingReviewFeedback, taskBaselines, taskCost, runCost, maxCostUsd } = ctx;
+  const { elapsedTracker, trackers, pendingReviewFeedback, pendingHandoff, taskBaselines, taskCost, runCost, maxCostUsd } = ctx;
 
   /**
    * One task, from START to a settled status in prd.json. "stop" means the whole
@@ -229,6 +235,10 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     const signal = ctx.tui ? ctx.tui.control.beginTask() : undefined;
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
+    // consumed the same way: what the last attempt said is stale the moment this
+    // one has said anything of its own
+    const handoff = pendingHandoff.get(task.id);
+    pendingHandoff.delete(task.id);
 
     let taskReviewBase: string | null | undefined;
     const reviewOn = ctx.cfg.review_after && !!ctx.cfg.advisor;
@@ -323,7 +333,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
               savePRD(prdPath, currentPrd);
             }
           }
-        });
+        }, handoff);
       } catch (e) {
         log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
         result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
@@ -498,6 +508,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
           freshTask.status = "todo";
           const feedback = result.reviewChanges?.trim() || reason;
           pendingReviewFeedback.set(task.id, feedback);
+          if (result.handoff) pendingHandoff.set(task.id, result.handoff);
           log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));
           emit({ taskId: task.id, status: "retry", reason: displayReason, elapsedMs });
           persist();
@@ -561,6 +572,10 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
           emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
         } else {
           freshTask.status = "todo";
+          // Carried ONLY into a retry. A task that blocked is not about to run
+          // again, and one that passed has nothing to hand anyone — keeping it
+          // there would leave a stale account for whenever the task is promoted.
+          if (result.handoff) pendingHandoff.set(task.id, result.handoff);
           log(progress, t("loop.log.retry", { id: task.id, s: elapsed, n: freshTask.retries }));
           emit({ taskId: task.id, status: "retry", elapsedMs });
         }

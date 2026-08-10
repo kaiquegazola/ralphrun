@@ -6,7 +6,7 @@ import type { Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
-import { buildPrompt, injectAdvice, readStandards } from "./prompts.js";
+import { buildPrompt, injectAdvice, injectHandoff, readStandards } from "./prompts.js";
 import { runExecutor } from "./executor.js";
 import { getAdvice, advisorReview } from "./advisor.js";
 import { runVerify, assembleFeedback } from "./verify.js";
@@ -24,6 +24,13 @@ export interface RunTaskResult {
   verificationPassed?: boolean;
   /** every executor call this attempt made, including the fix rounds */
   cost: CostTally;
+  /**
+   * The executor's own closing account of this attempt. Carried to the NEXT
+   * attempt so it does not re-derive what this one already found — a retry gets
+   * a brand-new session and, in worktree mode, a workspace where this attempt
+   * was rolled back.
+   */
+  handoff?: string;
 }
 
 export async function runTask(
@@ -36,12 +43,14 @@ export async function runTask(
   reviewRetryFeedback?: string,
   reviewBase?: string | null,
   onPlanGenerated?: (plan: string, planKey: string) => void,
+  /** the previous attempt's closing account, if there was one */
+  handoff?: string,
 ): Promise<RunTaskResult> {
   const execu = cfg.executor;
   const advis = cfg.advisor;
   const native = supportsNativeAdvisor(execu.cli, advis?.cli);
   const standards = readStandards(workspace);
-  const prompt = injectReviewRetryFeedback(buildPrompt(task, prd, standards), reviewRetryFeedback);
+  const prompt = injectHandoff(injectReviewRetryFeedback(buildPrompt(task, prd, standards), reviewRetryFeedback), handoff);
   // one tally for the whole attempt: the fix rounds below are the same task's
   // money, and a per-round figure would hide what a stubborn task really cost
   const cost: CostTally = { usd: 0, unknown: false };
@@ -53,6 +62,13 @@ export async function runTask(
   let sessionId: string | undefined;
   const onSession = (id: string): void => {
     sessionId = id;
+  };
+  // The LAST thing the executor said this attempt. Reported by every call, so a
+  // fix round overwrites the round before it — what the next attempt wants is
+  // the most recent account, not the first.
+  let lastHandoff: string | undefined;
+  const onFinal = (text: string): void => {
+    lastHandoff = text;
   };
 
   // No verify command and no reviewer: "done" here means nothing more than "the
@@ -67,10 +83,10 @@ export async function runTask(
     log(progress, t("run.log.native", { id: task.id, cli: execu.cli, model: execu.model, advisorModel: advis.model }));
     emit({ taskId: task.id, subphase: "executing", attempt });
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
-    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost);
+    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onSession, undefined, onFinal);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
     const passed = ok && (await runVerify(task, workspace, progress)).passed;
-    return { ok: passed, reason: passed ? undefined : "failed", cost };
+    return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
   }
 
   // CROSS: planner up front, then a unified fix loop — tests + review feed the
@@ -108,7 +124,7 @@ export async function runTask(
   }
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
-  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession);
+  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession, undefined, onFinal);
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -143,7 +159,7 @@ export async function runTask(
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
     if (ok && testOk && approved) {
       log(progress, t("run.log.pass", { id: task.id, n: rnd }));
-      return { ok: true, cost };
+      return { ok: true, cost, handoff: lastHandoff };
     }
     if (ok && testOk && !approved) {
       log(progress, t("run.log.reviewChanges", { id: task.id, n: rnd }));
@@ -183,7 +199,7 @@ export async function runTask(
       fixPrompt += "\n\n" + feedback;
     }
     emit({ taskId: task.id, subphase: "fixing" });
-    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession, resume);
+    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession, resume, onFinal);
   }
 
   log(progress, t("run.log.exhausted", { id: task.id }));
@@ -203,7 +219,7 @@ export async function runTask(
     };
   }
   const passed = ok && (await runVerify(task, workspace, progress)).passed;
-  return { ok: passed, reason: passed ? undefined : "failed", cost };
+  return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
 }
 
 function injectReviewRetryFeedback(prompt: string, feedback?: string): string {

@@ -83,7 +83,7 @@ export async function runTask(
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
     const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
-    const passed = ok && (await runVerify(task, workspace, progress)).passed;
+    const passed = ok && (await runVerify(task, workspace, progress, signal)).passed;
     return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
   }
 
@@ -220,7 +220,11 @@ export async function runTask(
       handoff: lastHandoff,
     };
   }
-  const passed = ok && (await runVerify(task, workspace, progress)).passed;
+  // The signal reaches THIS verify too, and it is the call that needs it most:
+  // with review off the loop above breaks on the abort with lastApproved
+  // vacuously true, so the skip lands here — straight into a gate that would
+  // otherwise run the suite for its full 600s after the user abandoned the task.
+  const passed = ok && (await runVerify(task, workspace, progress, signal)).passed;
   return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
 }
 

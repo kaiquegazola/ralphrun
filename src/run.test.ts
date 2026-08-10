@@ -370,6 +370,30 @@ describe("runTask CROSS", () => {
   });
 });
 
+// mount.ts promises the skip/quit control reaches "the verify command", but the
+// in-loop verify is only ONE of the three call sites. NATIVE has no loop at all,
+// and with review off the abort break falls straight through to the tail verify
+// — both would otherwise sit out the full 600s cap on a task the user abandoned.
+describe("the skip/quit signal reaches every verify, not just the in-loop one", () => {
+  it("NATIVE hands it to its only verify", async () => {
+    const ac = new AbortController();
+    await runTask(task, prd, cfg(), "/ws", "/prog", ac.signal);
+    expect(mVerify).toHaveBeenCalledWith(task, "/ws", "/prog", ac.signal);
+  });
+
+  it("the CROSS tail verify hands it over too, on the abort that lands there", async () => {
+    const ac = new AbortController();
+    mExec.mockImplementation(async () => {
+      ac.abort();
+      return true;
+    });
+    // review off → lastApproved is vacuously true, so the aborted loop exits
+    // past the never-approved return and into the tail verify
+    await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", ac.signal);
+    expect(mVerify).toHaveBeenCalledExactlyOnceWith(task, "/ws", "/prog", ac.signal);
+  });
+});
+
 describe("runTask unverified warning", () => {
   // no verify command and no reviewer: "done" means only "the executor exited 0"
   it("warns when neither gate exists", async () => {

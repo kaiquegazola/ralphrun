@@ -430,17 +430,30 @@ describe("seeding a cell's gitignored directories", () => {
     run("commit", "-q", "-m", "base");
   }
 
-  it("clones node_modules into the cell, isolated from the real one", () => {
+  // Asserts what the filesystem UNDER IT actually does, because that is what
+  // differs: APFS and btrfs clone, and CI's ext4/NTFS cannot. Pinning isolation
+  // unconditionally passed on the machine this was written on and failed
+  // everywhere else — the same shape as the bug the whole audit was about.
+  it("seeds node_modules into the cell, and isolates it wherever a clone is possible", () => {
     seedRepo();
-    const dir = createTaskWorktree(ws, "T1", ["node_modules"])!;
+    const dir = createTaskWorktree(ws, "T1", [])!;
+    const how = seedIgnoredDir(ws, dir, "node_modules");
 
-    // present, so a verify that runs the test suite works at all
+    // present either way, or `verify: "npm test"` fails on every task before
+    // anything interesting is exercised
     expect(existsSync(join(dir, "node_modules", "dep", "index.js"))).toBe(true);
 
-    // and ISOLATED: an install inside the cell must not reach the real tree.
-    // This is the whole point — a symlink passes the line above and fails here.
     writeFileSync(join(dir, "node_modules", "dep", "index.js"), "module.exports = 2\n");
-    expect(readFileSync(join(ws, "node_modules", "dep", "index.js"), "utf8")).toBe("module.exports = 1\n");
+    const real = readFileSync(join(ws, "node_modules", "dep", "index.js"), "utf8");
+    if (how === "cloned") {
+      // the whole point: an install inside a cell cannot reach the real tree
+      expect(real).toBe("module.exports = 1\n");
+    } else {
+      // and the fallback IS shared — not a defect, but the exact state that makes
+      // a wave whose verify installs unsafe, which is why that is refused at load
+      expect(how).toBe("linked");
+      expect(real).toBe("module.exports = 2\n");
+    }
   });
 
   it("removing a cell leaves the real dependency tree alone", () => {

@@ -345,6 +345,24 @@ describe("runTask CROSS", () => {
     expect(mReview).not.toHaveBeenCalled();
   });
 
+  // The advisor call is abortable, so a skip or quit during PLANNING lands right
+  // before the executor — and runExecutor only checks the signal AFTER it has
+  // spawned, so without a guard the abandoned task still starts a cli process
+  // just to kill it.
+  it("does not start the executor when the run was abandoned during planning", async () => {
+    const ac = new AbortController();
+    mAdvice.mockImplementation(async () => {
+      ac.abort(); // the skip lands while the advisor is out
+      return null;
+    });
+    const r = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog", ac.signal);
+    expect(mExec).not.toHaveBeenCalled();
+    expect(r.ok).toBe(false);
+    // and the pane is never told the task entered "executing" after the user
+    // asked it to stop
+    expect(mEmit).not.toHaveBeenCalledWith(expect.objectContaining({ subphase: "executing" }));
+  });
+
   it("exhaust with approved, final exec ok and final verify passes → true", async () => {
     mReview.mockResolvedValue({ approved: true, changes: "", diff: "" });
     // 3 in-loop verifies fail (never PASS), final verify passes

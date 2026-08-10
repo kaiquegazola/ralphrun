@@ -120,6 +120,12 @@ export async function runTask(
     }
     if (activeAdvice) execPrompt = injectAdvice(prompt, activeAdvice);
   }
+  // The advisor call above is abortable, so a skip or quit during PLANNING lands
+  // here. runExecutor checks the signal only after it has spawned, so without
+  // this the abandoned task still starts a cli process just to kill it — and the
+  // pane would show it entering "executing" after the user asked it to stop. The
+  // fix loop already guards the same way at the top of each round.
+  if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
   let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);

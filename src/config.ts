@@ -48,11 +48,15 @@ export interface Config {
   /**
    * Stop the run once the measured spend reaches this many USD. 0 (the default)
    * or absent = no ceiling, so every existing setup keeps running exactly as it
-   * did. Only spend that a cli actually REPORTED counts, which today is claude
-   * WITH stream_output on — the figure rides on the event stream and nowhere
-   * else, so turning the stream off unmeters the one metered spawn backend. No
-   * other cli reports USD at all. This is a ceiling on what we can see, never on
-   * what an unmetered agent can bill. See README.
+   * did. Only spend a cli actually REPORTED counts. `claude` reports it WITH
+   * stream_output on and only then — the figure rides on the event stream and
+   * nowhere else. `cursorsdk` reads a USD figure off the SDK's `usage` message IF
+   * one is there; whether the SDK sends dollars or only token counts has never
+   * been checked against a real run, so treat that backend as unverified rather
+   * than metered. The other five spawn backends report nothing, and NO cli meters
+   * the advisor, which runs without the stream because its stdout is its answer.
+   * So this is a ceiling on what we can see, never on what an unmetered agent can
+   * bill. See README.
    */
   max_cost_usd?: number;
   /**

@@ -163,9 +163,11 @@ tail -f ralph.out
 - **The reported total is a floor, not a total.** The ceiling only counts spend
   the executor *reports*, which today is `claude` **with the event stream on**:
   `total_cost_usd` rides on that stream, so `stream_output: false` turns
-  `claude`'s reporting off along with its live pane, and no other backend reports
-  a USD figure at all — the in-process `cursorsdk` gets token counts from the SDK,
-  not dollars, whatever `stream_output` says. *No* CLI meters the advisor either,
+  `claude`'s reporting off along with its live pane. The in-process `cursorsdk`
+  reads a USD figure off the SDK's `usage` message *if one is there* — whether the
+  SDK sends dollars or only token counts has never been checked against a real
+  run, so treat that backend as unverified rather than metered. The other five
+  backends report nothing. *No* CLI meters the advisor either,
   so part of nearly every run is unmeasured: costs print as `≥$1.2345` when some
   of the spend was never reported and `unknown` when none of it was.
   `max_cost_usd` therefore bounds only the spend ralphrun can *see* — with an

@@ -502,13 +502,8 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         done();
         log(progress, t("loop.log.stopWorkspace"));
         return "stop";
-      } else if (result.reason === "review_changes" || result.reason === "review_stalled" || result.reason === "review_exhausted") {
-        const reason =
-          result.reason === "review_stalled"
-            ? t("loop.reason.reviewStalled")
-            : result.reason === "review_changes"
-              ? t("loop.reason.reviewChanges")
-              : t("loop.reason.reviewExhausted");
+      } else if (result.reason === "review_stalled" || result.reason === "review_exhausted") {
+        const reason = result.reason === "review_stalled" ? t("loop.reason.reviewStalled") : t("loop.reason.reviewExhausted");
         const displayReason = withReviewFeedback(reason, result.reviewChanges);
         // Replan rung of the recovery ladder. A stall means every fix round landed
         // on the identical failure, and the plan the executor was following is part

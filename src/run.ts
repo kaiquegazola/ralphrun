@@ -15,7 +15,7 @@ import { captureReviewBase } from "./git.js";
 import { advisorPlanKey, routeAdvisorPlan } from "./plan-cache.js";
 import { addCost, type CostTally } from "./stream.js";
 
-export type RunTaskFailureReason = "failed" | "review_changes" | "review_exhausted" | "review_stalled";
+export type RunTaskFailureReason = "failed" | "review_exhausted" | "review_stalled";
 
 export interface RunTaskResult {
   ok: boolean;

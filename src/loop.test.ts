@@ -624,12 +624,12 @@ describe("runLoop real run (non-TTY fallback)", () => {
   });
 
   it("review failure blocks immediately without consuming task retries", async () => {
-    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
     expect(saved.tasks[0]).toMatchObject({ status: "blocked", retries: 0 });
-    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("review requested changes"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("review not approved"));
     expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("retry 1"));
   });
 
@@ -674,7 +674,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
         tasks: [{ ...TASK, plan: "a plan worth keeping", planKey: "plan-key" }],
       }),
     );
-    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
@@ -688,11 +688,11 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mMount.mockReturnValue(handle);
     mNextTask.mockReset();
     mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
-    mRunTask.mockResolvedValueOnce({ ok: false, cost: NO_COST, reason: "review_changes", reviewChanges: "" }).mockResolvedValueOnce({ ok: true, cost: NO_COST });
+    mRunTask.mockResolvedValueOnce({ ok: false, cost: NO_COST, reason: "review_exhausted", reviewChanges: "" }).mockResolvedValueOnce({ ok: true, cost: NO_COST });
 
     await runLoop({ prd: "prd.json" });
 
-    expect(mRunTask.mock.calls[1][6]).toContain("review requested changes");
+    expect(mRunTask.mock.calls[1][6]).toContain("review not approved");
   });
 
   it("does not report a commit hash when HEAD is unchanged", async () => {
@@ -716,7 +716,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     setTTY(true);
     const handle = makeHandle({ reviewAction: "approve" });
     mMount.mockReturnValue(handle);
-    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     const saved = JSON.parse(writes[writes.length - 1]);
@@ -745,7 +745,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
   // branch, so a headless run had no gate at all — the task went blocked and the
   // run moved on with nothing in the log saying a decision was even made.
   it("headless review block logs the policy that refused it", async () => {
-    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
     await runLoop({ prd: "prd.json" });
     const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
     expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked" });
@@ -789,7 +789,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     const handle = makeHandle({ reviewAction: "block" });
     mMount.mockReturnValue(handle);
     mLoadConfig.mockReturnValue(cfg({ review_blocked_policy: "accept" }));
-    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
 
     await runLoop({ prd: "prd.json" });
 
@@ -811,7 +811,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
       return "block";
     }) as unknown as Handle["waitReviewBlocked"];
     mMount.mockReturnValue(handle);
-    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_changes", verificationPassed: true });
+    mRunTask.mockResolvedValue({ ok: false, cost: NO_COST, reason: "review_exhausted", verificationPassed: true });
 
     await runLoop({ prd: "prd.json" });
 
@@ -830,7 +830,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mNextTask.mockReset();
     mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
     mRunTask
-      .mockResolvedValueOnce({ ok: false, cost: NO_COST, reason: "review_changes", reviewChanges: "fix the typecheck gate" })
+      .mockResolvedValueOnce({ ok: false, cost: NO_COST, reason: "review_exhausted", reviewChanges: "fix the typecheck gate" })
       .mockResolvedValueOnce({ ok: true, cost: NO_COST });
 
     await runLoop({ prd: "prd.json" });
@@ -899,9 +899,9 @@ describe("runLoop real run (non-TTY fallback)", () => {
 
   // The TUI retry is a second door to the same retry, and it must carry the
   // account too or a user-driven retry starts blinder than an automatic one.
-  // The reason is one run.ts can actually return: this used to be pinned on
-  // `review_changes`, a shape no producer emits, so it stayed green while the
-  // real review-refused path handed over nothing.
+  // The reason is one run.ts can actually return. This used to be pinned on a
+  // `review_changes` no producer ever emitted, so it stayed green while the real
+  // review-refused path handed over nothing.
   it("hands the account over on a user-chosen review retry as well", async () => {
     fastTimers();
     setTTY(true);
@@ -1763,7 +1763,7 @@ describe("runLoop parallel waves", () => {
     const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
     dispatchOnce();
     mRunTask
-      .mockResolvedValueOnce({ ok: false, reason: "review_changes", verificationPassed: true, cost: NO_COST })
+      .mockResolvedValueOnce({ ok: false, reason: "review_exhausted", verificationPassed: true, cost: NO_COST })
       .mockResolvedValueOnce({ ok: true, cost: NO_COST });
 
     await runLoop({ prd: "prd.json" });

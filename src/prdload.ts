@@ -150,6 +150,35 @@ export function pathsOutsideScope(paths: string[], scope: string[]): string[] {
   });
 }
 
+/** the heading the run writes under, so a human can see which half is theirs */
+export const LEARNED_HEADING = "## Learned during runs";
+// The notes go into EVERY later prompt, so this section is a standing tax on the
+// whole run. Capped so it cannot become the accumulated-summary memory the fresh
+// context rule exists to prevent — arriving one honest line at a time.
+const MAX_LEARNED_CHARS = 1200;
+
+/**
+ * Append a fact a run learned to the architecture notes.
+ *
+ * Returns the new notes, or null when nothing should change: a duplicate, or a
+ * section already at its cap. Null is not a failure — a full section means the
+ * human should curate, and silently dropping the OLDEST entry would delete
+ * something a person may have promoted there deliberately.
+ *
+ * Pure: the caller owns the write, because prd.json has exactly one writer rule.
+ */
+export function appendLearnedNote(notes: string, taskId: string, note: string): string | null {
+  const line = `- ${taskId}: ${note.trim()}`;
+  if (!note.trim()) return null;
+  // Compared on the NOTE body, not the whole line: the same fact learned twice
+  // arrives under two different task ids and is still the same fact.
+  const idx = notes.indexOf(LEARNED_HEADING);
+  const existing = idx === -1 ? "" : notes.slice(idx + LEARNED_HEADING.length);
+  if (existing.includes(note.trim())) return null;
+  if (existing.length + line.length + 1 > MAX_LEARNED_CHARS) return null;
+  return idx === -1 ? `${notes.trimEnd()}\n\n${LEARNED_HEADING}\n${line}\n` : `${notes.trimEnd()}\n${line}\n`;
+}
+
 export interface ScopedTask {
   id: string;
   deps: string[];

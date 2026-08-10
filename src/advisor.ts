@@ -22,6 +22,12 @@ export interface AdvisorReviewResult {
   approved: boolean;
   changes: string;
   diff: string;
+  /**
+   * A durable fact for the architecture notes, when the reviewer judged this
+   * task taught one. Rides on the review call the task already makes, so it
+   * costs no extra model call — and only ever comes off an APPROVE.
+   */
+  note?: string;
 }
 
 /**

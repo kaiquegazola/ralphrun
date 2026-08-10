@@ -104,7 +104,8 @@ const browserTask = (over: Record<string, unknown> = {}) => ({
   id: "T1", title: "UI", status: "todo", deps: [], retries: 0, description: "d", acceptance: [],
   verify: "dev-browser --headless < e2e.mjs", ...over,
 });
-const prdWith = (tasks: unknown[]) => JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks });
+const prdWith = (tasks: unknown[], over: Record<string, unknown> = {}) =>
+  JSON.stringify({ project: "P", stack: "S", architecture_notes: "A", tasks, ...over });
 const BROWSER_PRD = prdWith([browserTask()]);
 
 const mExists = vi.mocked(existsSync);
@@ -186,6 +187,16 @@ function makeHandle(over: {
     waitReviewBlocked: vi.fn(async () => over.reviewAction ?? "block"),
     unmount: vi.fn(),
   } as unknown as Handle;
+}
+
+/** the whole prd.json as last written — architecture_notes is not a task field */
+function livePrdRaw(): () => { architecture_notes: string } {
+  let content = PRD_JSON;
+  mRead.mockImplementation(() => content);
+  mWrite.mockImplementation((p, data) => {
+    if (String(p).endsWith("prd.json")) content = String(data);
+  });
+  return () => JSON.parse(content);
 }
 
 let exitSpy: ReturnType<typeof vi.spyOn>;
@@ -907,6 +918,57 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await runLoop({ prd: "prd.json" });
 
     expect(mRunTask.mock.calls[1]?.[9]).toBe("tried the cache layer first");
+  });
+
+  // architecture_notes is the memory slot that already survives between tasks;
+  // this is a run finally writing to it, instead of only a human.
+  it("writes a reviewer's durable note into architecture_notes on DONE", async () => {
+    fastTimers();
+    const read = livePrdRaw();
+    mRunTask.mockResolvedValue({ ok: true, cost: NO_COST, note: "the webhook is unreachable from CI" });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().architecture_notes).toContain("## Learned during runs");
+    expect(read().architecture_notes).toContain("- T1: the webhook is unreachable from CI");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("learned"));
+  });
+
+  // a task that did not pass every gate has not earned a line in the file that
+  // steers every later prompt
+  it("writes nothing when the task did not reach done", async () => {
+    fastTimers();
+    const read = livePrdRaw();
+    mRunTask.mockResolvedValue({ ok: false, reason: "failed", cost: NO_COST, note: "should never land" });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().architecture_notes).not.toContain("should never land");
+  });
+
+  // silence here would read as "the reviewer never wrote one", which is a
+  // different situation and the one the operator would act on differently
+  it("says so when a note is dropped as already known", async () => {
+    fastTimers();
+    mRead.mockReturnValue(
+      prdWith([{ ...TASK }], { architecture_notes: "base\n\n## Learned during runs\n- T0: webhook unreachable\n" }),
+    );
+    mRunTask.mockResolvedValue({ ok: true, cost: NO_COST, note: "webhook unreachable" });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("budget is full or already had it"));
+  });
+
+  it("leaves the notes alone when the reviewer wrote none", async () => {
+    fastTimers();
+    const read = livePrdRaw();
+    const before = read().architecture_notes;
+    mRunTask.mockResolvedValue({ ok: true, cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().architecture_notes).toBe(before);
   });
 
   it("hands nothing to a FIRST attempt", async () => {

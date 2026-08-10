@@ -31,6 +31,12 @@ export interface RunTaskResult {
    * was rolled back.
    */
   handoff?: string;
+  /**
+   * The reviewer's durable fact for the architecture notes, if it wrote one.
+   * Only set on a task that PASSED — a note attached to work that was redone
+   * describes an attempt, not the project.
+   */
+  note?: string;
 }
 
 export async function runTask(
@@ -147,7 +153,7 @@ export async function runTask(
     // by guessing. run.ts still gates on testOk itself below — the reviewer gets
     // it as evidence, never as an approval (see verificationBlock in prompts.ts).
     if (reviewOn && advis) addCost(cost, undefined); // unmetered, same as the planner above
-    const { approved, changes, diff = "" } =
+    const { approved, changes, diff = "", note } =
       reviewOn && advis
         ? await advisorReview(task, prd, advis, cfg, workspace, progress, standards, taskReviewBase, {
             passed: testOk,
@@ -159,7 +165,7 @@ export async function runTask(
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
     if (ok && testOk && approved) {
       log(progress, t("run.log.pass", { id: task.id, n: rnd }));
-      return { ok: true, cost, handoff: lastHandoff };
+      return { ok: true, cost, handoff: lastHandoff, note };
     }
     if (ok && testOk && !approved) {
       log(progress, t("run.log.reviewChanges", { id: task.id, n: rnd }));

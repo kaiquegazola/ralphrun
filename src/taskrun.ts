@@ -16,7 +16,7 @@ import { t } from "./i18n.js";
 import { log } from "./log.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readyTasks, type PRD, type Task } from "./prd.js";
-import { pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
+import { appendLearnedNote, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
 import { readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
@@ -427,8 +427,26 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         ct.retries = freshTask.retries;
         ct.plan = freshTask.plan;
         ct.planKey = freshTask.planKey;
+        // A project-level field, written inside the same synchronous
+        // read-modify-write as the task's own status — the prd.json rule covers
+        // the whole file, not one task's slice of it. Only ever on a DONE task,
+        // and only what the reviewer chose to write.
+        if (learned) {
+          const next = appendLearnedNote(cur.architecture_notes, task.id, learned);
+          if (next) {
+            cur.architecture_notes = next;
+            log(progress, t("loop.log.learned", { id: task.id, note: learned }));
+          } else {
+            // full or already known — say so, because silence here would look
+            // like the reviewer never wrote one
+            log(progress, t("loop.log.learnedDropped", { id: task.id }));
+          }
+        }
         savePRD(prdPath, cur);
       };
+      // Set only where the task is about to be recorded done, so a note can
+      // never ride in on a path that did not pass every gate.
+      let learned: string | undefined;
       // Worktree mode lands the work BEFORE the status write: a task whose
       // commits cannot be cherry-picked back must never be recorded as done
       // with nothing in the main workspace to show for it. No-op serially.
@@ -443,6 +461,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         persist();
       } else if (result.ok && landed === "ok") {
         freshTask.status = "done";
+        learned = result.note;
         ctx.accepted += 1;
         log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
         emit({ taskId: task.id, status: "done", elapsedMs });

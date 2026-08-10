@@ -255,6 +255,21 @@ Reply with EXACTLY one of:
   APPROVE
   CHANGES: <short bullet list of the required fixes>
 
+After APPROVE only, you MAY add one more line:
+  NOTE: <one line a LATER task would waste an agent run without>
+
+Almost no task warrants a note, and writing none is the correct and usual answer.
+Add one only if EVERY one of these holds:
+  - a task working elsewhere in this project would run into the same thing
+  - it CANNOT be learned by reading the code — the next agent can read the repo
+  - it stays true after this task (not "T5 is done", not "the tests live in X")
+  - it is not already in the architecture notes above
+
+These are NOT notes: what this task did (that is the diff), where code lives,
+which library the project uses, that the tests pass, or any assessment of the
+work. A note is a constraint you can only learn by hitting it, or an approach
+that cannot work here and the reason why. If you are unsure, write no note.
+
 Task ${task.id} — ${task.title}: ${task.description}
 
 Acceptance:
@@ -271,10 +286,14 @@ ${diff.trim() ? `## Diff\n${diff}` : `## No diff\n${NO_DIFF_NOTICE}`}`;
  * the raw text): there is nothing concrete to hand the executor, so the fix loop
  * stops instead of spending its rounds on an answer nobody could parse.
  */
-export function parseReview(verdict: string): { approved: boolean; changes: string } {
+export function parseReview(verdict: string): { approved: boolean; changes: string; note?: string } {
   if (!verdict) return { approved: false, changes: "" };
   if (verdict.trim().toUpperCase().startsWith("APPROVE")) {
-    return { approved: true, changes: "" };
+    // Only ever read off an APPROVE. A note attached to a rejection describes an
+    // attempt that is about to be redone, so it is not durable — and taking one
+    // there would let a task write to the architecture notes without ever
+    // passing a gate.
+    return { approved: true, changes: "", note: parseNote(verdict) };
   }
   const up = verdict.toUpperCase();
   const idx = up.indexOf("CHANGES");
@@ -285,4 +304,22 @@ export function parseReview(verdict: string): { approved: boolean; changes: stri
     return { approved: false, changes };
   }
   return { approved: false, changes: "" };
+}
+
+const MAX_NOTE_CHARS = 300;
+
+/**
+ * The reviewer's optional one-liner for the architecture notes.
+ *
+ * ONE line, capped: this text is prepended to every later prompt in the run, so
+ * a reviewer that ignores the "one line" instruction would otherwise buy itself
+ * unbounded space in everyone else's context. Anything after the first line is
+ * dropped rather than joined — a note that needs a paragraph is not the kind of
+ * fact this is for.
+ */
+function parseNote(verdict: string): string | undefined {
+  const line = verdict.split("\n").find((l) => l.trim().toUpperCase().startsWith("NOTE:"));
+  if (!line) return undefined;
+  const body = line.slice(line.indexOf(":") + 1).trim();
+  return body ? body.slice(0, MAX_NOTE_CHARS) : undefined;
 }

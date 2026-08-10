@@ -13,7 +13,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import { readFileSync } from "node:fs";
-import { loadPrdFile, normalizePrd, overlappingScopePairs, pathsOutsideScope, type ScopedTask } from "./prdload.js";
+import { appendLearnedNote, loadPrdFile, normalizePrd, overlappingScopePairs, pathsOutsideScope, type ScopedTask } from "./prdload.js";
 
 const mRead = vi.mocked(readFileSync);
 
@@ -350,5 +350,44 @@ describe("pathsOutsideScope", () => {
 
   it("matches a directory scope and a ./-prefixed path the same way globs do", () => {
     expect(pathsOutsideScope(["./src/a.ts", "docs/x.md"], ["src/"])).toEqual(["docs/x.md"]);
+  });
+});
+
+// These lines go into EVERY later prompt, so the section is a standing tax on
+// the whole run — and unbounded it becomes the accumulated-summary memory the
+// fresh-context rule exists to prevent, one honest line at a time.
+describe("appendLearnedNote", () => {
+  it("starts the section on the first note and appends to it after", () => {
+    const one = appendLearnedNote("Existing notes.", "T1", "webhook unreachable from CI")!;
+    expect(one).toContain("Existing notes.");
+    expect(one).toContain("## Learned during runs");
+    expect(one).toContain("- T1: webhook unreachable from CI");
+
+    const two = appendLearnedNote(one, "T2", "the db resets between suites")!;
+    expect(two.match(/## Learned during runs/g)).toHaveLength(1);
+    expect(two).toContain("- T2: the db resets between suites");
+  });
+
+  // the same fact learned twice arrives under two task ids and is still one fact
+  it("refuses a fact already recorded, whoever learned it", () => {
+    const one = appendLearnedNote("x", "T1", "webhook unreachable")!;
+    expect(appendLearnedNote(one, "T9", "webhook unreachable")).toBeNull();
+  });
+
+  it("refuses once the section is at its cap, rather than dropping the oldest", () => {
+    let notes = "base";
+    for (let i = 0; i < 40; i++) {
+      const next = appendLearnedNote(notes, `T${i}`, `fact number ${i} ` + "y".repeat(40));
+      if (!next) break;
+      notes = next;
+    }
+    // a human may have promoted something into that section deliberately, so a
+    // full budget is the human's to curate, not ours to silently prune
+    expect(appendLearnedNote(notes, "TZ", "one more distinct fact entirely")).toBeNull();
+    expect(notes).toContain("- T0:");
+  });
+
+  it("refuses an empty note", () => {
+    expect(appendLearnedNote("x", "T1", "   ")).toBeNull();
   });
 });

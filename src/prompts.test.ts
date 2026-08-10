@@ -317,6 +317,56 @@ describe("parseReview", () => {
 // A retry starts a brand-new session in a workspace whose previous attempt may
 // have been rolled back, so without this it re-derives the dead ends the last
 // one already paid for.
+// The gates are the whole feature. A reviewer asked to "note what it learned"
+// notes everything, and every line lands in EVERY later prompt of the run.
+describe("the architecture-note contract", () => {
+  it("offers the note only after APPROVE, and says no note is the usual answer", () => {
+    const out = reviewPrompt(task, prd, "", "diff").replace(/\s+/g, " ");
+    expect(out).toContain("After APPROVE only");
+    expect(out).toContain("writing none is the correct and usual answer");
+    expect(out).toContain("If you are unsure, write no note");
+  });
+
+  // the negative gates matter more than the positive ones: they are what stop
+  // the notes becoming the accumulated summary the fresh-context rule forbids
+  it("names what is NOT a note", () => {
+    const out = reviewPrompt(task, prd, "", "diff").replace(/\s+/g, " ");
+    expect(out).toContain("CANNOT be learned by reading the code");
+    expect(out).toContain("what this task did (that is the diff)");
+    expect(out).toContain("where code lives");
+    expect(out).toContain("stays true after this task");
+  });
+});
+
+describe("parseReview note", () => {
+  it("reads a note off an approval", () => {
+    const r = parseReview("APPROVE\nNOTE: the webhook endpoint is unreachable from CI");
+    expect(r.approved).toBe(true);
+    expect(r.note).toBe("the webhook endpoint is unreachable from CI");
+  });
+
+  it("has none when the reviewer wrote none", () => {
+    expect(parseReview("APPROVE").note).toBeUndefined();
+    expect(parseReview("APPROVE\nNOTE:   ").note).toBeUndefined();
+  });
+
+  // a note on a rejection describes an attempt about to be redone, and taking it
+  // would let a task write to the notes without passing a single gate
+  it("ignores a note attached to a rejection", () => {
+    const r = parseReview("CHANGES: fix it\nNOTE: something durable");
+    expect(r.approved).toBe(false);
+    expect(r.note).toBeUndefined();
+  });
+
+  // this text is prepended to every later prompt, so a reviewer that ignores
+  // "one line" must not buy itself unbounded space in everyone else's context
+  it("keeps one line and caps it", () => {
+    const r = parseReview("APPROVE\nNOTE: first line\nsecond line");
+    expect(r.note).toBe("first line");
+    expect(parseReview("APPROVE\nNOTE: " + "z".repeat(500)).note).toHaveLength(300);
+  });
+});
+
 describe("injectHandoff", () => {
   it("appends the previous attempt's account", () => {
     const out = injectHandoff("BASE", "tried the webhook, unreachable from CI");

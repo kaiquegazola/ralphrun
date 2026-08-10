@@ -651,6 +651,21 @@ Fresh context = the executor forgets everything between tasks. All durable state
 must live in `prd.json`, especially `architecture_notes`. Anything not written
 there gets reinvented next task. Keep those notes short and load-bearing.
 
+**A run can now write there too.** When the reviewer approves a task, it may add
+one line under a `## Learned during runs` heading — but only for a fact a later
+task would waste an agent run without: a constraint you can only learn by hitting
+it, an approach that cannot work here and why. It is gated hard against the
+obvious failure, which is a reviewer that narrates. What the task did, where code
+lives, which library is used, that the tests pass — none of those are notes, and
+writing nothing is the correct and usual answer.
+
+The section is **capped**. Past the cap the run stops appending and says so,
+rather than dropping the oldest line — you may have promoted that one there
+yourself. This is deliberately not "keep a summary of every task": that would
+rebuild, one honest line at a time, exactly the accumulating context the fresh
+reset exists to prevent. The repository is already the durable record of what was
+built; these notes are only for what the repository cannot tell you.
+
 ## Writing the backlog
 
 Each task needs `id`, `deps`, `description`, `acceptance`, and `verify` — a

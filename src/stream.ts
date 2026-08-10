@@ -46,13 +46,6 @@ export interface StreamEvent {
    * telemetry that trails the final answer clear a real BLOCKED marker.
    */
   costUsd?: number;
-  /**
-   * The cli's id for THIS conversation, when it reports one. It is what lets a
-   * fix round continue instead of starting over — see run.ts. Like cost, it is
-   * neither prose nor activity: it is the harness talking, and counting it as
-   * either would let telemetry clear a real BLOCKED marker.
-   */
-  sessionId?: string;
 }
 
 /**
@@ -199,16 +192,6 @@ export function parseClaudeStream(line: string): StreamEvent | null {
     return { text: line, prose: true };
   }
 
-  const out = classifyClaudeEvent(ev);
-  // Every event of a claude run carries the same session_id, so attaching it
-  // here rather than in one branch means a run whose init line was missed (a
-  // truncated first read, a cli that reorders) still yields one. Merged onto
-  // whatever the branch decided so it can never change a marker verdict.
-  const sessionId = typeof ev.session_id === "string" ? ev.session_id : undefined;
-  return out && sessionId ? { ...out, sessionId } : out;
-}
-
-function classifyClaudeEvent(ev: Record<string, unknown>): StreamEvent | null {
   switch (ev.type) {
     case "assistant":
       return assistantEvent((ev.message as { content?: unknown[] } | undefined)?.content);

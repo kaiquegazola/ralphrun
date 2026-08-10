@@ -106,22 +106,3 @@ describe("promptViaStdin", () => {
   });
 });
 
-// A fix round that resumes sends only the feedback; without the flag it would
-// start a fresh conversation and the feedback would have no task attached to it.
-describe("resuming a conversation", () => {
-  it("passes the cli's own resume flags when a session id is given", () => {
-    expect(buildCmd("claude", "just the feedback", "sonnet", "/ws", true, "none", "sess-123")).toEqual(
-      expect.arrayContaining(["--resume", "sess-123"]),
-    );
-  });
-
-  it("says nothing about resuming when there is no session id", () => {
-    expect(buildCmd("claude", "p", "sonnet", "/ws", true)).not.toContain("--resume");
-  });
-
-  // a cli with no resume of its own must not get an invented flag: the caller
-  // falls back to a whole prompt, which is what every cli did before
-  it("ignores a session id on a cli that cannot resume", () => {
-    expect(buildCmd("grok", "p", "grok-4.5", "/ws", true, "none", "sess-123")).not.toContain("--resume");
-  });
-});

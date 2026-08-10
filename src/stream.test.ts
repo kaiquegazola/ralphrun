@@ -287,29 +287,3 @@ describe("cost tallies", () => {
   });
 });
 
-// The id is what lets a fix round continue instead of re-sending the whole task.
-describe("session id", () => {
-  it("carries the session id off any event that has one", () => {
-    const ev = parseClaudeStream(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-1" }));
-    expect(ev?.sessionId).toBe("sess-1");
-  });
-
-  // attached in one place rather than per branch, so a run whose init line was
-  // missed still yields an id from a later event
-  it("carries it on a result event too", () => {
-    const ev = parseClaudeStream(JSON.stringify({ type: "result", subtype: "success", result: "", session_id: "sess-2" }));
-    expect(ev?.sessionId).toBe("sess-2");
-  });
-
-  it("leaves it absent when the cli reports none", () => {
-    expect(parseClaudeStream(JSON.stringify({ type: "system", subtype: "init" }))?.sessionId).toBeUndefined();
-  });
-
-  // a session id is the harness talking, not the agent working: counting it as
-  // activity would clear a real BLOCKED marker
-  it("does not turn a silent event into activity or prose", () => {
-    const ev = parseClaudeStream(JSON.stringify({ type: "system", subtype: "init", session_id: "s" }));
-    expect(ev?.prose).toBeUndefined();
-    expect(ev?.activity).toBeUndefined();
-  });
-});

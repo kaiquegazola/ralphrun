@@ -37,8 +37,6 @@ export interface BuildCmdArgs {
    * argv a flag may sit — several clis take the prompt as the LAST element.
    */
   reviewArgs?: string[];
-  /** the def's own `resumeArgs`, handed back only on a fix round */
-  resumeArgs?: string[];
 }
 
 export interface AgentDef {
@@ -59,18 +57,6 @@ export interface AgentDef {
   models: { value: string; label: string }[];
   /** per-role pick highlighted as "recommended" (and sorted first) */
   recommended: Partial<Record<AgentRole, string>>;
-  /**
-   * Continue a previous conversation by session id, for the clis that can.
-   *
-   * The fix loop's second call re-sends the whole task prompt today, so the
-   * agent re-reads the codebase it just finished reading. Resuming makes the
-   * round cost what it actually is — the feedback. Absent = no resume, and the
-   * caller falls back to a full prompt, which is what every cli did before.
-   *
-   * Per-cli because the session id and the flag are both dialect: only a def
-   * knows whether its cli has one and where in its argv it goes.
-   */
-  resumeArgs?: (sessionId: string) => string[];
   /** headless invocation */
   buildCmd?(a: BuildCmdArgs): string[];
   /**
@@ -199,14 +185,10 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       "--disallowedTools",
       EXEC_DENIED_COMMANDS.map((c) => `Bash(${c}:*)`).join(","),
     ],
-    // verified against `claude --help`: -r/--resume takes a session id and works
-    // under -p. The id comes off the stream's own events (see stream.ts).
-    resumeArgs: (sessionId) => ["--resume", sessionId],
-    buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs, resumeArgs }) => {
+    buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs }) => {
       const cmd = [bin, "-p", ...(prompt ? [prompt] : [])];
       if (model) cmd.push("--model", model);
       if (autoApprove) cmd.push("--dangerously-skip-permissions");
-      if (resumeArgs) cmd.push(...resumeArgs);
       // last on purpose: the option is variadic, so it must not be followed by
       // a value of its own that it would swallow as another tool name
       if (reviewArgs) cmd.push(...reviewArgs);

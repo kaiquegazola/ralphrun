@@ -1,7 +1,7 @@
 // run.ts — run a single task: NATIVE (one claude call with --advisor) or
 // CROSS (planner-before → executor → unified fix loop with verify + review).
 
-import { agentDef, nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
+import { nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
 import type { Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
@@ -61,14 +61,6 @@ export async function runTask(
   // money, and a per-round figure would hide what a stubborn task really cost
   const cost: CostTally = { usd: 0, unknown: false };
   const onCost = (usd: number | undefined): void => addCost(cost, usd);
-  // The cli's id for the conversation THIS task is having. Set by the first
-  // executor call and used by the fix rounds; scoped to runTask, so it dies with
-  // the task — the fresh-context rule is per TASK, and a fix round is the same
-  // task still going, not a new one.
-  let sessionId: string | undefined;
-  const onSession = (id: string): void => {
-    sessionId = id;
-  };
   // The LAST thing the executor said this attempt. Reported by every call, so a
   // fix round overwrites the round before it — what the next attempt wants is
   // the most recent account, not the first.
@@ -89,7 +81,7 @@ export async function runTask(
     log(progress, t("run.log.native", { id: task.id, cli: execu.cli, model: execu.model, advisorModel: advis.model }));
     emit({ taskId: task.id, subphase: "executing", attempt });
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
-    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onSession, undefined, onFinal);
+    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
     const passed = ok && (await runVerify(task, workspace, progress)).passed;
     return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
@@ -130,7 +122,7 @@ export async function runTask(
   }
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
-  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession, undefined, onFinal);
+  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -186,26 +178,11 @@ export async function runTask(
       progress,
       t("run.log.fixing", { id: task.id, n: rnd, exec: String(ok), tests: String(testOk), approved: String(approved) }),
     );
-    // A fix round re-sent the whole task prompt, so the agent re-read a codebase
-    // it had just finished reading — the expensive half of a round, spent to
-    // rediscover what it already knew. Resuming sends only what is new.
-    //
-    // Off by default: it changes what the agent has in context, and a cli whose
-    // session expired mid-task would fail a round that a full prompt would have
-    // survived. `resume` is only ever set when the cli reported an id AND has a
-    // resume flag, so this degrades to the old behaviour rather than erroring.
-    const resume = cfg.reuse_conversation && sessionId && agentDef(execu.cli)?.resumeArgs ? sessionId : undefined;
-    let fixPrompt: string;
-    if (resume) {
-      fixPrompt = feedback;
-      log(progress, t("run.log.resuming", { id: task.id, n: rnd }));
-    } else {
-      fixPrompt = buildPrompt(task, prd, standards);
-      if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
-      fixPrompt += "\n\n" + feedback;
-    }
+    let fixPrompt = buildPrompt(task, prd, standards);
+    if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
+    fixPrompt += "\n\n" + feedback;
     emit({ taskId: task.id, subphase: "fixing" });
-    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession, resume, onFinal);
+    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
   }
 
   log(progress, t("run.log.exhausted", { id: task.id }));

@@ -79,7 +79,7 @@ describe("runTask NATIVE", () => {
     expect(result.ok).toBe(true);
     expect(mExec).toHaveBeenCalledWith(
       c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined,
-      expect.any(Function), expect.any(Function), undefined, expect.any(Function),
+      expect.any(Function), expect.any(Function),
     );
   });
 
@@ -183,7 +183,7 @@ describe("runTask CROSS", () => {
   it("injects reviewer feedback into a human-requested retry prompt", async () => {
     const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
     expect(result.ok).toBe(true);
-    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function), expect.any(Function), undefined, expect.any(Function));
+    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function), expect.any(Function));
   });
 
   it("reuses plan if task.plan is already set", async () => {
@@ -294,67 +294,21 @@ describe("runTask CROSS", () => {
     expect(result.ok).toBe(false);
   });
 
-  // A fix round re-sent the whole task prompt, so the agent re-read a codebase it
-  // had just finished reading — the expensive half of a round, spent rediscovering
-  // what it already knew.
-  describe("resuming the executor's conversation", () => {
-    const resumeCfg = () => cfg({ advisor: null, reuse_conversation: true });
-
-    /** first call reports a session id, then fails so a fix round happens */
-    function failFirstWithSession(): void {
-      mExec.mockReset();
-      mExec.mockImplementationOnce(async (...a: unknown[]) => {
-        (a[9] as (id: string) => void)?.("sess-1");
-        return false;
-      });
-      mExec.mockResolvedValue(true);
-      mFeedback.mockReturnValue("FEEDBACK");
-    }
-
-    it("sends ONLY the feedback, with the session to resume", async () => {
-      failFirstWithSession();
-      await runTask(task, prd, resumeCfg(), "/ws", "/prog");
-      const second = mExec.mock.calls[1];
-      expect(second[1]).toBe("FEEDBACK"); // not the whole task prompt
-      expect(second[10]).toBe("sess-1");
+  // The next attempt is handed this, so it must be the MOST RECENT account —
+  // the first round's is stale the moment a later round has said anything.
+  it("returns the executor's closing account, from the last round", async () => {
+    mExec.mockReset();
+    mExec.mockImplementationOnce(async (...a: unknown[]) => {
+      (a[9] as (t: string) => void)?.("first round said this");
+      return false;
     });
-
-    it("sends the whole prompt again when the knob is off", async () => {
-      failFirstWithSession();
-      await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
-      const second = mExec.mock.calls[1];
-      expect(second[1]).toContain("FEEDBACK");
-      expect(second[1]).toContain("PROMPT"); // buildPrompt's mocked output
-      expect(second[10]).toBeUndefined();
+    mExec.mockImplementationOnce(async (...a: unknown[]) => {
+      (a[9] as (t: string) => void)?.("second round said this");
+      return true;
     });
-
-    // a cli that never reported one cannot be resumed, and inventing a flag for
-    // it would fail the round outright
-    it("returns the executor's closing account, from the LAST round", async () => {
-      mExec.mockReset();
-      mExec.mockImplementationOnce(async (...a: unknown[]) => {
-        (a[11] as (t: string) => void)?.("first round said this");
-        return false;
-      });
-      mExec.mockImplementationOnce(async (...a: unknown[]) => {
-        (a[11] as (t: string) => void)?.("second round said this");
-        return true;
-      });
-      mFeedback.mockReturnValue("FEEDBACK");
-      const r = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
-      // the next attempt wants the most recent account, not the first
-      expect(r.handoff).toBe("second round said this");
-    });
-
-    it("sends the whole prompt again when the cli reported no session", async () => {
-      mExec.mockReset();
-      mExec.mockResolvedValueOnce(false).mockResolvedValue(true);
-      mFeedback.mockReturnValue("FEEDBACK");
-      await runTask(task, prd, resumeCfg(), "/ws", "/prog");
-      const second = mExec.mock.calls[1];
-      expect(second[1]).toContain("PROMPT");
-      expect(second[10]).toBeUndefined();
-    });
+    mFeedback.mockReturnValue("FEEDBACK");
+    const r = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog");
+    expect(r.handoff).toBe("second round said this");
   });
 
   it("exhaust with approved, final exec ok and final verify passes → true", async () => {

@@ -110,7 +110,6 @@ tail -f ralph.out
   "max_review_rounds": 3,
   "max_stalled_review_rounds": 2,
   "advisor_plan_threshold": 3,
-  "reuse_conversation": false,
   "heartbeat_secs": 30,
   "stream_output": true,
   "commit_per_task": true,
@@ -133,31 +132,6 @@ tail -f ralph.out
   A task with no `verify` command is always planned, whatever you set here.
   Raise it to buy fewer advisor calls, lower it to plan everything. Skips are
   logged with the numbers behind them.
-
-- `reuse_conversation` lets a **fix round continue the executor's conversation**
-  instead of re-sending the whole task prompt. A round used to make the agent
-  re-read a codebase it had just finished reading — the expensive half of a
-  round, spent rediscovering what it already knew. With this on, the round sends
-  only the feedback.
-
-  The fresh-context rule is untouched: it is per **task**, and a fix round is the
-  same task still going. Only CLIs that report a session id and have a resume
-  flag can do it (today: `claude`); everything else silently sends the full
-  prompt, exactly as before. Off by default, because a round that no longer
-  restates the task loses context a full prompt would have carried if the CLI's
-  session expired mid-task.
-
-- **Every attempt hands off to the next one.** The executor is asked to close
-  with what it changed and what it learned that the diff does not show — a
-  constraint it hit, an approach that did not work. Those lines are handed to the
-  next attempt of the same task, so a retry continues an investigation instead of
-  restarting it. It costs nothing extra: that final message was already being
-  received and discarded except for its last line.
-
-  It is framed to the retry as a **lead, not a fact** — it describes an attempt
-  that failed, so anything in it may be exactly what went wrong. This works on
-  every CLI, needs no configuration, and unlike `reuse_conversation` it survives
-  a retry, where the session is gone and the worktree was discarded.
 
 - `stream_output` turns on the executor CLI's own event stream, so the live pane
   shows tool calls and answers **as they happen**. Without it a `-p` style CLI

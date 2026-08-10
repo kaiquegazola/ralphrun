@@ -110,6 +110,7 @@ tail -f ralph.out
   "max_review_rounds": 3,
   "max_stalled_review_rounds": 2,
   "advisor_plan_threshold": 3,
+  "reuse_conversation": false,
   "heartbeat_secs": 30,
   "stream_output": true,
   "commit_per_task": true,
@@ -132,6 +133,19 @@ tail -f ralph.out
   A task with no `verify` command is always planned, whatever you set here.
   Raise it to buy fewer advisor calls, lower it to plan everything. Skips are
   logged with the numbers behind them.
+
+- `reuse_conversation` lets a **fix round continue the executor's conversation**
+  instead of re-sending the whole task prompt. A round used to make the agent
+  re-read a codebase it had just finished reading — the expensive half of a
+  round, spent rediscovering what it already knew. With this on, the round sends
+  only the feedback.
+
+  The fresh-context rule is untouched: it is per **task**, and a fix round is the
+  same task still going. Only CLIs that report a session id and have a resume
+  flag can do it (today: `claude`); everything else silently sends the full
+  prompt, exactly as before. Off by default, because a round that no longer
+  restates the task loses context a full prompt would have carried if the CLI's
+  session expired mid-task.
 
 - `stream_output` turns on the executor CLI's own event stream, so the live pane
   shows tool calls and answers **as they happen**. Without it a `-p` style CLI

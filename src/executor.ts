@@ -35,10 +35,20 @@ export function runExecutor(
   extra: string[] = [],
   signal?: AbortSignal,
   onCost?: CostSink,
+  /**
+   * Reports the cli's id for this conversation, so a fix round can continue it
+   * instead of re-sending the whole task. Called at most once per run, with the
+   * last id the stream carried.
+   */
+  onSession?: (sessionId: string) => void,
+  /** continue THIS conversation instead of starting one (see run.ts) */
+  resumeSession?: string,
 ): Promise<boolean> {
   // in-process backend: it owns its own heartbeat and marker classification,
   // because there is no child process to attach readline to
   if (agentDef(execu.cli)?.sdk) {
+    // the SDK path has no argv to carry a resume flag; its conversation reuse
+    // would be holding one Agent across calls, which is its own change
     return runCursorSdkExecutor(execu, prompt, cfg, workspace, progress, task, signal, undefined, onCost);
   }
   return new Promise((resolve) => {
@@ -46,7 +56,7 @@ export function runExecutor(
     // (advisor.ts parses it), so turning its output into events would feed the
     // reviewer's verdict a stream of JSON.
     const stream = cfg.stream_output === false ? undefined : agentDef(execu.cli)?.stream;
-    const cmd = buildCmd(execu.cli, prompt, execu.model, workspace, true);
+    const cmd = buildCmd(execu.cli, prompt, execu.model, workspace, true, "none", resumeSession);
     cmd.push(...(stream?.args ?? []), ...extra, ...cfg.extra_executor_args);
     const tag = task.id;
     const timeout = cfg.task_timeout;
@@ -67,6 +77,7 @@ export function runExecutor(
     // undefined until a cli actually reports a figure: "nobody measured" and
     // "measured zero" must not collapse into the same number
     let costUsd: number | undefined;
+    let sessionId: string | undefined;
 
     const viaStdin = promptViaStdin(execu.cli);
     const proc = spawn(cmd[0], cmd.slice(1), {
@@ -95,6 +106,7 @@ export function runExecutor(
       // summed, not assigned: a cli free to report per-turn costs must not have
       // its last turn silently replace everything before it
       if (ev.costUsd !== undefined) costUsd = (costUsd ?? 0) + ev.costUsd;
+      if (ev.sessionId) sessionId = ev.sessionId;
       // A cli that reports its final answer as its own event kind (claude's
       // `result`) hands it over here even though it is never displayed, so a
       // blocked marker that appears ONLY there is still heard.
@@ -153,6 +165,7 @@ export function runExecutor(
       // the single settle guard above is what makes this exactly-once, on every
       // path — including the timeout and abort ones, which were still billed
       onCost?.(costUsd);
+      if (sessionId) onSession?.(sessionId);
       resolve(v);
     };
     // kill the whole tree, then settle on 'close' — or on the grace timer if a

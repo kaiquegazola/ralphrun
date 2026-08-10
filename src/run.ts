@@ -1,7 +1,7 @@
 // run.ts — run a single task: NATIVE (one claude call with --advisor) or
 // CROSS (planner-before → executor → unified fix loop with verify + review).
 
-import { nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
+import { agentDef, nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
 import type { Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
@@ -46,6 +46,14 @@ export async function runTask(
   // money, and a per-round figure would hide what a stubborn task really cost
   const cost: CostTally = { usd: 0, unknown: false };
   const onCost = (usd: number | undefined): void => addCost(cost, usd);
+  // The cli's id for the conversation THIS task is having. Set by the first
+  // executor call and used by the fix rounds; scoped to runTask, so it dies with
+  // the task — the fresh-context rule is per TASK, and a fix round is the same
+  // task still going, not a new one.
+  let sessionId: string | undefined;
+  const onSession = (id: string): void => {
+    sessionId = id;
+  };
 
   // No verify command and no reviewer: "done" here means nothing more than "the
   // executor exited 0". That is a legitimate setup, but it is silent, and a PRD
@@ -100,7 +108,7 @@ export async function runTask(
   }
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
-  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost);
+  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession);
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -156,11 +164,26 @@ export async function runTask(
       progress,
       t("run.log.fixing", { id: task.id, n: rnd, exec: String(ok), tests: String(testOk), approved: String(approved) }),
     );
-    let fixPrompt = buildPrompt(task, prd, standards);
-    if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
-    fixPrompt += "\n\n" + feedback;
+    // A fix round re-sent the whole task prompt, so the agent re-read a codebase
+    // it had just finished reading — the expensive half of a round, spent to
+    // rediscover what it already knew. Resuming sends only what is new.
+    //
+    // Off by default: it changes what the agent has in context, and a cli whose
+    // session expired mid-task would fail a round that a full prompt would have
+    // survived. `resume` is only ever set when the cli reported an id AND has a
+    // resume flag, so this degrades to the old behaviour rather than erroring.
+    const resume = cfg.reuse_conversation && sessionId && agentDef(execu.cli)?.resumeArgs ? sessionId : undefined;
+    let fixPrompt: string;
+    if (resume) {
+      fixPrompt = feedback;
+      log(progress, t("run.log.resuming", { id: task.id, n: rnd }));
+    } else {
+      fixPrompt = buildPrompt(task, prd, standards);
+      if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
+      fixPrompt += "\n\n" + feedback;
+    }
     emit({ taskId: task.id, subphase: "fixing" });
-    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost);
+    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onSession, resume);
   }
 
   log(progress, t("run.log.exhausted", { id: task.id }));

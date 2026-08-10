@@ -107,6 +107,19 @@ export interface Config {
    * property of the plan and not of this knob. See README.
    */
   max_parallel_tasks?: number;
+  /**
+   * Let a fix round CONTINUE the executor's conversation instead of re-sending
+   * the whole task prompt. Only for clis that report a session id and have a
+   * resume flag (today: claude); everything else ignores it.
+   *
+   * The fresh-context rule is per TASK and is unaffected — a fix round is the
+   * same task still going. What this changes is that the agent keeps what it
+   * already learned about the codebase, which is most of what a round costs.
+   * Default off: it also means a round no longer re-states the task, so a cli
+   * whose session expired mid-task loses context a full prompt would have
+   * carried.
+   */
+  reuse_conversation?: boolean;
   extra_executor_args: string[];
 }
 
@@ -132,6 +145,7 @@ export const DEFAULTS: Config = {
   worktree_per_task: false,
   worktree_link: ["node_modules"],
   max_parallel_tasks: 1,
+  reuse_conversation: false,
   extra_executor_args: [],
 };
 

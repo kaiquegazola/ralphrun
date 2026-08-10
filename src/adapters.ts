@@ -19,6 +19,12 @@ export function buildCmd(
   cwd: string,
   autoApprove: boolean,
   reviewTools: ReviewTools = "none",
+  /**
+   * Continue an earlier conversation instead of starting one. Used only by the
+   * fix loop, where the agent already read the task and the codebase and the
+   * only new information is what went wrong — see run.ts.
+   */
+  resumeSession?: string,
 ): string[] {
   const def = agentDef(cli);
   if (!def) throw new Error(`unknown cli: ${cli}`);
@@ -35,6 +41,9 @@ export function buildCmd(
     cwd,
     autoApprove,
     reviewArgs: reviewTools === "none" ? undefined : reviewTools === "exec" ? (def.reviewExecArgs ?? def.reviewArgs) : def.reviewArgs,
+    // absent when this cli has no resume of its own: the caller then sends a
+    // whole prompt, which is what every cli did before this existed
+    resumeArgs: resumeSession && def.resumeArgs ? def.resumeArgs(resumeSession) : undefined,
   });
 }
 

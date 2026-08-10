@@ -495,6 +495,36 @@ describe("streaming mode", () => {
     expect(seen).toEqual([0.75]);
   });
 
+  // The id is what lets the next fix round continue instead of re-sending the
+  // whole task prompt.
+  it("reports the session id the stream carried, once", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task, [], undefined, undefined, (id) =>
+      seen.push(id),
+    );
+    proc.stdout.write(ev({ type: "system", subtype: "init", session_id: "sess-a" }));
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    expect(seen).toEqual(["sess-a"]);
+  });
+
+  it("says nothing when the cli reported no session at all", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task, [], undefined, undefined, (id) =>
+      seen.push(id),
+    );
+    proc.stdout.write(ev({ type: "result", subtype: "success", result: "done" }));
+    await tick();
+    closeProc(proc, 0);
+    await p;
+    expect(seen).toEqual([]);
+  });
+
   it("keeps the run alive on an oversized line instead of parsing megabytes", async () => {
     const proc = makeProc();
     spawnMock.mockReturnValue(proc);

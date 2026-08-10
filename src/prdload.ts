@@ -56,35 +56,48 @@ export function normalizePrd(obj: unknown, opts?: NormalizePrdOptions): boolean 
   return changed;
 }
 
-// First dependency cycle in the graph, as the path that closes it (T1→T2→T1),
-// or null. Iterative colours would be cheaper to reason about, but a backlog is
-// tens of tasks deep, so recursion is fine and the path falls out of the stack.
-// Only the FIRST cycle is reported: the rest are usually the same knot seen from
-// another node, and one named cycle is enough to make the PRD fixable.
-function findDepCycle(edges: Map<string, string[]>): string[] | null {
+/**
+ * EVERY dependency cycle in the graph, each as the path that closes it
+ * (T1→T2→T1). Iterative colours would be cheaper to reason about, but a backlog
+ * is tens of tasks deep, so recursion is fine and the path falls out of the
+ * stack.
+ *
+ * Reporting one at a time turns untangling a knotted backlog into a round trip
+ * per cycle: fix the reported one, re-run, discover the next. The walk still
+ * stops descending into a node it has already closed, so each cycle is reported
+ * once and a diamond (A→B, A→C, B/C→D) is not mistaken for one.
+ */
+function findDepCycles(edges: Map<string, string[]>): string[][] {
   const state = new Map<string, "open" | "closed">();
   const path: string[] = [];
-  const visit = (id: string): string[] | null => {
+  const found: string[][] = [];
+  // A cycle is reachable from every node on it, so the same loop would be
+  // reported once per entry point without this.
+  const seen = new Set<string>();
+  const visit = (id: string): void => {
     const s = state.get(id);
-    if (s === "closed") return null;
-    if (s === "open") return path.slice(path.indexOf(id)).concat(id);
+    if (s === "closed") return;
+    if (s === "open") {
+      const cycle = path.slice(path.indexOf(id)).concat(id);
+      // canonical key: the members, order-independent, so the same loop entered
+      // from B instead of A is recognised as the one already recorded
+      const key = JSON.stringify([...cycle].sort());
+      if (!seen.has(key)) {
+        seen.add(key);
+        found.push(cycle);
+      }
+      return;
+    }
     state.set(id, "open");
     path.push(id);
     // the caller filtered every dep down to a key of this same map, so a lookup
     // here cannot miss — and a `?? []` fallback would silently hide it if it did
-    for (const d of edges.get(id)!) {
-      const cycle = visit(d);
-      if (cycle) return cycle;
-    }
+    for (const d of edges.get(id)!) visit(d);
     path.pop();
     state.set(id, "closed");
-    return null;
   };
-  for (const id of edges.keys()) {
-    const cycle = visit(id);
-    if (cycle) return cycle;
-  }
-  return null;
+  for (const id of edges.keys()) visit(id);
+  return found;
 }
 
 // Glob → anchored RegExp. "**" crosses directories, "*"/"?" do not. A trailing
@@ -266,8 +279,7 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
     const scope = Array.isArray(t.scope) ? t.scope.filter((s): s is string => typeof s === "string") : [];
     scoped.push({ id: t.id, deps, scope });
   }
-  const cycle = findDepCycle(edges);
-  if (cycle) errors.push(msg("prd.err.depCycle", { cycle: cycle.join(" -> ") }));
+  for (const cycle of findDepCycles(edges)) errors.push(msg("prd.err.depCycle", { cycle: cycle.join(" -> ") }));
 
   for (const o of overlappingScopePairs(scoped)) errors.push(msg("prd.err.scopeOverlap", o));
 
@@ -301,7 +313,7 @@ function seedSafe(obj: object): PRD {
 // back-to-filepick flows.
 // ok:true carries `normalized` so each caller persists the cleanup itself.
 export type PrdLoadResult =
-  | { ok: true; prd: PRD; normalized: boolean }
+  | { ok: true; prd: PRD; normalized: boolean; warnings: string[] }
   | { ok: false; errors: string[]; prd?: PRD };
 
 export function loadPrdFile(path: string, opts?: NormalizePrdOptions): PrdLoadResult {
@@ -320,11 +332,16 @@ export function loadPrdFile(path: string, opts?: NormalizePrdOptions): PrdLoadRe
   }
   // Whole-PRD posture check, distinct from run.ts's per-task "this task has no
   // gate" line: a backlog that is MOSTLY unverified is a plan problem, and the
-  // operator has to see it before the loop starts. Straight to stderr because
-  // intake happens before any logger or TUI exists.
+  // operator has to see it before the loop starts.
+  //
+  // RETURNED rather than printed. Intake runs before any logger exists, so this
+  // used to go straight to stderr — where it scrolls past under the TUI and,
+  // worse, never reaches progress.md, which is the only record an unattended run
+  // leaves behind. The caller decides; startRun logs it.
+  const warnings: string[] = [];
   const unverified = unverifiedTaskIndexes((obj as { tasks: Record<string, unknown>[] }).tasks);
   if (unverified.length > 0) {
-    console.error(msg("prd.warn.noVerify", { n: unverified.length, total: (obj as PRD).tasks.length }));
+    warnings.push(msg("prd.warn.noVerify", { n: unverified.length, total: (obj as PRD).tasks.length }));
   }
-  return { ok: true, prd: obj as PRD, normalized };
+  return { ok: true, prd: obj as PRD, normalized, warnings };
 }

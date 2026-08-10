@@ -179,6 +179,38 @@ it("finds a cycle that no acyclic task depends on", () => {
   expect(r.errors).toContain("dependency cycle: B -> C -> B — no task in it can ever start");
 });
 
+// Reporting one cycle at a time turns untangling a knotted backlog into a round
+// trip per cycle: fix, re-run, discover the next.
+it("reports EVERY independent cycle in one pass", () => {
+  const r = validatePrd(
+    prd({
+      tasks: [
+        task({ id: "A", deps: ["B"] }),
+        task({ id: "B", deps: ["A"] }),
+        task({ id: "C", deps: ["D"] }),
+        task({ id: "D", deps: ["C"] }),
+      ],
+    }),
+  );
+  expect(r.errors.filter((e) => e.startsWith("dependency cycle:"))).toHaveLength(2);
+});
+
+// the same loop is reachable from every node on it, so without a canonical key
+// a 3-cycle would be reported three times and read as three separate problems
+it("reports one loop once, however many nodes lead into it", () => {
+  const r = validatePrd(
+    prd({
+      tasks: [
+        task({ id: "A", deps: ["B"] }),
+        task({ id: "B", deps: ["C"] }),
+        task({ id: "C", deps: ["A"] }),
+        task({ id: "X", deps: ["A"] }), // another way in
+      ],
+    }),
+  );
+  expect(r.errors.filter((e) => e.startsWith("dependency cycle:"))).toHaveLength(1);
+});
+
 // the regression that a naive "already on the stack" check causes: a diamond
 // visits A twice on two different paths, which is re-convergence, not a cycle.
 it("accepts a diamond DAG (a node reached twice is not a cycle)", () => {

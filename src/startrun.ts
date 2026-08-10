@@ -29,7 +29,7 @@ import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
 import { type CostTally } from "./stream.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
-import { ignoredDirsWouldBeShared, reapOrphanWorktrees, tasksInstallingDeps } from "./worktree.js";
+import { claimRunLock, ignoredDirsWouldBeShared, reapOrphanWorktrees, tasksInstallingDeps } from "./worktree.js";
 
 export interface RunOptions {
   prd: string;
@@ -145,6 +145,10 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
     savePRD(prdPath, prd0);
     log(progress, t("loop.log.recovered"));
   }
+  // Through log(), not stderr: under the TUI a stderr line scrolls past unread,
+  // and it would never reach progress.md — the only record an unattended run
+  // leaves. Only here, never on a mid-run reload, which would repeat it per task.
+  for (const w of loaded.warnings) log(progress, w);
 
   // mid-run reloads run the SAME parse→normalize→validate pipeline as the
   // preflight: a file corrupted or shape-broken MID-RUN (the executor agent can
@@ -235,6 +239,15 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
   }
 
   if (!opts.dryRun) {
+    // BEFORE the reap, which force-deletes every cell under .ralphrun: a second
+    // run in this workspace would otherwise delete the first one's live
+    // worktrees while its executors are still writing into them.
+    const holder = claimRunLock(workspace);
+    if (holder !== null) {
+      console.error(t("loop.err.alreadyRunning", { pid: String(holder), path: workspace }));
+      process.exit(1);
+    }
+
     // Unconditional, not gated on worktree_per_task: at boot no ralphrun
     // worktree can legitimately be live, so turning the feature OFF after a
     // crash must still clean up what the crash left. Same invariant as

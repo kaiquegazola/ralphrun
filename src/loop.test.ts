@@ -48,6 +48,9 @@ vi.mock("./worktree.js", () => ({
   // false = this filesystem clones, so cells are isolated and there is no hazard
   ignoredDirsWouldBeShared: vi.fn(() => false),
   tasksInstallingDeps: vi.fn(() => []),
+  // null = the workspace was free
+  claimRunLock: vi.fn(() => null),
+  releaseRunLock: vi.fn(),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
 // the wave integration gate shells out for real otherwise — every existing wave
@@ -75,10 +78,12 @@ import { findTask, nextTask, readyTasks } from "./prd.js";
 import { log, setReporter } from "./log.js";
 import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths } from "./git.js";
 import {
+  claimRunLock,
   createTaskWorktree,
   ignoredDirsWouldBeShared,
   mergeBackTaskWork,
   reapOrphanWorktrees,
+  releaseRunLock,
   removeTaskWorktree,
   tasksInstallingDeps,
   worktreeLoss,
@@ -124,6 +129,8 @@ const mReapWorktrees = vi.mocked(reapOrphanWorktrees);
 const mRemoveWorktree = vi.mocked(removeTaskWorktree);
 const mWorktreeLoss = vi.mocked(worktreeLoss);
 const mDepsShared = vi.mocked(ignoredDirsWouldBeShared);
+const mClaimLock = vi.mocked(claimRunLock);
+const mReleaseLock = vi.mocked(releaseRunLock);
 const mTasksInstalling = vi.mocked(tasksInstallingDeps);
 const mRunTask = vi.mocked(runTask);
 const mVerifyCmd = vi.mocked(runVerifyCommand);
@@ -236,6 +243,7 @@ beforeEach(() => {
   mDepsShared.mockReturnValue(false);
   mTasksInstalling.mockReturnValue([]);
   mVerifyCmd.mockResolvedValue({ passed: true, output: "" });
+  mClaimLock.mockReturnValue(null);
   mMount.mockReturnValue(makeHandle());
   mSelect.mockResolvedValue("start" as never);
   mPickModel.mockResolvedValue("claude:sonnet");
@@ -839,6 +847,26 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await runLoop({ prd: "prd.json" });
     expect(mCreateWorktree).not.toHaveBeenCalled();
     expect(mRunTask.mock.calls[0][3]).toBe(resolve("."));
+  });
+
+  // the reap force-deletes every cell under .ralphrun, so a second run would
+  // delete the first one's live worktrees while its executors write into them
+  it("refuses to start when another run holds the workspace, naming the pid", async () => {
+    mClaimLock.mockReturnValue(4242);
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("4242"));
+    expect(mReapWorktrees).not.toHaveBeenCalled();
+    expect(mRunTask).not.toHaveBeenCalled();
+  });
+
+  it("releases the workspace even when the run did nothing", async () => {
+    mNextTask.mockReset();
+    mNextTask.mockReturnValue(null);
+    mReadyTasks.mockReturnValue([] as never);
+    await runLoop({ prd: "prd.json" });
+    // a claim left behind makes the NEXT run diagnose a stale pid instead of
+    // just starting
+    expect(mReleaseLock).toHaveBeenCalled();
   });
 
   it("reclaims orphan worktrees at boot even with the feature off", async () => {

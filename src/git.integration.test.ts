@@ -14,11 +14,13 @@ import { join } from "node:path";
 
 import { captureReviewBase, commitPaths, headCommit, taskChangedPaths } from "./git.js";
 import {
+  claimRunLock,
   cloneDir,
   createTaskWorktree,
   ignoredDirsWouldBeShared,
   mergeBackTaskWork,
   reapOrphanWorktrees,
+  releaseRunLock,
   removeTaskWorktree,
   seedIgnoredDir,
   worktreeLoss,
@@ -378,6 +380,50 @@ describe("per-task worktrees", () => {
     // prepareRun inits a repo with no commit, and a task must degrade to the
     // main workspace instead of failing on infrastructure it cannot fix
     expect(createTaskWorktree(ws, "T1", [])).toBeNull();
+  });
+});
+
+// reapOrphanWorktrees force-deletes every cell at boot on the theory that none
+// can legitimately be live. That theory is only true of ONE loop per workspace,
+// and this is what makes it true — a second run used to delete the first one's
+// cells while its executors were writing into them.
+describe("the run lock", () => {
+  it("refuses a second run and names the pid holding the workspace", () => {
+    // a DIFFERENT pid that is genuinely alive — our parent. Reusing our own
+    // would take the idempotent path and prove nothing.
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.ppid));
+    expect(claimRunLock(ws)).toBe(process.ppid);
+  });
+
+  it("is idempotent for the process that already holds it", () => {
+    expect(claimRunLock(ws)).toBeNull();
+    expect(claimRunLock(ws)).toBeNull();
+  });
+
+  it("takes over a lock whose holder is gone, without needing a manual rm", () => {
+    // a crash leaves the file behind; requiring the user to delete it would make
+    // every crash need a manual step before the next run
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), "999999"); // no such pid
+    expect(claimRunLock(ws)).toBeNull();
+    expect(readFileSync(join(ws, ".ralphrun", "run.lock"), "utf8")).toBe(String(process.pid));
+  });
+
+  it("releases only its own claim", () => {
+    claimRunLock(ws);
+    releaseRunLock(ws);
+    expect(existsSync(join(ws, ".ralphrun", "run.lock"))).toBe(false);
+
+    // someone else's claim must survive our release — overrunning a stale lock
+    // and then exiting must not unlock the run that legitimately holds it now
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.pid + 1));
+    releaseRunLock(ws);
+    expect(existsSync(join(ws, ".ralphrun", "run.lock"))).toBe(true);
+  });
+
+  it("does not throw when there is no lock to release", () => {
+    expect(() => releaseRunLock(ws)).not.toThrow();
   });
 });
 

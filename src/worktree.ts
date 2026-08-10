@@ -11,7 +11,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { git, gitOut, headCommit } from "./git.js";
 
@@ -206,16 +206,71 @@ export function removeTaskWorktree(workspace: string, dir: string): void {
 }
 
 /**
- * At boot no ralphrun worktree can legitimately be live, so a leftover one is a
- * crash's litter and recovery needs no state file. This is the exact sibling of
- * normalizePrd resetting a stuck `doing` task, one layer down. It runs even
- * when worktree_per_task is off this run, so turning the feature off after a
- * crash still cleans up.
+ * A leftover worktree is a crash's litter, and recovery needs no state file:
+ * this is the exact sibling of normalizePrd resetting a stuck `doing` task, one
+ * layer down. It runs even when worktree_per_task is off this run, so turning
+ * the feature off after a crash still cleans up.
  *
- * ponytail: assumes one loop per workspace — two concurrent loops on the same
- * prd.json would reap each other's live worktrees. Already broken today for
- * other reasons; add a lock if that ever becomes a real workflow.
+ * "No ralphrun worktree can legitimately be live at boot" is true of ONE loop
+ * per workspace, and that is what claimRunLock enforces — without it a second
+ * run in the same repo reaped the first one's live cells out from under its
+ * executors, mid-edit.
  */
+const LOCK = join(".ralphrun", "run.lock");
+
+/**
+ * Claim this workspace for one run. Returns the pid holding it, or null on
+ * success.
+ *
+ * `wx` is the whole mechanism: the create-exclusive flag makes "test and claim"
+ * ONE syscall, so two ralphruns starting together cannot both win. A lock whose
+ * pid is no longer alive is a crash's litter, exactly like an orphan worktree,
+ * and is taken over rather than reported — otherwise every crash would need a
+ * manual `rm` before the next run.
+ *
+ * Not advisory: reapOrphanWorktrees force-deletes every cell under .ralphrun at
+ * boot, so a second run WILL delete the first one's live worktrees while its
+ * executors are writing into them.
+ */
+export function claimRunLock(workspace: string): number | null {
+  const file = join(workspace, LOCK);
+  mkdirSync(join(workspace, ".ralphrun"), { recursive: true });
+  try {
+    writeFileSync(file, String(process.pid), { flag: "wx" });
+    return null;
+  } catch {
+    const holder = Number(readFileSync(file, "utf8").trim());
+    if (holder === process.pid) return null; // already ours
+    if (holder && pidAlive(holder)) return holder;
+    // Stale — the holder crashed. OVERWRITTEN rather than unlinked and
+    // recreated: one syscall, so there is no window in which the file is absent
+    // for a third run to slip into.
+    writeFileSync(file, String(process.pid));
+    return null;
+  }
+}
+
+export function releaseRunLock(workspace: string): void {
+  const file = join(workspace, LOCK);
+  try {
+    // only if it is still OURS: a run that overran a stale claim must not delete
+    // the lock of whoever legitimately holds it now
+    if (Number(readFileSync(file, "utf8").trim()) === process.pid) rmSync(file, { force: true });
+  } catch {
+    /* no lock to release is not a failure */
+  }
+}
+
+/** signal 0 asks "does this pid exist", kills nothing */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function reapOrphanWorktrees(workspace: string): number {
   const marker = sep + WORKTREES + sep;
   let n = 0;

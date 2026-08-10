@@ -294,23 +294,28 @@ describe("loadPrdFile", () => {
   // on). Every backlog written before the rule exists still has to load, so the
   // load path only warns — and it warns about the PRD as a whole, which is what
   // run.ts's per-task "no verify" line cannot say.
+  // RETURNED, not printed: a stderr line scrolls past unread under the TUI and
+  // never reaches progress.md, which is all an unattended run leaves behind.
   it("loads an unverified backlog but warns once with the whole-PRD count", () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     mRead.mockReturnValue(
       JSON.stringify(prd({ tasks: [task({ id: "A", verify: undefined }), task({ id: "B", verify: "  " })] })),
     );
-    expect(loadPrdFile("/x/prd.json").ok).toBe(true);
-    expect(err).toHaveBeenCalledTimes(1);
-    expect(err.mock.calls[0][0]).toContain("2/2 tasks have no verify command");
+    const r = loadPrdFile("/x/prd.json");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.warnings).toHaveLength(1);
+      expect(r.warnings[0]).toContain("2/2 tasks have no verify command");
+    }
+    expect(err).not.toHaveBeenCalled();
     err.mockRestore();
   });
 
   it("stays quiet when every task has a verify command", () => {
-    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     mRead.mockReturnValue(JSON.stringify(prd()));
-    expect(loadPrdFile("/x/prd.json").ok).toBe(true);
-    expect(err).not.toHaveBeenCalled();
-    err.mockRestore();
+    const r = loadPrdFile("/x/prd.json");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.warnings).toEqual([]);
   });
 
   // the load path must NOT inherit the shim's requireVerify default

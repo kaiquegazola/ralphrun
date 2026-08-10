@@ -16,7 +16,7 @@ import { runTask, type RunTaskResult } from "./run.js";
 import { runVerifyCommand } from "./verify.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
 import { configureAgents, runMode, startRun, type RunOptions } from "./startrun.js";
-import { createTaskWorktree, mergeBackTaskWork, removeTaskWorktree, worktreeLoss } from "./worktree.js";
+import { createTaskWorktree, mergeBackTaskWork, releaseRunLock, removeTaskWorktree, worktreeLoss } from "./worktree.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
 
@@ -90,6 +90,10 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     if (timeTicker) clearInterval(timeTicker);
     setReporter(null);
     tui?.unmount();
+    // FIRST, before the early return below: a run that did nothing still holds
+    // the workspace, and leaving the claim behind makes the next run diagnose a
+    // stale pid instead of just starting.
+    releaseRunLock(workspace);
     // after unmount, so the accounting survives in the terminal instead of
     // scrolling by inside a pane that is about to disappear
     if (tasksRun === 0) return; // nothing ran: no accounting to report

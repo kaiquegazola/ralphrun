@@ -128,15 +128,18 @@ function patternsOverlap(a: string, b: string): boolean {
 /**
  * Paths a task actually touched that its declared `scope` does not cover.
  *
- * WARN only, deliberately: `scope` is the planner's GUESS, while the merge-back
- * cherry-pick enforces the FACT that two tasks really did edit the same lines.
- * Failing a task on the guess blocks work that would have merged fine — in THIS
- * repo it would block nearly everything, since MsgKey derives from the `en`
- * dict, so any task adding a message must edit src/i18n.ts and no planner puts
- * that in a task's scope. An empty scope declares nothing, so it escapes nothing.
+ * This is a GATE (see loop.ts): a task that edits outside its declared scope
+ * invalidated the proof its wave was scheduled on, so the merge is no longer
+ * known to be safe and the task fails.
  *
- * ponytail: revisit fail-closed once planner scope declarations stop producing
- * false positives; it is a product call, not a technical one.
+ * An empty scope declares nothing and so escapes nothing, which is what bounds
+ * the blast radius: only a backlog authored WITH scopes is gated, and every one
+ * written before the field existed runs exactly as before.
+ *
+ * The cost is real and worth naming: a scope is the planner's guess, so a task
+ * that legitimately has to touch a shared file fails until the plan says so. In
+ * THIS repo, MsgKey derives from the `en` dict, so any task adding a message
+ * must edit src/i18n.ts — a plan for this project has to put it in scope.
  */
 export function pathsOutsideScope(paths: string[], scope: string[]): string[] {
   const allowed = scope.map((p) => globToRegExp(p));

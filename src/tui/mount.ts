@@ -17,6 +17,7 @@ export interface TuiHandle {
     shouldQuit(): boolean;
     takeSkip(): boolean; // consume-once: returns then clears skipRequested
     beginTask(): AbortSignal; // fresh AbortController per task; skip-confirm aborts it
+    endTask(signal: AbortSignal): void; // drops it: a settled task is not skippable
   };
   waitConfigOrResume(): Promise<"resume" | "config" | "quit">;
   waitStalled(): Promise<"retry" | "quit">;
@@ -36,11 +37,12 @@ export function mount(
   let state: UiState = reducer(initialStateWithTasks, { type: "seedTasks", tasks: seedTasks });
   const subs = new Set<() => void>();
   // one controller per IN-FLIGHT task: a wave runs several executors at once, so
-  // a single slot would leave every task but the last one un-killable.
-  // ponytail: never pruned — a finished task's controller is an empty object and
-  // aborting it again is a no-op; add an endTask() if a run's task count ever
-  // makes that memory matter.
-  const acs = new Set<AbortController>();
+  // a single slot would leave every task but the last one un-killable. Keyed by
+  // signal so a settled task can drop its own without the caller holding the
+  // controller — otherwise a long backlog accumulates one per attempt, and a
+  // skip walks every task the run has ever started to abort the two that are
+  // actually live.
+  const acs = new Map<AbortSignal, AbortController>();
 
   const store = {
     subscribe(cb: () => void): () => void {
@@ -60,7 +62,7 @@ export function mount(
       // children so the control takes effect now, not after the task finishes.
       // Deliberately coarse: it kills the WHOLE wave, because the dashboard has
       // no per-task selection to aim a skip at.
-      if (state.skipRequested || state.quit) for (const ac of acs) ac.abort();
+      if (state.skipRequested || state.quit) for (const ac of acs.values()) ac.abort();
       for (const cb of subs) cb();
     },
   };
@@ -80,8 +82,11 @@ export function mount(
       },
       beginTask: () => {
         const ac = new AbortController();
-        acs.add(ac);
+        acs.set(ac.signal, ac);
         return ac.signal;
+      },
+      endTask: (signal) => {
+        acs.delete(signal);
       },
     },
     waitConfigOrResume: () =>

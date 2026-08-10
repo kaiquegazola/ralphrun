@@ -296,11 +296,17 @@ tail -f ralph.out
   Integration tasks whose `verify` runs the whole suite are the fix, and they
   come from the plan. Do not raise this knob far before your backlog has them.
 
-- **`scope` is checked at runtime as a WARNING, never a gate.** If a task edits
-  paths its declared `scope` does not cover, the run says so in `progress.md`
-  and carries on. Failing the task would enforce the planner's guess instead of
-  the merge's fact, and in a typical repo a shared file every task must touch
-  would block essentially everything.
+- **`scope` is a GATE at runtime.** A task that edits paths its declared `scope`
+  does not cover **fails** — it invalidated the proof its wave was scheduled on,
+  so the merge is no longer known to be safe. In worktree mode the cell is
+  discarded, so the escaped work never reaches the trunk, and the next attempt is
+  told which paths escaped and what the scope was.
+
+  A task with **no** `scope` declares nothing and cannot escape, so a backlog
+  written before the field existed runs exactly as before. But once you declare
+  scopes, declare them honestly: a shared file every task must touch has to be in
+  the scope of every task that touches it. In this repo `MsgKey` derives from the
+  `en` dict, so any task adding a message must list `src/i18n.ts`.
 
 - **What parallelism costs you.** The budget is checked *between* waves, so
   `max_cost_usd` can be overshot by up to one wave's worth of tasks — killing
@@ -629,11 +635,10 @@ and add build or integration tests when the task changes integration surface.
 
 `scope` is optional: the paths or globs the task is allowed to edit. Two tasks
 with no dependency path between them may not declare overlapping scope — see
-below. At run time it is **a warning, never a gate**: a task that edits outside
-its declared scope says so in `progress.md` and still passes, because `scope` is
-the planner's guess while the cherry-pick is what actually refuses a collision.
-It is also declared so the reviewer gets a checkable contract (paths changed
-outside `scope`) instead of a judgement call.
+below. At run time it is **a gate**: a task that edits outside its declared scope
+fails and retries with the escaped paths named in its feedback. An empty `scope`
+declares nothing and cannot escape. It also gives the reviewer a checkable
+contract (paths changed outside `scope`) instead of a judgement call.
 
 `deps` is the other half of the plan's quality. Declare an edge only when a task
 **consumes** something the earlier one produces — "comes later in the narrative"
@@ -702,24 +707,37 @@ src/
   config.ts     # DEFAULTS, parse_agent, load_config (global < project < flags)
   userconfig.ts # per-user global config (sanitize + atomic write)
   i18n.ts       # en + pt-br dicts, typed t()
-  prd.ts        # backlog types, recover/normalize, next_task
+  prd.ts        # backlog types, ready/next task selection
+  prdload.ts    # THE intake pipeline: parse -> normalize -> validate. Cycle,
+                #   scope-overlap and verify refusals live here.
   agents.ts     # THE agent registry: one entry per CLI (bin, models, buildCmd,
                 #   auth probe, native-advisor capability) + the JSON manifest
                 #   loader that lets a user register a CLI without forking.
   adapters.ts   # build_cmd — thin seam over the registry
   prompts.ts    # executor/advisor prompt templates (always English)
   log.ts        # stdout/reporter + progress.md with timestamps
-  git.ts        # git + capture_diff
+  git.ts        # git plumbing: scoped commits, review baselines, diffs
+  worktree.ts   # per-task cell: create, seed, merge back, reap + the run lock
+  spawn.ts      # process-tree spawn/kill (the whole group, not just the child)
+  stream.ts     # cli event parsing, tool-call rendering, cost tallies
   executor.ts   # streaming executor + heartbeat + AbortSignal cancel
+  cursor-sdk.ts # the in-process `cursorsdk` backend (optional @cursor/sdk)
   advisor.ts    # get_advice + advisor_review (CROSS)
+  reviewexec.ts # what the reviewer is allowed to run, as a pure decision
   verify.ts     # objective gate + assembled feedback
   browser.ts    # dev-browser validation tool: opt-in detection + prompt guide
+  plan-cache.ts # advisor plan provenance + the measured-facts router
+  elapsed.ts    # per-task/global clocks, pause-aware
   run.ts        # NATIVE vs CROSS per task
-  loop.ts       # main loop: recover, preflight, route, run, retry, commit
+  startrun.ts   # everything true BEFORE the first task: config, intake, menu,
+                #   preflight, workspace lock, dashboard mount
+  loop.ts       # the loop itself: waves, worktrees, gates, retry, commit
   wizard.ts     # ralphrun init glue (non-TTY fallback + finalize writes)
   configcmd.ts  # ralphrun config show/edit (+ --global show/reset)
   picker.ts     # fuzzy file search ('@' picker) + attachment reader
   diagnostics.ts# CLI installed/logged-in preflight
+  userconfig.ts # global preferences (~/.config/ralphrun)
+  i18n.ts       # the en / pt-br dicts; MsgKey derives from `en`
   tui/
     fullscreen.ts        # alt-screen + alternate-scroll escape codes
     events.ts            # structured run events bus

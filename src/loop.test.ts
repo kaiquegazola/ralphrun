@@ -179,6 +179,7 @@ function makeHandle(over: {
       shouldQuit: vi.fn(() => over.shouldQuit ?? false),
       takeSkip: vi.fn(() => over.takeSkip ?? false),
       beginTask: vi.fn(() => SIG),
+      endTask: vi.fn(),
     },
     waitConfigOrResume: vi.fn(async () => "resume"),
     waitStalled: vi.fn(async () => "quit"),
@@ -1489,6 +1490,10 @@ describe("runLoop parallel waves", () => {
     fastTimers();
     mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, max_parallel_tasks: 2 }));
     mHeadCommit.mockReturnValue("base-sha");
+    // These tasks declare a scope, so the outer default (a path outside it)
+    // would trip the scope gate in every one of them. Nothing moved = nothing
+    // escaped; the tests that care about escaping set their own paths.
+    mTaskChangedPaths.mockReturnValue([]);
   });
 
   it("runs two ready tasks at the same time and both reach done", async () => {
@@ -1753,9 +1758,9 @@ describe("runLoop parallel waves", () => {
     expect(mRemoveWorktree).toHaveBeenCalledTimes(2);
   });
 
-  it("warns about paths outside a task's declared scope without failing it", async () => {
-    // scope is the planner's GUESS; the cherry-pick enforces the fact. Failing
-    // on the guess would block nearly every task in this very repo.
+  // `scope` is what the plan compiler refused overlapping pairs on, so a task
+  // that edits outside it invalidated the proof its wave was scheduled on.
+  it("FAILS a task that edited outside its declared scope, and does not land it", async () => {
     mLoadConfig.mockReturnValue(cfg());
     const read = livePrd([wtTask("A", ["src/api/**"])]);
     dispatchOnce();
@@ -1765,7 +1770,44 @@ describe("runLoop parallel waves", () => {
 
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("src/i18n.ts"));
+    expect(read().A.status).not.toBe("done");
+    // the escaped work must not reach the trunk: in worktree mode not landing is
+    // what discards the cell, which is the rollback
+    expect(mMergeBack).not.toHaveBeenCalled();
+  });
+
+  // An executor told only "you failed" fails the same way until the retries run
+  // out, then hits the stall detector. The next attempt has to know WHICH paths.
+  it("tells the next attempt which paths escaped and what its scope was", async () => {
+    mLoadConfig.mockReturnValue(cfg());
+    livePrd([wtTask("A", ["src/api/**"])]);
+    mReadyTasks.mockReset();
+    mReadyTasks
+      .mockImplementationOnce(((p: { tasks: { status: string }[] }) => p.tasks.filter((x) => x.status === "todo")) as never)
+      .mockImplementationOnce(((p: { tasks: { status: string }[] }) => p.tasks.filter((x) => x.status === "todo")) as never)
+      .mockReturnValue([] as never);
+    mTaskChangedPaths.mockReturnValue(["src/api/h.ts", "src/i18n.ts"]);
+
+    await runLoop({ prd: "prd.json" });
+
+    // 7th arg of runTask is reviewRetryFeedback
+    const feedback = String(mRunTask.mock.calls[1]?.[6] ?? "");
+    expect(feedback).toContain("src/i18n.ts");
+    expect(feedback).toContain("src/api/**");
+  });
+
+  // an empty scope declares nothing, so a backlog written before `scope` existed
+  // must keep running exactly as it did
+  it("cannot escape a scope that declares nothing", async () => {
+    mLoadConfig.mockReturnValue(cfg());
+    const read = livePrd([wtTask("A")]);
+    dispatchOnce();
+    mTaskChangedPaths.mockReturnValue(["anything.ts"]);
+
+    await runLoop({ prd: "prd.json" });
+
     expect(read().A.status).toBe("done");
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("outside its declared scope"));
   });
 
   // progress.md is all an unattended run leaves behind, so the warning names the

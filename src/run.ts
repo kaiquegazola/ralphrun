@@ -193,10 +193,10 @@ function injectReviewRetryFeedback(prompt: string, feedback?: string): string {
   // from answering that nothing needs doing.
   return `${prompt}
 
-## Human-requested review retry
-A previous attempt at this task was rejected by the reviewer. That attempt may have been rolled back, so do not assume the workspace still contains it — implement the task from what is there now, with concrete code, test, or config changes that address the feedback below. Do not answer by arguing that no changes are needed. If the feedback is impossible or out of scope, make the smallest unblocker and explain the constraint in the final response.
+## A previous attempt at this task was rejected
+That attempt may have been rolled back, so do not assume the workspace still contains it — implement the task from what is there now, with concrete code, test, or config changes that address the feedback below. Do not answer by arguing that no changes are needed. If the feedback is impossible or out of scope, make the smallest unblocker and explain the constraint in the final response.
 
-Reviewer feedback:
+Why it was rejected:
 ${trimmed}`;
 }
 

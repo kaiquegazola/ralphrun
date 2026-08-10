@@ -203,12 +203,15 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     // land on, so history order inside a wave is nondeterministic. Fine — a wave
     // only ever holds tasks the graph does not order.
     //
-    // ponytail: an executor that rewrites prd.json rewrites the WORKTREE's copy,
-    // which is frozen at the base commit while the live one keeps moving. That
-    // fails closed rather than silently — the live file is dirty, so the pick is
-    // refused and the task blocks — but it does mean mid-run backlog edits do
-    // not work in worktree mode. Give the worktree a symlink to the real file if
-    // that ever needs to work.
+    // A cell holds a prd.json frozen at its base commit, and that is CORRECT —
+    // do not "fix" it with a symlink to the live file. The loop never reads the
+    // cell's copy (every savePRD and reload uses prdPath), so a user editing the
+    // backlog mid-run is seen either way. The only behaviour the frozen copy
+    // changes is what happens when an executor breaks the rule and writes to
+    // prd.json anyway: today its commit conflicts with the live file and the
+    // task blocks. A symlink would instead let that write land directly in the
+    // real backlog — turning a fail-closed rule violation into silent corruption
+    // of the file the whole run is steered by.
     //
     // "someone already said, with a sha, what happened to this worktree's work" —
     // so the discard notice below does not repeat a line the merge already wrote.
@@ -302,24 +305,37 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       if (tui?.control.takeSkip()) batchSkipped = true;
       const skipped = batchSkipped;
 
-      // A WARNING, never a gate — see pathsOutsideScope. `scope` is what makes a
-      // wave safe, but it is the planner's guess, and the cherry-pick already
-      // refuses the collisions that actually happen. Recorded because progress.md
-      // is all an unattended run leaves behind, and a backlog whose tasks keep
-      // escaping their scope has a PLANNER problem worth seeing.
+      // A GATE. `scope` is the contract the plan compiler refused overlapping
+      // pairs on, and it is the whole reason a wave can be scheduled without a
+      // runtime check — a task that edits outside it invalidated the proof its
+      // wave was picked on, so the merge is no longer known to be safe.
+      //
+      // BEFORE landWorktreeWork below, deliberately: an escaped task must not
+      // reach the trunk at all, and in worktree mode not landing means the cell
+      // is discarded, which is the rollback. The escape goes back to the next
+      // attempt as feedback rather than just blocking, because an executor told
+      // only "you failed" fails the same way until the retries run out.
+      //
+      // An EMPTY scope declares nothing and so cannot escape, which is what
+      // keeps every backlog written before `scope` existed running as before.
       const declaredScope = task.scope ?? [];
       if (!skipped && result.ok && declaredScope.length > 0) {
         const moved = taskChangedPaths(taskWorkspace, taskBaselines.get(task.id)) ?? [];
         const escaped = pathsOutsideScope(moved, declaredScope);
         if (escaped.length > 0) {
-          log(
-            progress,
-            t("loop.log.scopeEscape", {
-              id: task.id,
-              n: escaped.length,
-              paths: escaped.slice(0, 3).join(", ") + (escaped.length > 3 ? ", …" : ""),
-            }),
+          const sample = escaped.slice(0, 3).join(", ") + (escaped.length > 3 ? ", …" : "");
+          log(progress, t("loop.log.scopeEscape", { id: task.id, n: escaped.length, paths: sample }));
+          pendingReviewFeedback.set(
+            task.id,
+            `This task edited ${escaped.length} file(s) outside the scope it declares in prd.json.` +
+              `\nDeclared scope: ${declaredScope.join(", ")}` +
+              `\nEdited outside it: ${escaped.join(", ")}` +
+              `\nKeep the change inside the declared scope. If the task genuinely cannot be done` +
+              ` without touching those paths, do the smallest version that stays in scope and say` +
+              ` in your final message which path it needs and why — widening the scope is a change` +
+              ` to the plan, which is not yours to make.`,
           );
+          result = { ...result, ok: false, reason: "failed" };
         }
       }
 
@@ -513,6 +529,10 @@ export async function runLoop(opts: RunOptions): Promise<void> {
       return "next";
     } finally {
       if (!solo) trackers.delete(tracker);
+      // A settled task is not skippable, so its controller stops being one of the
+      // ones a keypress has to abort. Without this a long backlog keeps one per
+      // attempt forever and a skip walks all of them to reach the live few.
+      if (signal) tui?.control.endTask(signal);
       // Every exit path — done, blocked, skipped, retry, quit, crash — drops the
       // cell. That discard IS the rollback the serial loop never had, where a
       // blocked task leaves its mess smeared across the main workspace.

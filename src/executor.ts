@@ -24,6 +24,9 @@ const KILL_GRACE_MS = 5_000;
 // how long to wait after the process exits for readline to hand over a final,
 // newline-less line before classifying the run anyway
 const DRAIN_GRACE_MS = 2_000;
+// how much of a cli's closing output is worth handing the next attempt
+const MAX_TAIL_LINES = 20;
+const MAX_TAIL_CHARS = 2_000;
 
 export function runExecutor(
   execu: AgentSpec,
@@ -46,7 +49,7 @@ export function runExecutor(
   // in-process backend: it owns its own heartbeat and marker classification,
   // because there is no child process to attach readline to
   if (agentDef(execu.cli)?.sdk) {
-    return runCursorSdkExecutor(execu, prompt, cfg, workspace, progress, task, signal, undefined, onCost);
+    return runCursorSdkExecutor(execu, prompt, cfg, workspace, progress, task, signal, undefined, onCost, onFinal);
   }
   return new Promise((resolve) => {
     // Streaming is for the EXECUTOR only. The advisor's stdout IS its answer
@@ -75,6 +78,13 @@ export function runExecutor(
     // "measured zero" must not collapse into the same number
     let costUsd: number | undefined;
     let finalText: string | undefined;
+    // The handoff for a cli that reports no structured final answer — which is
+    // every cli but claude, and claude itself with stream_output off. Its last
+    // PROSE lines are the closest thing it has to a closing statement, and
+    // without this the handoff would silently work on one backend out of seven.
+    // Bounded: an agent that ends by pasting a file must not hand the next
+    // attempt a prompt-sized wall of it.
+    const proseTail: string[] = [];
 
     const viaStdin = promptViaStdin(execu.cli);
     const proc = spawn(cmd[0], cmd.slice(1), {
@@ -119,6 +129,12 @@ export function runExecutor(
         if (line.trim()) {
           lastLine = line.trim();
           lastWasProse = ev.prose === true;
+          // prose only: a tool summary ("→ Edit(x)") is the harness narrating,
+          // and the next attempt can read the diff for what was edited
+          if (ev.prose) {
+            proseTail.push(line.trim());
+            if (proseTail.length > MAX_TAIL_LINES) proseTail.shift();
+          }
         }
         emit({ taskId: task.id, line, lineSource: "executor" });
         // The raw line is already emitted to the TUI above; keep it in progress.md
@@ -162,7 +178,9 @@ export function runExecutor(
       // the single settle guard above is what makes this exactly-once, on every
       // path — including the timeout and abort ones, which were still billed
       onCost?.(costUsd);
-      if (finalText?.trim()) onFinal?.(finalText.trim());
+      // the structured answer when the cli gives one, its last words otherwise
+      const handoff = (finalText?.trim() || proseTail.join("\n")).slice(-MAX_TAIL_CHARS).trim();
+      if (handoff) onFinal?.(handoff);
       resolve(v);
     };
     // kill the whole tree, then settle on 'close' — or on the grace timer if a

@@ -527,6 +527,62 @@ describe("streaming mode", () => {
     expect(seen).toEqual([]);
   });
 
+  // Only claude reports a structured final answer, so without a fallback the
+  // handoff would work on one backend out of seven — and it is the generic clis
+  // that most need a retry to keep what the last attempt learned.
+  it("hands over the last prose lines when the cli reports no final answer", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(
+      execu, "prompt", cfg({ stream_output: false }), "ws", "prog", task, [], undefined, undefined,
+      (text) => seen.push(text),
+    );
+    proc.stdout.write("looked at the auth handler\nthe webhook is unreachable from CI\n");
+    await tick();
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+    expect(seen).toEqual(["looked at the auth handler\nthe webhook is unreachable from CI"]);
+  });
+
+  // a tool summary is the harness narrating; the next attempt reads the diff for
+  // what was edited, and a wall of them would crowd out the agent's own words
+  it("keeps only prose in that fallback, never tool summaries", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(
+      execu, "prompt", cfg({ stream_output: true }), "ws", "prog", task, [], undefined, undefined,
+      (text) => seen.push(text),
+    );
+    proc.stdout.write(ev({ type: "assistant", message: { content: [{ type: "tool_use", name: "Edit", input: {} }] } }));
+    proc.stdout.write(ev({ type: "assistant", message: { content: [{ type: "text", text: "the db resets per suite" }] } }));
+    await tick();
+    closeProc(proc, 0);
+    await p;
+    expect(seen).toEqual(["the db resets per suite"]);
+  });
+
+  // an agent that signs off by pasting a file must not hand the next attempt a
+  // prompt-sized wall of it
+  it("keeps only the LAST lines of a long sign-off", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const seen: string[] = [];
+    const p = runExecutor(
+      execu, "prompt", cfg({ stream_output: false }), "ws", "prog", task, [], undefined, undefined,
+      (text) => seen.push(text),
+    );
+    for (let i = 0; i < 30; i++) proc.stdout.write(`line ${i}\n`);
+    await tick();
+    closeProc(proc, 0);
+    await p;
+    const lines = seen[0].split("\n");
+    expect(lines).toHaveLength(20);
+    expect(lines[0]).toBe("line 10");
+    expect(lines.at(-1)).toBe("line 29");
+  });
+
   it("keeps the run alive on an oversized line instead of parsing megabytes", async () => {
     const proc = makeProc();
     spawnMock.mockReturnValue(proc);
@@ -631,7 +687,9 @@ describe("in-process backend", () => {
     const signal = new AbortController().signal;
     expect(await runExecutor(sdkSpec, "prompt", c, "ws", "prog", task, [], signal)).toBe(true);
     expect(runCursorSdkExecutor).toHaveBeenCalledTimes(1);
-    expect(runCursorSdkExecutor).toHaveBeenCalledWith(sdkSpec, "prompt", c, "ws", "prog", task, signal, undefined, undefined);
+    // the handoff sink is forwarded too: without it a retry on THIS backend
+    // starts blind, and the handoff is documented as working on every cli
+    expect(runCursorSdkExecutor).toHaveBeenCalledWith(sdkSpec, "prompt", c, "ws", "prog", task, signal, undefined, undefined, undefined);
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });

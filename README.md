@@ -113,6 +113,7 @@ tail -f ralph.out
   "heartbeat_secs": 30,
   "stream_output": true,
   "commit_per_task": true,
+  "commit_message_template": "{id}: {title}",
   "stop_on_blocked": false,
   "max_cost_usd": 0,
   "review_blocked_policy": "block",
@@ -470,10 +471,10 @@ export CURSOR_API_KEY=<key from cursor.com/dashboard → Integrations>
   variant, which for some models (grok-4.5 among them) is the FAST tier at about
   twice the standard rate. Running without one prints a warning once.
 
-Deferred: a fix round still sends a whole new prompt to a fresh agent, exactly
-like the CLI path. Reusing one conversation across rounds is the real win here,
-but the prompt for a fix round is built the same way for every cli, so it is not
-a `cursorsdk`-only change.
+One Agent per call, exactly like the CLI path. Holding one across a task's fix
+rounds was tried and removed: it only ever helped inside a single attempt, while
+the per-attempt **handoff** below carries the same information, works the same on
+every backend, and survives a retry — where a held agent is already gone.
 
 ## Browser validation (optional)
 

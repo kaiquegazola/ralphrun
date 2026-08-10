@@ -222,6 +222,41 @@ describe("runCursorSdkExecutor — happy path", () => {
     expect(seen).toEqual([0.75]);
   });
 
+  // The handoff has to work on EVERY backend or a retry on this one starts
+  // blind — the in-process path had the final answer and was dropping it.
+  it("hands over the whole final answer, not just its last line", async () => {
+    const run = makeRun([], { status: "finished", result: "changed a.ts\nthe SDK rejects an empty model id" });
+    const create = makeCreate(makeAgent(run));
+    const seen: string[] = [];
+    await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, undefined, { create }, undefined, (text) =>
+      seen.push(text),
+    );
+    expect(seen).toEqual(["changed a.ts\nthe SDK rejects an empty model id"]);
+  });
+
+  // a run that timed out or errored still said something, and what it said is
+  // precisely what the next attempt should not have to re-derive
+  it("hands it over even when the run did not finish", async () => {
+    const run = makeRun([], { status: "error", result: "got as far as the auth handler", error: { message: "boom" } });
+    const create = makeCreate(makeAgent(run));
+    const seen: string[] = [];
+    const ok = await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, undefined, { create }, undefined, (text) =>
+      seen.push(text),
+    );
+    expect(ok).toBe(false);
+    expect(seen).toEqual(["got as far as the auth handler"]);
+  });
+
+  it("hands over nothing when the run said nothing", async () => {
+    const run = makeRun([], { status: "finished", result: "   " });
+    const create = makeCreate(makeAgent(run));
+    const seen: string[] = [];
+    await runCursorSdkExecutor(EXECU, "p", makeCfg(), "ws", "prog", TASK, undefined, { create }, undefined, (text) =>
+      seen.push(text),
+    );
+    expect(seen).toEqual([]);
+  });
+
   it("emits blank lines to the pane but does not log them", async () => {
     const run = makeRun([{ type: "assistant", message: { content: [{ type: "text", text: "a\n\nb" }] } }]);
     const create = makeCreate(makeAgent(run));

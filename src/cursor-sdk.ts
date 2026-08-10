@@ -423,12 +423,14 @@ export async function runCursorSdkExecutor(
   signal?: AbortSignal,
   seams?: CursorSdkSeams,
   onCost?: CostSink,
+  /** the agent's whole final message, handed to the next attempt — see run.ts */
+  onFinal?: (text: string) => void,
 ): Promise<boolean> {
-  // ponytail: KNOWN CEILING — one Agent per call, exactly like the CLI path. The
-  // real win here would be keeping ONE agent across the fix rounds and sending
-  // only the delta, but run.ts rebuilds a full prompt for every cli (run.ts:131),
-  // so conversation reuse means changing that for all of them. Out of scope for
-  // v1; upgrade path is to hold the SDKAgent in runTask and reuse Run.send().
+  // One Agent per call, exactly like the CLI path, and deliberately so: holding
+  // one across the fix rounds would be conversation reuse, which ralphrun tried
+  // and removed. The handoff below carries what the next attempt actually needs,
+  // works the same on every backend, and survives a retry — where an agent held
+  // across rounds would already be gone.
   const tag = task.id;
   const start = Date.now();
   const hb = cfg.heartbeat_secs ?? 30;
@@ -489,6 +491,10 @@ export async function runCursorSdkExecutor(
       ...seams,
     });
     const s = Math.round((Date.now() - start) / 1000);
+    // BEFORE the status branches, so it reports on every exit path exactly as
+    // the spawn path does: a run that timed out or errored still said something,
+    // and what it said is precisely what the next attempt should not re-derive.
+    if (out.result.trim()) onFinal?.(out.result.trim());
     // Divergence from the spawn path on purpose: executor.ts logs exec.skipped
     // only from its abort listener and stays silent when the signal was already
     // aborted. There is one code path here, and the asymmetry bought nothing.

@@ -38,7 +38,7 @@ describe("parseAgent", () => {
     expect(parseAgent("grok:grok-4.5")).toEqual({ cli: "grok", model: "grok-4.5" });
   });
   it("cli: with empty model falls back to default", () => {
-    expect(parseAgent("grok:")).toEqual({ cli: "grok", model: "grok-4.5" });
+    expect(parseAgent("grok:")).toEqual({ cli: "grok", model: "grok-4.6" });
   });
   it("cli: with empty model and no default -> empty", () => {
     expect(parseAgent("cursor:")).toEqual({ cli: "cursor", model: "" });

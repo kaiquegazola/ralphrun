@@ -161,6 +161,17 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       if (autoApprove) cmd.push("--dangerously-skip-permissions");
       return cmd;
     },
+    // `agy models` is the whole probe and SAFE to run headless, unlike `-p`:
+    // signed out it fails FAST with exit 1 ("Please sign in to view available
+    // models"), while an unauthenticated `-p` enters the interactive OAuth
+    // wait and would hang the preflight for its full 60s.
+    auth: {
+      loginCommand: "agy",
+      check: (bin) => {
+        execSync(`${bin} models`, { stdio: "ignore" }); // exit 0 = signed in, throws otherwise
+        return true;
+      },
+    },
   },
 
   claude: {
@@ -216,14 +227,28 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
   grok: {
     label: "Grok CLI",
     bin: "grok",
-    defaultModel: "grok-4.5",
-    models: [{ value: "grok-4.5", label: "grok-4.5" }],
-    recommended: { planner: "grok-4.5", executor: "grok-4.5", advisor: "grok-4.5" },
+    defaultModel: "grok-4.6",
+    // `grok models` while signed out — grok-4.6 is the server-side default,
+    // grok-4.5 stays listed because the cli still accepts it.
+    models: [
+      { value: "grok-4.6", label: "grok-4.6" },
+      { value: "grok-4.5", label: "grok-4.5" },
+    ],
+    recommended: { planner: "grok-4.6", executor: "grok-4.6", advisor: "grok-4.6" },
     buildCmd: ({ bin, prompt, model, cwd, autoApprove }) => {
       const cmd = [bin, "-p", prompt, "--cwd", cwd];
       if (model) cmd.push("-m", model);
       if (autoApprove) cmd.push("--always-approve");
       return cmd;
+    },
+    // `grok models` exits 0 whether or not you are signed in — the marker line
+    // is the answer ("You are not authenticated."). Same shape as cursor.
+    auth: {
+      loginCommand: "grok login",
+      check: (bin) => {
+        const out = execSync(`${bin} models`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        return !out.includes("not authenticated");
+      },
     },
   },
 

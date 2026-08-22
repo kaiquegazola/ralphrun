@@ -122,7 +122,7 @@ describe("recommendedSpec", () => {
     expect(recommendedSpec("planner", diags)).toBeNull(); // unknown auth is NOT ready
     expect(recommendedSpec("planner", [diag("claude", false), diag("grok")])).toEqual({
       cli: "grok",
-      model: "grok-4.5",
+      model: "grok-4.6",
     });
   });
 
@@ -404,16 +404,16 @@ describe("agentPick", () => {
   it("advisor gets a 'disable' option last; unavailable CLIs are filtered", () => {
     const diags = [diag("claude", false), diag("grok"), diag("cursor", true, false)];
     const opts = agentPickOptions("advisor", diags);
-    expect(opts.map((o) => o.value)).toEqual(["grok:grok-4.5", "disable"]);
-    expect(opts[1].label).toBe(t("wizard.agent.disable"));
+    expect(opts.map((o) => o.value)).toEqual(["grok:grok-4.6", "grok:grok-4.5", "disable"]);
+    expect(opts[2].label).toBe(t("wizard.agent.disable"));
     expect(agentPickOptions("advisor", []).map((o) => o.value)).toEqual(["disable"]);
     expect(agentPickOptions("executor", [])).toEqual([]);
   });
 
   it("select sets the role's spec and pops back to settings on that row", () => {
-    const s = walk(agentPick(0), ...downs(4), { type: "select" }); // grok:grok-4.5
+    const s = walk(agentPick(0), ...downs(4), { type: "select" }); // grok:grok-4.6
     expect(s.screen).toBe("settings");
-    expect(s.plannerSpec).toEqual({ cli: "grok", model: "grok-4.5" });
+    expect(s.plannerSpec).toEqual({ cli: "grok", model: "grok-4.6" });
     expect(s.cursor).toBe(0); // planner row
     expect(s.stack).toEqual(["preflight"]);
   });
@@ -443,10 +443,10 @@ describe("agentPick", () => {
   });
 
   it("cursor prefills on the row's current combo", () => {
-    // seeded executor grok:grok-4.5 → index 4 (after claude's 4 models)
+    // seeded executor grok:grok-4.5 → index 5 (after claude's 4 + grok-4.6 first)
     const s = agentPick(1, { saved: { executor: { cli: "grok", model: "grok-4.5" } } });
     expect(visibleOptions(s)[s.cursor].value).toBe("grok:grok-4.5");
-    expect(s.cursor).toBe(4);
+    expect(s.cursor).toBe(5);
   });
 
   it("prefill falls back to 0 when the spec is not in the list or is null", () => {

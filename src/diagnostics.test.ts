@@ -162,12 +162,45 @@ describe("checkAgent", () => {
     expect(checkAgent("opencode").loggedIn).toBe(false);
   });
 
-  it("grok: installed but auth unknown (no status probe)", () => {
+  it("agy: signed in when `models` exits 0", () => {
+    whichSync.mockReturnValue("/bin/agy" as any);
+    exec.mockReturnValue("" as any);
+    const d = checkAgent("agy");
+    expect(d).toEqual({
+      cli: "agy",
+      installed: true,
+      loggedIn: true,
+      loginCommand: "agy",
+    });
+  });
+
+  it("agy: signed out when `models` exits 1", () => {
+    whichSync.mockReturnValue("/bin/agy" as any);
+    exec.mockImplementation(() => {
+      throw new Error("nonzero"); // real cli prints "Please sign in..." and exits 1
+    });
+    const d = checkAgent("agy");
+    expect(d.loggedIn).toBe(false);
+    expect(d.loginCommand).toBe("agy");
+  });
+
+  it("grok: logged in when `models` output lacks the unauthenticated marker", () => {
     whichSync.mockReturnValue("/bin/grok" as any);
+    exec.mockReturnValue("* grok-4.6 (default)\n" as any);
     const d = checkAgent("grok");
-    expect(d.loggedIn).toBe("unknown");
-    expect(d.loginCommand).toBeUndefined();
-    expect(exec).not.toHaveBeenCalled();
+    expect(d).toEqual({
+      cli: "grok",
+      installed: true,
+      loggedIn: true,
+      loginCommand: "grok login",
+    });
+  });
+
+  it("grok: not logged in when `models` says so", () => {
+    whichSync.mockReturnValue("/bin/grok" as any);
+    exec.mockReturnValue("You are not authenticated.\n" as any);
+    const d = checkAgent("grok");
+    expect(d.loggedIn).toBe(false);
   });
 });
 

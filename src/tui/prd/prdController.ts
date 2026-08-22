@@ -137,7 +137,12 @@ export function reducer(state: PrdState, action: PrdAction): PrdState {
 
 // selectors
 export function canSave(s: PrdState): boolean {
-  return s.prd !== null && validatePrd(s.prd).ok && s.status !== "drafting";
+  // STAGED AUTHORING: saving a SKELETON is the whole point of the first phase —
+  // draft validation judges shape (ids, deps, cycles), not completeness, and a
+  // skeleton by definition has no verify yet (hence requireVerify:false). The
+  // header keeps counting strict problems via depsOk so the user always sees
+  // how far the plan is from runnable.
+  return s.prd !== null && validatePrd(s.prd, { draft: true, requireVerify: false }).ok && s.status !== "drafting";
 }
 export const canFinalize = canSave; // alias for existing view/mount imports
 
@@ -148,5 +153,7 @@ export function taskCount(s: PrdState): number {
 }
 
 export function depsOk(s: PrdState): boolean {
+  // STRICT on purpose: this feeds the "{n} problemas" header — a skeleton is
+  // saveable and runnable, but the user should still see what is missing.
   return s.prd ? validatePrd(s.prd).ok : false;
 }

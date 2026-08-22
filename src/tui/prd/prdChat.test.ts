@@ -243,6 +243,33 @@ it("no fence -> prd null with the no-json error and empty summary", async () => 
   expect(res.errors[1]).toMatch(/ralphrun-planner-\d+\.log$/);
 });
 
+// the real failure that motivated this: a model drafting a long PRD emits
+// several ```json openers and the newest block holds the finished document.
+it("prefers the NEWEST parseable block when earlier drafts precede it", async () => {
+  const draft = JSON.stringify({ project: "d", stack: "d", architecture_notes: "d", tasks: [{ id: "Z", title: "Z", status: "todo", deps: [], retries: 0 }] });
+  const { res } = await run(["sum", "", "```json", "{broken draft", "```json", draft, "```json", VALID_JSON, "```"]);
+  expect(res.prd).toEqual(VALID);
+  expect(res.summary).toBe("sum");
+});
+
+it("falls back to an older block when the newest one does not parse", async () => {
+  const older = ["sum", "", "```json", VALID_JSON, "```json", "{truncated newer draft"].reverse();
+  // reversed on purpose: the BROKEN block comes last, like a mid-stream death
+  const { res } = await run(older);
+  expect(res.prd).toEqual(VALID);
+});
+
+// STAGED AUTHORING: a skeleton task (no description/acceptance/verify yet) is a
+// valid planner reply — the studio is where details get filled, the run gates
+// stay strict on their own.
+it("accepts a SKELETON prd from the planner (draft validation)", async () => {
+  const skel = { project: "p", stack: "s", architecture_notes: "a", tasks: [{ id: "A", title: "A", status: "todo", deps: [], retries: 0 }] };
+  const { res } = await run(["skeleton first", "", "```json", JSON.stringify(skel), "```"]);
+  expect(res.prd).not.toBeNull();
+  expect(res.prd!.tasks[0].title).toBe("A");
+  expect(res.errors).toEqual([]);
+});
+
 it("the dumped raw output is the planner's full stdout+stderr", async () => {
   const { readFileSync, unlinkSync } = await import("node:fs");
   const lines = ["line one", "tool activity", "never a ```json fence"];
@@ -516,4 +543,18 @@ describe("in-process planner", () => {
     sdkRun.mockResolvedValue({ status: "aborted", result: "", error: "" });
     expect(await turn()).toEqual({ summary: "", prd: null, errors: [] });
   });
+});
+
+// codex-review regression: draft mode forgives ABSENT fields only — a present
+// but wrong-typed field must still refuse, or render/code downstream chokes.
+it("draft validation rejects a PRESENT-but-wrong-typed field", async () => {
+  const bad = {
+    project: "p",
+    stack: "s",
+    architecture_notes: "a",
+    tasks: [{ id: "A", title: "A", status: "todo", deps: [], retries: 0, description: 42 }],
+  };
+  const { res } = await run(["sum", "", "```json", JSON.stringify(bad), "```"]);
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toContain("description");
 });

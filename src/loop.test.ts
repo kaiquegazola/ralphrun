@@ -53,6 +53,10 @@ vi.mock("./worktree.js", () => ({
   releaseRunLock: vi.fn(),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
+// the JIT-expansion hook must never spawn a REAL advisor here: fixtures are
+// skeletal tasks and the config carries an advisor, so without this stub the
+// hook would launch an actual cli process mid-loop-test.
+vi.mock("./expand.js", () => ({ isSkeletonTask: vi.fn(() => false), expandSkeletonTask: vi.fn(async () => null) }));
 // the wave integration gate shells out for real otherwise — every existing wave
 // test happens to have tasks with no verify, which is exactly the case that skips
 vi.mock("./verify.js", () => ({ runVerifyCommand: vi.fn(async () => ({ passed: true, output: "" })) }));

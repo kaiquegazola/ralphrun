@@ -13,7 +13,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import { readFileSync } from "node:fs";
-import { appendLearnedNote, loadPrdFile, normalizePrd, overlappingScopePairs, pathsOutsideScope, type ScopedTask } from "./prdload.js";
+import { appendLearnedNote, loadPrdFile, normalizePrd, overlappingScopePairs, pathsOutsideScope, type ScopedTask, validatePrd } from "./prdload.js";
 
 const mRead = vi.mocked(readFileSync);
 
@@ -389,5 +389,40 @@ describe("appendLearnedNote", () => {
 
   it("refuses an empty note", () => {
     expect(appendLearnedNote("x", "T1", "   ")).toBeNull();
+  });
+});
+
+// STAGED AUTHORING: draft mode judges the skeleton's shape and forgives the
+// fields a later expansion fills — while the default stays run-gate strict.
+describe("draft option", () => {
+  const skeleton = {
+    project: "p",
+    stack: "s",
+    architecture_notes: "a",
+    tasks: [{ id: "A", title: "A", status: "todo", deps: [], retries: 0 }],
+  };
+  it("forgives description/acceptance on a skeleton", () => {
+    expect(validatePrd(skeleton, { draft: true }).ok).toBe(true);
+  });
+  it("the default (run gate) still refuses the same skeleton", () => {
+    const v = validatePrd(skeleton);
+    expect(v.ok).toBe(false);
+    expect(v.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("loadPrdFile skeleton intake", () => {
+  it("loads a SKELETON backlog (draft) instead of refusing the run", () => {
+    mRead.mockReturnValue(
+      JSON.stringify({
+        project: "p",
+        stack: "s",
+        architecture_notes: "a",
+        tasks: [{ id: "A", title: "A", status: "todo", deps: [], retries: 0 }],
+      }),
+    );
+    const r = loadPrdFile("/p/prd.json");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.prd.tasks[0].description).toBe("");
   });
 });

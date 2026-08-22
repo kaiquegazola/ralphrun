@@ -76,13 +76,14 @@ export function browserStatus(): BrowserStatus {
 // Async twin of browserStatus for the live init wizard: the sync spawn above
 // would block the Ink render (and freeze a blank alt-screen for the full 15s if
 // the binary hangs). Same classification, non-blocking; any spawn error maps to
-// "broken", so a probe failure can never crash the wizard mount.
-export function browserStatusAsync(): Promise<BrowserStatus> {
+// "broken", so a probe failure can never crash the wizard mount. An optional
+// abort signal KILLS a hanging probe instead of letting it outlive its caller.
+export function browserStatusAsync(abort?: AbortSignal): Promise<BrowserStatus> {
   if (!which.sync(BROWSER_TOOL, { nothrow: true })) return Promise.resolve("missing");
   return new Promise((resolve) => {
-    const p = spawn(BROWSER_TOOL, ["--help"], { stdio: "ignore", timeout: 15_000, shell: true });
-    p.on("error", () => resolve("broken")); // spawn failed
-    p.on("close", (code) => resolve(code === 0 ? "ok" : "broken")); // non-zero / killed-by-timeout → broken
+    const p = spawn(BROWSER_TOOL, ["--help"], { stdio: "ignore", timeout: 15_000, shell: true, signal: abort });
+    p.on("error", () => resolve("broken")); // spawn failed / aborted
+    p.on("close", (code) => resolve(code === 0 ? "ok" : "broken")); // non-zero / killed → broken
   });
 }
 

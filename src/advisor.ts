@@ -40,7 +40,9 @@ function reviewerRuns(advis: AgentSpec, cfg: Config): boolean {
   return !!cfg.review_runs_commands && !!agentDef(advis.cli)?.reviewExecArgs;
 }
 
-function runAdvisorCli(
+// exported for expand.ts: the JIT expansion rides the same spawn/parse path as
+// guidance and review — one cli call, text back, no event stream.
+export function runAdvisorCli(
   advis: AgentSpec,
   prompt: string,
   cfg: Config,

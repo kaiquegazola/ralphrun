@@ -310,7 +310,7 @@ export function PrdApp({ store, cwd, onSend, onSave, onBuild, onQuit, savedPath,
               <Text dimColor>  deps:[{detail.deps.join(",")}]  retries:{detail.retries}</Text>
             </Text>
             <Text> </Text>
-            <Text wrap="wrap">{detail.description.slice(0, 1200) || t("studio.detail.noDescription")}</Text>
+            <Text wrap="wrap">{(detail.description ?? "").slice(0, 1200) || t("studio.detail.noDescription")}</Text>
             {detail.acceptance.length > 0 && <Text> </Text>}
             {detail.acceptance.map((a, i) => (
               <Text key={i} wrap="wrap">

@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import { buildCmd, promptViaStdin } from "../../adapters.js";
 import { agentDef } from "../../agents.js";
+import { fencedBlocks } from "../../fence.js";
 import { runCursorSdk } from "../../cursor-sdk.js";
 import { startIdleLadder } from "../../idleness.js";
 import { killTree, releasePipes, spawn, writePrompt } from "../../spawn.js";
@@ -112,6 +113,16 @@ const PREAMBLE = [
   "for new tasks. retries starts at 0. deps: [] when none.",
   "Every dep must reference an existing task id, and verify must be a REAL runnable",
   "command that checks the task.",
+  "AUTHORING IN STAGES — follow this strictly for large products:",
+  "1. When there is no Current PRD yet (or the user asks for the plan), reply with a",
+  "SKELETON first: every task as {id, title, status:\"todo\", deps, retries:0} and NO",
+  "description/acceptance/scope/verify. A skeleton keeps every turn small and lets the",
+  "user steer the architecture before any detail is written.",
+  "2. On later turns the user asks you to EXPAND tasks or groups (\"expand t10-t14\").",
+  "Then output the FULL PRD where the requested tasks carry all fields — description,",
+  "acceptance[], scope[], verify — while not-yet-expanded tasks stay skeletal.",
+  "3. Before the user can build, EVERY task must be fully expanded; if the user says",
+  "\"build\" with skeletal tasks remaining, expand them ALL in that turn's PRD.",
   "deps: declare an edge ONLY when the task CONSUMES an artifact the earlier task",
   'produces. "It comes later in the narrative" is not a dependency. Before keeping an',
   "edge, ask: would this task FAIL if it ran first? If not, drop the edge — a wider",
@@ -167,34 +178,47 @@ function buildPrompt(args: PlannerTurnArgs): string {
 }
 
 function parseReply(text: string): PlannerResult {
-  const fence = text.indexOf("```json");
-  if (fence === -1) return { summary: "", prd: null, errors: [NO_JSON()] };
+  // Models drafting long PRDs emit SEVERAL json blocks in one turn — earlier
+  // drafts, then the refined one. Judge EVERY fenced block, newest first, and
+  // accept the first that survives parse + validation (a real 33-task PRD was
+  // once thrown away because it sat in the fourth block). Blocks that fail
+  // JSON.parse outright (raw control characters mid-string) are drafts by
+  // definition and are skipped, not fatal.
+  const lines = text.split("\n");
+  const firstFence = lines.findIndex((l) => l.trim().startsWith("```"));
   const summary =
-    text
-      .slice(0, fence)
-      .split("\n")
+    (firstFence === -1 ? [] : lines.slice(0, firstFence))
       .map((l) => l.trim())
       .find((l) => l.length > 0) ?? "";
-  const rest = text.slice(fence + "```json".length);
-  const close = rest.indexOf("```");
-  const body = close === -1 ? rest : rest.slice(0, close);
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start === -1 || end <= start) return { summary, prd: null, errors: [NO_JSON()] };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body.slice(start, end + 1));
-  } catch {
-    return { summary, prd: null, errors: [NO_JSON()] };
+  let bestErrors: string[] | null = null; // validator errors of the newest parseable block
+  const blocks = fencedBlocks(text);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const body = blocks[i];
+    const start = body.indexOf("{");
+    const end = body.lastIndexOf("}");
+    if (start === -1 || end <= start) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body.slice(start, end + 1));
+    } catch {
+      continue;
+    }
+    // planners love inventing statuses ("pending", "TODO") — the shared pipeline
+    // coercions run before validating; the changed-flag is irrelevant here.
+    // keepDoing: a planner echoing an in-flight "doing" task must not have it
+    // silently reset (matches the old normalizeDraft behavior).
+    void normalizePrd(parsed, { keepDoing: true });
+    // STAGED AUTHORING: a skeleton task (no description/acceptance yet) is
+    // ACCEPTED here — the studio is where the details get filled in. The run
+    // gates keep validating strictly on their own.
+    const v = validatePrd(parsed, { draft: true, requireVerify: false });
+    if (v.ok) return { summary, prd: parsed as PRD, errors: [] };
+    // newest-first scan: keep the FIRST error set seen — that is the NEWEST
+    // draft's verdict, which is what the user needs to fix
+    bestErrors ??= v.errors;
   }
-  // planners love inventing statuses ("pending", "TODO") — the shared pipeline
-  // coercions run before validating; the changed-flag is irrelevant here.
-  // keepDoing: a planner echoing an in-flight "doing" task must not have it
-  // silently reset (matches the old normalizeDraft behavior).
-  void normalizePrd(parsed, { keepDoing: true });
-  const v = validatePrd(parsed);
-  if (!v.ok) return { summary, prd: null, errors: v.errors };
-  return { summary, prd: parsed as PRD, errors: [] };
+  if (bestErrors) return { summary, prd: null, errors: bestErrors };
+  return { summary, prd: null, errors: [NO_JSON()] };
 }
 
 // An in-process backend has no argv and no child to kill: buildCmd would throw,

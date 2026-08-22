@@ -117,7 +117,11 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     // is past the await that settles the whole wave.
     // after unmount, so the accounting survives in the terminal instead of
     // scrolling by inside a pane that is about to disappear
-    if (ctx.tasksRun === 0) return; // nothing ran: no accounting to report
+    // tasksRun === 0 no longer means "nothing to report": a wave of skeleton
+    // tasks can block BEFORE any executor starts and still have spent advisor
+    // calls (JIT expansion). Report whenever anything was billed or flagged.
+    const nothingBilled = ctx.runCost.usd === 0 && !ctx.runCost.unknown;
+    if (ctx.tasksRun === 0 && nothingBilled) return;
     log(
       progress,
       ctx.accepted > 0

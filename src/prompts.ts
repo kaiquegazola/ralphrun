@@ -100,8 +100,43 @@ Give a short, concrete plan: the approach, the 1-2 non-obvious design decisions,
 and the failure modes to avoid. Max ~10 lines.`;
 }
 
-export function injectAdvice(prompt: string, advice: string): string {
-  return (
+// expand.ts companion: a SKELETON task (staged authoring left it without
+// details) becomes a full executable spec right before the loop runs it.
+export function taskExpandPrompt(task: Task, prd: PRD): string {
+  const neighbors = prd.tasks
+    .filter((x) => x.id !== task.id && (x.deps.includes(task.id) || task.deps.includes(x.id)))
+    .map((x) => `${x.id}: ${x.title} [scope: ${(x.scope ?? []).join(", ") || "—"}]`)
+    .join("\n");
+  // Whatever the planner/user already wrote rides along: the expansion must
+  // refine it, never silently replace authored intent with its own invention.
+  const existing = [
+    task.description ? `description: ${task.description}` : "",
+    task.acceptance?.length ? `acceptance: ${task.acceptance.join("; ")}` : "",
+    task.scope?.length ? `scope: ${task.scope.join(", ")}` : "",
+    task.verify ? `verify: ${task.verify}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `You are expanding ONE task of an existing plan into its full executable spec.
+Do NOT write code — reply with ONLY one fenced json block containing the FULL task object:
+{"id": "...", "title": "...", "status": "todo", "deps": [], "retries": 0, "description": "...", "acceptance": ["..."], "verify": "..."}
+Do NOT include a scope field: scoping stays with the planner and the user.
+${existing ? `\nAlready-written fields (keep their intent; you may refine wording, never drop or contradict them):\n${existing}\n` : ""}
+Project: ${prd.project}
+Stack: ${prd.stack}
+Architecture notes: ${prd.architecture_notes}
+
+Task to expand:
+${JSON.stringify({ id: task.id, title: task.title, deps: task.deps, retries: task.retries }, null, 2)}
+${neighbors ? `\nNeighboring tasks (ordered by deps), for context:\n${neighbors}\n` : ""}
+Rules:
+- description: concrete implementation guidance grounded in the architecture notes above.
+- acceptance: CHECKABLE statements ("the endpoint returns 401 without a token"), never intentions.
+- verify: a REAL runnable command that fails when the task is not done (typecheck/tests/build as the stack demands).
+- Keep id, title, status, deps and retries EXACTLY as given.`;
+}
+
+export function injectAdvice(prompt: string, advice: string): string {  return (
     prompt +
     "\n\n## Advisor guidance (a stronger model reviewed this task)\n" +
     advice +

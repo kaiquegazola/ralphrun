@@ -52,6 +52,14 @@ export function normalizePrd(obj: unknown, opts?: NormalizePrdOptions): boolean 
       task.scope = [];
       changed = true;
     }
+    // STAGED AUTHORING: a skeleton task legitimately omits its description.
+    // Defaulting it here (not in the view layer) is what makes every consumer —
+    // detail pane, prompt builder, scope gate — type-safe without each one
+    // re-guarding the same absent field.
+    if (task.description === undefined) {
+      task.description = "";
+      changed = true;
+    }
   }
   return changed;
 }
@@ -246,6 +254,13 @@ export interface ValidatePrdOptions {
   // studio finalize) via the tui shim; the load path only warns, because every
   // backlog written before this rule exists would otherwise stop loading.
   requireVerify?: boolean;
+  // STAGED AUTHORING: a planner working in phases emits a SKELETON first
+  // (id/title/deps only) and expands tasks over later turns. Draft mode judges
+  // the skeleton's shape — ids, deps, cycles — and forgives the fields a later
+  // expansion fills (description, acceptance). The RUN gates never pass this
+  // flag: a task that reaches the loop without its details is exactly what
+  // verifyRequired exists to catch.
+  draft?: boolean;
 }
 
 // Structural validator: top-level shape, per-task shape, unique ids, dep
@@ -285,9 +300,17 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
     if (typeof t.title !== "string") errors.push(msg("prd.err.title", { i }));
     if (!STATUSES.has(t.status as string)) errors.push(msg("prd.err.status", { i }));
     if (typeof t.retries !== "number") errors.push(msg("prd.err.retries", { i }));
-    if (typeof t.description !== "string") errors.push(msg("prd.err.description", { i }));
-    if (!Array.isArray(t.acceptance)) errors.push(msg("prd.err.acceptance", { i }));
-    else if (t.acceptance.some((a) => typeof a !== "string")) errors.push(msg("prd.err.acceptanceItem", { i }));
+    // draft forgives only ABSENT fields (the skeleton omits them); a field that
+    // IS present must still be well-typed, or render/code downstream chokes.
+    if (!(opts?.draft && t.description === undefined) && typeof t.description !== "string")
+      errors.push(msg("prd.err.description", { i }));
+    if (opts?.draft && t.acceptance === undefined) {
+      // omitted wholesale: fine in a skeleton
+    } else if (!Array.isArray(t.acceptance)) {
+      errors.push(msg("prd.err.acceptance", { i }));
+    } else if (t.acceptance.some((a) => typeof a !== "string")) {
+      errors.push(msg("prd.err.acceptanceItem", { i }));
+    }
     if (!Array.isArray(t.deps)) errors.push(msg("prd.err.deps", { i }));
     else for (const d of t.deps) if (!ids.has(d)) errors.push(msg("prd.err.depUnknown", { i, d }));
     if (t.scope !== undefined) {
@@ -362,7 +385,11 @@ export function loadPrdFile(path: string, opts?: NormalizePrdOptions): PrdLoadRe
     return { ok: false, errors: [msg("prd.err.json", { msg: e instanceof Error ? e.message : String(e) })] };
   }
   const normalized = normalizePrd(obj, opts);
-  const v = validatePrd(obj);
+  // The FILE is authoring output: a SKELETON backlog (staged authoring) must
+  // load and run — the JIT expansion fills the details mid-loop, and the
+  // unverified-warnings below keep the operator informed. Present-but-wrong
+  // fields still fail (draft forgives absence, not corruption).
+  const v = validatePrd(obj, { draft: true });
   if (!v.ok) {
     return typeof obj === "object" && obj !== null
       ? { ok: false, errors: v.errors, prd: seedSafe(obj) }

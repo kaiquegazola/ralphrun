@@ -10,6 +10,8 @@
 import { performance } from "node:perf_hooks";
 
 import { type Config } from "./config.js";
+import { BROWSER_INSTALL_HINT, BROWSER_UPDATE_HINT, browserStatusAsync, taskUsesBrowser, type BrowserStatus } from "./browser.js";
+import { applyTaskPatch, expandSkeletonTask, isSkeletonTask, type TaskPatch } from "./expand.js";
 import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
 import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } from "./git.js";
 import { t } from "./i18n.js";
@@ -216,6 +218,123 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       }
     }
     const taskWorkspace = wt ?? workspace;
+    // Per-task AbortController hoisted ABOVE the staged-authoring gate: a skip/
+    // quit during a long advisor expansion has to abort THAT call, and the cell
+    // created below has to be discarded like any other early exit.
+    const signal = ctx.tui ? ctx.tui.control.beginTask() : undefined;
+    // Shared by every PRE-RUN block: the same persistence/teardown the
+    // try/finally below would have done, minus a task that never started.
+    const blockPreRun = (reason: string, honorStopOnBlocked = true): "stop" | "next" => {
+      task.status = "blocked";
+      const cur = reload({ keepDoing: true });
+      const ct = cur?.tasks.find((x) => x.id === task.id);
+      if (cur && ct) {
+        ct.status = "blocked";
+        savePRD(prdPath, cur);
+      }
+      log(progress, t("loop.log.blockedReview", { id: task.id, s: 0, reason }));
+      emit({ taskId: task.id, status: "blocked", reason });
+      if (wt) removeTaskWorktree(workspace, wt);
+      if (signal) ctx.tui?.control.endTask(signal);
+      // a TARGETED run would re-select this same blocked task forever
+      // ("next" only exits when nothing is runnable); stopping is the honest
+      // end for the one task the user asked for.
+      if (opts.task) {
+        done();
+        return "stop";
+      }
+      // Same stop policy as the settle path: a CONFIGURED hard block stops the
+      // run — but a user-initiated skip never does (their comment below holds
+      // here too: they asked to move on).
+      if (honorStopOnBlocked && ctx.cfg.stop_on_blocked) {
+        done(); // "stop" tears the run down: unmount the TUI like every other stop
+        return "stop";
+      }
+      return "next";
+    };
+    // Abort triage shared by every pre-run await (advisor expansion, browser
+    // probe): quit / skip / pure teardown each get exactly the treatment the
+    // post-runTask path would have given them.
+    const settleIfAborted = (): "stop" | "next" | null => {
+      if (!signal?.aborted) return null;
+      const quit = !!ctx.tui?.control.shouldQuit();
+      const skip = !quit && (!!ctx.tui?.control.takeSkip() || ctx.batchSkipped);
+      if (!quit && !skip) {
+        // pure teardown abort — leave quietly
+        if (wt) removeTaskWorktree(workspace, wt);
+        if (signal) ctx.tui?.control.endTask(signal);
+        return "next";
+      }
+      if (skip) {
+        ctx.batchSkipped = true;
+        return blockPreRun(t("loop.reason.skipped"), false);
+      }
+      if (wt) removeTaskWorktree(workspace, wt);
+      if (signal) ctx.tui?.control.endTask(signal);
+      done();
+      log(progress, t("loop.log.quit"));
+      return "stop";
+    };
+    // STAGED AUTHORING GATE — runs BEFORE the task is marked doing:
+    // a skeletal task gets ONE best-effort JIT expansion (fill-only), and then
+    // must be RUNNABLE or it blocks here. "Runnable" means it has a verify
+    // command: without one runVerify treats anything as passed, so executing
+    // it could only produce vacuous dones. Blocking (not retrying) is correct —
+    // no attempt of this task can ever do better without a human adding a gate.
+    if (isSkeletonTask(task)) {
+      if (ctx.cfg.advisor) {
+        // Best-effort BY CONTRACT, including adapter throws: an advisor cli that
+        // passed PATH-preflight but has no registered buildCmd throws BEFORE
+        // runAdvisorCli's own try — and this await runs before the task's
+        // try/finally, so uncaught it would reject the whole run.
+        let patch: TaskPatch | null = null;
+        try {
+          patch = await expandSkeletonTask(task, prd, ctx.cfg.advisor, ctx.cfg, taskWorkspace, progress, signal);
+        } catch {
+          log(progress, t("expand.log.failed", { id: task.id }));
+        }
+        // Unmetered advisor turn: same honesty rule as run.ts's planning call —
+        // flag the tallies unknown so reported totals stay a FLOOR instead of
+        // pretending the expansion was free.
+        const spent = taskCost.get(task.id) ?? { usd: 0, unknown: false };
+        mergeCost(spent, { usd: 0, unknown: true });
+        taskCost.set(task.id, spent);
+        mergeCost(runCost, { usd: 0, unknown: true });
+        if (patch) {
+          applyTaskPatch(task, patch);
+          const expandedPrd = reload({ keepDoing: true });
+          const expandedTask = expandedPrd?.tasks.find((x) => x.id === task.id);
+          if (expandedPrd && expandedTask) {
+            applyTaskPatch(expandedTask, patch);
+            savePRD(prdPath, expandedPrd);
+          }
+        }
+        const aborted = settleIfAborted();
+        if (aborted) return aborted;
+      }
+      if (!task.verify?.trim()) return blockPreRun(t("expand.reason.noVerify"));
+      // The startup preflight inspected the SKELETON — an expanded verify may
+      // now demand dev-browser. Re-check here or the task burns its retries in
+      // execution before failing at verification instead of failing fast.
+      if (taskUsesBrowser(task)) {
+        // The signal is passed THROUGH: an aborted task KILLS a hanging probe
+        // instead of leaving it running to the 15s timeout after the user left.
+        const probe = browserStatusAsync(signal).then((st): { kind: "status"; st: BrowserStatus } => ({ kind: "status", st })).catch(() => ({ kind: "status", st: "broken" as BrowserStatus }));
+        const abortP: Promise<{ kind: "aborted" }> = signal
+          ? new Promise((res) => signal.addEventListener("abort", () => res({ kind: "aborted" }), { once: true }))
+          : new Promise(() => {}); // no signal: only the probe settles
+        const r = await Promise.race([probe, abortP]);
+        const aborted = settleIfAborted(); // skip/quit can land during the probe
+        if (aborted) return aborted;
+        if (r.kind === "status" && r.st !== "ok") {
+          const hint = r.st === "missing" ? BROWSER_INSTALL_HINT : BROWSER_UPDATE_HINT;
+          return blockPreRun(t(r.st === "missing" ? "expand.reason.browserMissing" : "expand.reason.browserBroken", { cmd: hint }));
+        }
+      }
+      // verify exists — the gate is real even if prose details are still thin
+      if (!task.description?.trim() || !task.acceptance?.length)
+        log(progress, t("expand.log.partial", { id: task.id }));
+    }
     log(progress, t("loop.log.start", { id: task.id, title: task.title, n: task.retries + 1 }));
     task.status = "doing";
     // A wave has no single current task, and the reporter would otherwise stamp
@@ -227,14 +346,22 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     if (!solo) trackers.add(tracker);
     if (ctx.tui) tracker.setPaused(ctx.tui.control.isPaused(), taskStartMs);
     tracker.startTask(taskStartMs);
-    savePRD(prdPath, prd);
+    // Persist "doing" from a FRESH reload — NOT from the shared in-memory prd.
+    // The JIT expansion above added an await before this point, so a sibling in
+    // the wave may have settled (done) and persisted meanwhile; saving the stale
+    // shared object here would roll that sibling back and stall the next wave.
+    const doingPrd = reload({ keepDoing: true });
+    const doingTask = doingPrd?.tasks.find((x) => x.id === task.id);
+    if (doingPrd && doingTask) {
+      doingTask.status = "doing";
+      savePRD(prdPath, doingPrd);
+    } else {
+      savePRD(prdPath, prd); // file unreadable mid-run: keep the legacy fallback
+    }
     emit({ taskId: task.id, title: task.title, status: "doing" });
 
-    // per-task AbortController from the mount handle: the TUI skip control aborts
-    // this signal → whichever child is live (executor, verify command, advisor or
-    // reviewer) is SIGKILLed and run.ts stops opening review rounds. No TUI → no
-    // cancellation.
-    const signal = ctx.tui ? ctx.tui.control.beginTask() : undefined;
+    // (the per-task AbortController is created above the staged-authoring gate,
+    // so a TUI skip can abort even the pre-run advisor expansion)
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
     // consumed the same way: what the last attempt said is stale the moment this

@@ -44,9 +44,13 @@ export function defaultScaffold(): PRD {
 }
 
 // EVERY prd.json write (savePrd + non-TTY fallback) routes through this one
-// validatePrd gate — an invalid PRD is never written to disk.
+// validatePrd gate — an invalid PRD is never written to disk. STAGED AUTHORING:
+// the gate validates DRAFT shape (ids, deps, cycles) so skeletons are
+// saveable/buildable — completeness is enforced lazily per task at run time
+// (the JIT-expansion gate blocks any skeletal task it cannot make runnable).
+// Present-but-corrupted fields still refuse here.
 function writePrdFile(prdPath: string, prd: PRD): void {
-  const v = validatePrd(prd);
+  const v = validatePrd(prd, { draft: true, requireVerify: false });
   if (!v.ok) throw new Error(t("wizard.err.invalidPrd", { errors: v.errors.join("; ") }));
   writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n");
 }

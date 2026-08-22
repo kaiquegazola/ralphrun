@@ -273,6 +273,7 @@ const en = {
   "studio.role.error": "error",
   // prdChat.ts — planner-turn errors shown in the chat pane
   "studio.err.noJson": "no valid PRD json found in planner output",
+  "studio.err.rawSaved": "raw planner output saved to {path}",
   "studio.err.spawnFailed": "failed to spawn planner",
 
   // prdload.ts — structural errors (studio chat pane, finalize gate, loop preflight)
@@ -598,6 +599,7 @@ const ptBr: Record<MsgKey, string> = {
   "studio.role.planner": "planner",
   "studio.role.error": "erro",
   "studio.err.noJson": "nenhum json de PRD válido encontrado na saída do planner",
+  "studio.err.rawSaved": "output bruto do planner salvo em {path}",
   "studio.err.spawnFailed": "falha ao iniciar o planner",
 
   "prd.err.json": "JSON inválido: {msg}",

@@ -237,14 +237,28 @@ it("tells the planner the allowed status enum in the prompt", async () => {
 
 it("no fence -> prd null with the no-json error and empty summary", async () => {
   const { res } = await run(["just chatting", "no code here"]);
-  expect(res).toEqual({ summary: "", prd: null, errors: ["no valid PRD json found in planner output"] });
+  expect(res.errors[0]).toBe("no valid PRD json found in planner output");
+  // the raw reply is dumped to temp so the failure stays investigable
+  expect(res.errors).toHaveLength(2);
+  expect(res.errors[1]).toMatch(/ralphrun-planner-\d+\.log$/);
+});
+
+it("the dumped raw output is the planner's full stdout+stderr", async () => {
+  const { readFileSync, unlinkSync } = await import("node:fs");
+  const lines = ["line one", "tool activity", "never a ```json fence"];
+  const { res } = await run(lines);
+  expect(res.prd).toBeNull();
+  const path = /saved to (\S+)/.exec(res.errors[1])?.[1] ?? "";
+  expect(readFileSync(path, "utf8")).toBe(lines.join("\n"));
+  unlinkSync(path);
 });
 
 it("bad json inside the fence -> prd null, summary preserved", async () => {
   const { res } = await run(["mysummary", "", "```json", "{not valid}", "```"]);
   expect(res.prd).toBeNull();
   expect(res.summary).toBe("mysummary");
-  expect(res.errors).toEqual(["no valid PRD json found in planner output"]);
+  expect(res.errors[0]).toBe("no valid PRD json found in planner output");
+  expect(res.errors).toHaveLength(2); // + raw-saved hint
 });
 
 it("valid json but failing validatePrd -> prd null with validator errors", async () => {
@@ -256,7 +270,9 @@ it("valid json but failing validatePrd -> prd null with validator errors", async
 
 it("fence with no '{' -> prd null; empty pre-fence summary via ?? fallback", async () => {
   const { res } = await run(["```json", "no braces here", "```"]);
-  expect(res).toEqual({ summary: "", prd: null, errors: ["no valid PRD json found in planner output"] });
+  expect(res.summary).toBe("");
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toBe("no valid PRD json found in planner output");
 });
 
 it("open brace with no closing brace -> end<=start branch, prd null", async () => {

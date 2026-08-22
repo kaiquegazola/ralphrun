@@ -5,6 +5,9 @@
 
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { buildCmd, promptViaStdin } from "../../adapters.js";
 import { agentDef } from "../../agents.js";
@@ -21,6 +24,22 @@ const TIMEOUT_MS = 600_000;
 const KILL_GRACE_MS = 5_000;
 // errors render in the studio chat pane → localized (function: locale is set after import)
 const NO_JSON = (): string => t("studio.err.noJson");
+
+// A failed turn's raw reply is the ONLY evidence of WHY no json was found —
+// timeout truncation? a ``` fence without the json tag? pure prose? Without it
+// the question is unanswerable once the pane has scrolled away. Persist one
+// file per studio process (overwritten per failed turn) and surface the path
+// next to the parse error.
+function withRawDump(result: PlannerResult, raw: string): PlannerResult {
+  if (result.prd || result.errors.length === 0) return result;
+  const path = join(tmpdir(), `ralphrun-planner-${process.pid}.log`);
+  try {
+    writeFileSync(path, raw);
+  } catch {
+    return result; // a debug artifact must never turn a parse failure into a crash
+  }
+  return { ...result, errors: [...result.errors, t("studio.err.rawSaved", { path })] };
+}
 
 export interface PlannerAttachment {
   path: string;
@@ -153,7 +172,7 @@ async function runPlannerSdkTurn(args: PlannerTurnArgs, prompt: string): Promise
   });
   // an abort is a cancellation, not a failed turn — same empty settle as onAbort
   if (out.status === "aborted") return { summary: "", prd: null, errors: [] };
-  if (out.status === "finished") return parseReply(out.result);
+  if (out.status === "finished") return withRawDump(parseReply(out.result), out.result);
   return { summary: "", prd: null, errors: [out.error || NO_JSON()] };
 }
 
@@ -203,7 +222,7 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
     function killAndSettle(): void {
       killTree(proc);
       releasePipes(proc, merged, rl); // killed: a survivor must not keep writing
-      grace = setTimeout(() => finish(parseReply(full)), KILL_GRACE_MS);
+      grace = setTimeout(() => finish(withRawDump(parseReply(full), full)), KILL_GRACE_MS);
       grace.unref?.();
     }
     // An abort is a CANCELLATION, not a slow turn: settle immediately and
@@ -221,7 +240,7 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
       else args.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    proc.on("close", () => finish(parseReply(full)));
+    proc.on("close", () => finish(withRawDump(parseReply(full), full)));
     proc.on("error", () => finish({ summary: "", prd: null, errors: [t("studio.err.spawnFailed")] }));
   });
 }

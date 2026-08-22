@@ -141,6 +141,8 @@ const en = {
   "exec.working": "  {tag}: …working ({s}s)",
   "exec.skipped": "  {tag}: skipped by user — killing {cli}",
   "exec.timeout": "  {tag}: {cli} TIMEOUT after {s}s — killed",
+  "exec.silent": "  {tag}: {cli} no output for {mins} min…",
+  "exec.stalled": "  {tag}: {cli} no output for {mins} min — killed as hung (not a budget timeout)",
   "exec.blocked": "  {tag}: executor reported BLOCKED — {reason}",
   "exec.spawnFailed": "  {tag}: failed to spawn {cli} — {msg}",
   "advisor.failed": "  {id}: advisor failed — continuing without",
@@ -274,6 +276,10 @@ const en = {
   // prdChat.ts — planner-turn errors shown in the chat pane
   "studio.err.noJson": "no valid PRD json found in planner output",
   "studio.err.rawSaved": "raw planner output saved to {path}",
+  "studio.warn.idle": "no planner output for {mins} min — still waiting…",
+  "studio.err.stalled": "no planner output for {mins} min — killed as hung (dead connection or endless silent retry)",
+  "studio.err.maxed": "planner turn passed the {mins} min safety ceiling and was killed",
+  "studio.err.exited": "the planner cli exited on its own with code {code} — provider failure or exhausted retries",
   "studio.err.spawnFailed": "failed to spawn planner",
 
   // prdload.ts — structural errors (studio chat pane, finalize gate, loop preflight)
@@ -478,6 +484,8 @@ const ptBr: Record<MsgKey, string> = {
   "exec.working": "  {tag}: …trabalhando ({s}s)",
   "exec.skipped": "  {tag}: pulada pelo usuário — matando {cli}",
   "exec.timeout": "  {tag}: {cli} TIMEOUT após {s}s — morta",
+  "exec.silent": "  {tag}: {cli} sem saída há {mins} min…",
+  "exec.stalled": "  {tag}: {cli} sem saída há {mins} min — morto por travamento (não é timeout de orçamento)",
   "exec.blocked": "  {tag}: executor reportou BLOQUEIO — {reason}",
   "exec.spawnFailed": "  {tag}: falha ao iniciar {cli} — {msg}",
   "advisor.failed": "  {id}: advisor falhou — continuando sem",
@@ -600,6 +608,10 @@ const ptBr: Record<MsgKey, string> = {
   "studio.role.error": "erro",
   "studio.err.noJson": "nenhum json de PRD válido encontrado na saída do planner",
   "studio.err.rawSaved": "output bruto do planner salvo em {path}",
+  "studio.warn.idle": "sem saída do planner há {mins} min — ainda esperando…",
+  "studio.err.stalled": "sem saída do planner há {mins} min — morto por travamento (conexão pendurada ou retry silencioso infinito)",
+  "studio.err.maxed": "o turno do planner passou do teto de segurança de {mins} min e foi morto",
+  "studio.err.exited": "o cli do planner morreu sozinho com código {code} — falha do provider ou retries esgotados",
   "studio.err.spawnFailed": "falha ao iniciar o planner",
 
   "prd.err.json": "JSON inválido: {msg}",

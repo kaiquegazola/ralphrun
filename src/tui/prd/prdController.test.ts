@@ -31,11 +31,11 @@ it("startDrafting sets drafting + streaming placeholder", () => {
   expect(s.messages).toEqual([{ role: "planner", text: "" }]);
 });
 
-it("appendPlannerChunk accumulates lines into the last message, space-separated", () => {
+it("appendPlannerChunk accumulates lines into the last message, newline-separated", () => {
   let s = reducer(initialPrdState, { type: "startDrafting" });
   s = reducer(s, { type: "appendPlannerChunk", text: "hel" });
   s = reducer(s, { type: "appendPlannerChunk", text: "lo" });
-  expect(s.messages[s.messages.length - 1]).toEqual({ role: "planner", text: "hel lo" });
+  expect(s.messages[s.messages.length - 1]).toEqual({ role: "planner", text: "hel\nlo" });
 });
 
 it("applyPlannerResult (valid) replaces prd, pushes undo, writes summary+diff, clears attachments", () => {

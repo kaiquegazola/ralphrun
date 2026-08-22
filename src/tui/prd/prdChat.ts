@@ -5,13 +5,14 @@
 
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
-import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildCmd, promptViaStdin } from "../../adapters.js";
 import { agentDef } from "../../agents.js";
 import { runCursorSdk } from "../../cursor-sdk.js";
+import { startIdleLadder } from "../../idleness.js";
 import { killTree, releasePipes, spawn, writePrompt } from "../../spawn.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
@@ -19,9 +20,25 @@ import { normalizePrd } from "../../prdload.js";
 import type { ChatMessage, PlannerResult } from "./prdController.js";
 import { validatePrd } from "./validatePrd.js";
 
-const TIMEOUT_MS = 600_000;
 // see executor.ts — how long to wait for 'close' after a kill before settling
 const KILL_GRACE_MS = 5_000;
+// A turn dies by LIVENESS, not by a wall-clock budget: while output keeps
+// flowing it runs as long as the model needs — a slow free-tier model writing
+// a giant PRD is work, not a hang (a 22KB reply once died mid-string at the
+// old 10-min mark). Guards, escalating:
+//   IDLE LADDER — continuous SILENCE climbs one step every IDLE_STEP_MS: the
+//           first steps only ANNOUNCE ("sem saída há N min…", streamed into the
+//           chat so the user sees we noticed), the last step kills. Every line
+//           from the cli resets the ladder to zero — provider backoff, silent
+//           retries and slow thinking all pass; a genuinely frozen stream does
+//           not (proven against opencode's own log: request opened, zero
+//           tokens, zero errors until we cut it).
+//   MAX   — absolute ceiling against degenerate infinite output only.
+//   close — a cli that died ON ITS OWN is reported WITH its exit code, which
+//           is how "the model gave up" becomes visible instead of guessing.
+const IDLE_STEP_MS = 180_000;
+const IDLE_STEPS = 4; // warn at 3min, 6min, 9min — kill only at 12min of total silence
+const MAX_TURN_MS = 1_800_000;
 // errors render in the studio chat pane → localized (function: locale is set after import)
 const NO_JSON = (): string => t("studio.err.noJson");
 
@@ -30,15 +47,41 @@ const NO_JSON = (): string => t("studio.err.noJson");
 // the question is unanswerable once the pane has scrolled away. Persist one
 // file per studio process (overwritten per failed turn) and surface the path
 // next to the parse error.
-function withRawDump(result: PlannerResult, raw: string): PlannerResult {
+//
+// Next to it, when the cli keeps an internal log of its own (opencode logs
+// provider streams there — the stdout can be mute while the child still
+// "works" on a frozen connection), a tail of that log lands beside the raw
+// output as <path>.internal.log. It answers what stdout never will: whether
+// the child was mid-generation, silently retrying, or sitting on a dead pipe.
+function withRawDump(result: PlannerResult, raw: string, cli: string): PlannerResult {
   if (result.prd || result.errors.length === 0) return result;
   const path = join(tmpdir(), `ralphrun-planner-${process.pid}.log`);
   try {
     writeFileSync(path, raw);
+    const internal = internalLogTail(cli);
+    if (internal) writeFileSync(`${path}.internal.log`, internal);
   } catch {
     return result; // a debug artifact must never turn a parse failure into a crash
   }
   return { ...result, errors: [...result.errors, t("studio.err.rawSaved", { path })] };
+}
+
+/** last INTERNAL_LOG_MINUTES of the cli's own log file; "" when unknown */
+const INTERNAL_LOG_MINUTES = 10;
+function internalLogTail(cli: string): string {
+  if (cli !== "opencode") return ""; // the one cli whose log location we know today
+  try {
+    const base = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+    const lines = readFileSync(join(base, "opencode", "log", "opencode.log"), "utf8").split("\n");
+    const cutoff = Date.now() - INTERNAL_LOG_MINUTES * 60_000;
+    const recent = lines.filter((l) => {
+      const m = /^timestamp=(\S+?)(?:\.\d+)?Z /.exec(l);
+      return m ? Date.parse(`${m[1]}Z`) >= cutoff : false;
+    });
+    return recent.slice(-120).join("\n");
+  } catch {
+    return ""; // no log / unreadable: the diagnostic simply stays absent
+  }
 }
 
 export interface PlannerAttachment {
@@ -163,7 +206,7 @@ async function runPlannerSdkTurn(args: PlannerTurnArgs, prompt: string): Promise
     model: args.model,
     prompt,
     cwd: args.cwd,
-    timeoutSecs: TIMEOUT_MS / 1000,
+    timeoutSecs: MAX_TURN_MS / 1000,
     mode: "plan", // chat-only, same posture as buildCmd(..., autoApprove: false)
     signal: args.signal,
     onEvent: (ev) => {
@@ -172,7 +215,7 @@ async function runPlannerSdkTurn(args: PlannerTurnArgs, prompt: string): Promise
   });
   // an abort is a cancellation, not a failed turn — same empty settle as onAbort
   if (out.status === "aborted") return { summary: "", prd: null, errors: [] };
-  if (out.status === "finished") return withRawDump(parseReply(out.result), out.result);
+  if (out.status === "finished") return withRawDump(parseReply(out.result), out.result, args.cli);
   return { summary: "", prd: null, errors: [out.error || NO_JSON()] };
 }
 
@@ -199,30 +242,65 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
     const rl = createInterface({ input: merged });
 
     let full = "";
+    // Escalating silence ladder (see idleness.ts): warns stream into the chat
+    // so the user sees the stall forming; only the last rung kills. Armed at
+    // spawn too, so a cli that produces nothing at all dies here instead of at
+    // the ceiling; every line resets it to rung zero.
+    const idle = startIdleLadder({
+      stepMs: IDLE_STEP_MS,
+      steps: IDLE_STEPS,
+      warn: (mins) => args.onChunk(t("studio.warn.idle", { mins })),
+      fatal: () => killAndSettle("stall"),
+    });
     rl.on("line", (line) => {
       full += (full ? "\n" : "") + line;
+      idle.bump(); // every line is proof of life
       args.onChunk(line);
     });
-
-    // single-settle guard: close / error / timeout / abort can race.
+    // single-settle guard: close / error / stall / ceiling / abort can race.
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
+    let max: NodeJS.Timeout | undefined;
     let grace: NodeJS.Timeout | undefined;
+    let killedBy: "stall" | "ceiling" | null = null;
+    let exitCode: number | null = null;
+
+    const clearTimers = (): void => {
+      idle.stop();
+      clearTimeout(max);
+      clearTimeout(grace);
+    };
     const finish = (result: PlannerResult): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      clearTimeout(grace);
+      clearTimers();
       args.signal?.removeEventListener("abort", onAbort);
       resolve(result);
     };
 
+    // settle by parsing what accumulated, annotated with WHY when we killed it
+    // or the cli died first — the failure classes a user needs told apart
+    // ("did the model give up, or did we cut it?").
+    const settleParsed = (): void => {
+      const parsed = parseReply(full);
+      let errors = parsed.errors;
+      if (parsed.prd === null && errors.length > 0) {
+        const idleMins = (IDLE_STEP_MS * IDLE_STEPS) / 60_000;
+        if (killedBy === "stall") errors = [t("studio.err.stalled", { mins: idleMins }), ...errors];
+        else if (killedBy === "ceiling") errors = [t("studio.err.maxed", { mins: MAX_TURN_MS / 60_000 }), ...errors];
+        else if (exitCode !== null && exitCode !== 0) errors = [t("studio.err.exited", { code: exitCode }), ...errors];
+      }
+      finish(withRawDump({ ...parsed, errors }, full, args.cli));
+    };
+
     // a surviving grandchild can hold the pipes open, so 'close' may never
     // arrive after a kill — settle on our own once the grace elapses.
-    function killAndSettle(): void {
+    function killAndSettle(reason: "stall" | "ceiling"): void {
+      if (settled) return;
+      killedBy = reason;
       killTree(proc);
       releasePipes(proc, merged, rl); // killed: a survivor must not keep writing
-      grace = setTimeout(() => finish(withRawDump(parseReply(full), full)), KILL_GRACE_MS);
+      idle.stop();
+      grace = setTimeout(settleParsed, KILL_GRACE_MS);
       grace.unref?.();
     }
     // An abort is a CANCELLATION, not a slow turn: settle immediately and
@@ -234,13 +312,18 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
       finish({ summary: "", prd: null, errors: [] });
     }
 
-    timer = setTimeout(killAndSettle, TIMEOUT_MS);
+    max = setTimeout(() => killAndSettle("ceiling"), MAX_TURN_MS);
+    max.unref?.();
+    idle.bump(); // arm the ladder: even zero-output silence starts climbing
     if (args.signal) {
       if (args.signal.aborted) onAbort();
       else args.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    proc.on("close", () => finish(withRawDump(parseReply(full), full)));
+    proc.on("close", (code) => {
+      exitCode = typeof code === "number" ? code : null;
+      settleParsed();
+    });
     proc.on("error", () => finish({ summary: "", prd: null, errors: [t("studio.err.spawnFailed")] }));
   });
 }

@@ -253,6 +253,45 @@ it("the dumped raw output is the planner's full stdout+stderr", async () => {
   unlinkSync(path);
 });
 
+it("opencode failures also carry a tail of its internal log beside the raw output", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "rr-intlog-"));
+  mkdirSync(join(dir, "opencode", "log"), { recursive: true });
+  const iso = new Date().toISOString().replace(/\.\d{3}Z$/, ".123Z");
+  writeFileSync(
+    join(dir, "opencode", "log", "opencode.log"),
+    `timestamp=${iso} level=INFO run=test message=stream providerID=opencode-go modelID=ox-alpha-free\n`,
+  );
+  const oldXdg = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dir;
+  try {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runPlannerTurn({
+      cli: "opencode",
+      model: "ox-alpha-free",
+      cwd: "/w",
+      currentPrd: null,
+      history: [],
+      instruction: "x",
+      attachments: [],
+      onChunk: vi.fn(),
+    });
+    proc.stdout.write("muted stream, frozen provider pipe\n");
+    await tick();
+    proc.emit("close", 0);
+    const res = await p;
+    expect(res.prd).toBeNull();
+    const path = /saved to (\S+)/.exec(res.errors[res.errors.length - 1]!)?.[1] ?? "";
+    expect(readFileSync(`${path}.internal.log`, "utf8")).toContain("run=test");
+  } finally {
+    if (oldXdg === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = oldXdg;
+  }
+});
+
 it("bad json inside the fence -> prd null, summary preserved", async () => {
   const { res } = await run(["mysummary", "", "```json", "{not valid}", "```"]);
   expect(res.prd).toBeNull();
@@ -285,7 +324,7 @@ it("missing closing fence still parses (close === -1 branch)", async () => {
   expect(res.prd).toEqual(VALID);
 });
 
-it("kills the process on timeout", async () => {
+it("climbs the idle ladder: warns twice, kills only at the last rung", async () => {
   vi.useFakeTimers();
   try {
     const proc = makeProc();
@@ -301,18 +340,84 @@ it("kills the process on timeout", async () => {
       attachments: [],
       onChunk,
     });
-    vi.advanceTimersByTime(600_000);
+    vi.advanceTimersByTime(180_000); // rung 1: announced, not killed
+    expect(killTreeMock).not.toHaveBeenCalled();
+    expect(onChunk).toHaveBeenCalledWith(expect.stringContaining("3 min"));
+    vi.advanceTimersByTime(180_000); // rung 2
+    expect(onChunk).toHaveBeenCalledWith(expect.stringContaining("6 min"));
+    vi.advanceTimersByTime(180_000); // rung 3: still only announcing
+    expect(killTreeMock).not.toHaveBeenCalled();
+    expect(onChunk).toHaveBeenCalledWith(expect.stringContaining("9 min"));
+    vi.advanceTimersByTime(180_000); // last rung: lethal
     expect(killTreeMock).toHaveBeenCalledWith(proc);
     proc.emit("close", null);
     const res = await p;
     expect(res.prd).toBeNull();
+    expect(res.errors[0]).toContain("min"); // stall reason surfaces
   } finally {
     vi.useRealTimers();
   }
 });
 
+// while output flows, every line resets the idle watchdog — a slow model
+// streaming past the OLD 10-min wall clock now finishes instead of dying
+it("keeps a slow-but-alive turn alive past any fixed budget", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runPlannerTurn({
+      cli: "claude",
+      model: "m",
+      cwd: "/w",
+      currentPrd: null,
+      history: [],
+      instruction: "x",
+      attachments: [],
+      onChunk: vi.fn(),
+    });
+    // drip lines well past the old 600s cap, never silent for 180s
+    for (let i = 0; i < 6; i++) {
+      proc.stdout.write(`chunk ${i}\n`);
+      await tick();
+      await vi.advanceTimersByTimeAsync(170_000);
+      expect(killTreeMock).not.toHaveBeenCalled();
+    }
+    proc.stdout.write("sum\n\n```json\n" + VALID_JSON + "\n```");
+    await tick();
+    proc.emit("close", 0);
+    const res = await p;
+    expect(res.prd).toEqual(VALID);
+    expect(killTreeMock).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// the failure class the old code hid: the cli died ON ITS OWN mid-answer
+it("a nonzero exit code is reported as the cli dying on its own", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const p = runPlannerTurn({
+    cli: "claude",
+    model: "m",
+    cwd: "/w",
+    currentPrd: null,
+    history: [],
+    instruction: "x",
+    attachments: [],
+    onChunk: vi.fn(),
+  });
+  proc.stdout.write("partial answer, then the provider died\n");
+  await tick();
+  proc.emit("close", 3);
+  const res = await p;
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toContain("code 3");
+});
+
 // a grandchild outliving the kill holds the pipes open -> no 'close' ever
-it("settles on whatever it parsed when 'close' never follows the timeout kill", async () => {
+it("settles on whatever it parsed when 'close' never follows the stall kill", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }); // setImmediate stays real for readline
   try {
     const proc = makeProc();
@@ -329,12 +434,14 @@ it("settles on whatever it parsed when 'close' never follows the timeout kill", 
     });
     proc.stdout.write("half a plan\n");
     await tick(); // let readline emit the line before the clock jumps
-    await vi.advanceTimersByTimeAsync(600_000); // timeout -> kill
+    await vi.advanceTimersByTimeAsync(720_000); // full idle ladder -> kill
     await vi.advanceTimersByTimeAsync(5_000); // grace elapses, no close
-    // settles instead of hanging: the partial output is parsed, PRD is rejected
+    // settles instead of hanging: the partial output is parsed, PRD is rejected,
+    // and the STALL is named — not a generic no-json
     const res = await p;
     expect(res.prd).toBeNull();
-    expect(res.errors.length).toBeGreaterThan(0);
+    expect(res.errors[0]).toContain("min");
+    expect(res.errors.length).toBeGreaterThan(1);
   } finally {
     vi.useRealTimers();
   }

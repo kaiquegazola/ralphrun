@@ -693,3 +693,57 @@ describe("in-process backend", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });
+
+// The silence ladder sits under task_timeout: a HUNG executor (output stops
+// forever) dies well before the budget, with its own reason in the log —
+// while an executor that keeps emitting lines runs to its natural end.
+describe("silence ladder", () => {
+  it("warns on each rung and kills as hung at the last one, before the ceiling", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    try {
+      const proc = makeProc();
+      spawnMock.mockReturnValue(proc);
+      const p = runExecutor(execu, "P", cfg({ task_timeout: 1800 }), "/w", "prog", task);
+      proc.stdout.write("early sign of life\n");
+      await tick();
+
+      const said = (re: RegExp): boolean => (log as unknown as Mock).mock.calls.some((c) => re.test(String(c[1])));
+      vi.advanceTimersByTime(180_000);
+      expect(said(/no output for 3 min/)).toBe(true);
+      expect(killTreeMock).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(180_000);
+      expect(said(/no output for 6 min/)).toBe(true);
+      vi.advanceTimersByTime(180_000);
+      expect(said(/no output for 9 min/)).toBe(true);
+      expect(killTreeMock).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(180_000); // last rung: lethal, still under the 30min ceiling
+      expect(killTreeMock).toHaveBeenCalledWith(proc);
+      expect(said(/killed as hung/)).toBe(true);
+
+      closeProc(proc, null);
+      expect(await p).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a line resets the rungs: a slow-but-alive executor never dies by silence", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    try {
+      const proc = makeProc();
+      spawnMock.mockReturnValue(proc);
+      const p = runExecutor(execu, "P", cfg({ task_timeout: 3600 }), "/w", "prog", task);
+      // one line every minute for 20 minutes: past any silence kill
+      for (let i = 0; i < 20; i++) {
+        proc.stdout.write(`still working ${i}\n`);
+        await tick();
+        vi.advanceTimersByTime(60_000);
+      }
+      expect(killTreeMock).not.toHaveBeenCalled();
+      closeProc(proc, 0);
+      expect(await p).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

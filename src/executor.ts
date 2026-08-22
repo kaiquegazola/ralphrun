@@ -10,6 +10,7 @@ import { buildCmd, promptViaStdin } from "./adapters.js";
 import { agentDef } from "./agents.js";
 import type { AgentSpec, Config } from "./config.js";
 import { runCursorSdkExecutor } from "./cursor-sdk.js";
+import { startIdleLadder } from "./idleness.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { Task } from "./prd.js";
@@ -99,6 +100,27 @@ export function runExecutor(
     });
     if (viaStdin) writePrompt(proc, prompt);
 
+    // The silence ladder sits UNDER task_timeout (which stays the absolute
+    // wall-clock ceiling): continuous silence climbs a rung every step — early
+    // rungs announce in the durable log, the last kills as HUNG, which is a
+    // different death than the budget timeout and says so. Step size shrinks
+    // with the budget so a small task_timeout still gets a full ladder under
+    // it; every line below resets to rung zero.
+    const silenceStepMs = Math.min(180_000, Math.round((timeout * 1000) / 6));
+    let stalledOut = false;
+    const idle = startIdleLadder({
+      stepMs: silenceStepMs,
+      steps: 4,
+      warn: (mins) =>
+        log(progress, t("exec.silent", { tag, cli: execu.cli, mins: Math.max(1, Math.round(mins)) })),
+      fatal: () => {
+        stalledOut = true;
+        log(progress, t("exec.stalled", { tag, cli: execu.cli, mins: Math.max(1, Math.round((Date.now() - last) / 60_000)) }));
+        killAndSettle();
+      },
+    });
+    idle.bump(); // arm at spawn: zero-output silence climbs too
+
     // merge stderr into stdout for live echo
     const merged = new PassThrough();
     proc.stdout.pipe(merged);
@@ -109,6 +131,7 @@ export function runExecutor(
       // every raw line is a sign of life, including the ones never displayed
       // (token counters, hook chatter)
       last = Date.now();
+      idle.bump();
       const ev = stream ? stream.parse(raw) : { text: raw, prose: true };
       if (!ev) return;
       // The agent did more work, so whatever it last SAID is no longer its final
@@ -182,6 +205,7 @@ export function runExecutor(
       if (settled) return;
       settled = true;
       clearInterval(hbTimer);
+      idle.stop();
       clearTimeout(grace);
       clearTimeout(drainTimer);
       if (signal) signal.removeEventListener("abort", onAbort);
@@ -244,6 +268,7 @@ export function runExecutor(
       if (settled) return;
       const elapsed = Math.round((Date.now() - start) / 1000);
       if (timedOut) return finish(false); // already logged when the timeout fired
+      if (stalledOut) return finish(false); // already logged when the ladder fired
       log(progress, `  ${tag}: ${execu.cli} exit=${code} (${elapsed}s)`);
       exitCode = code;
       // don't wait forever for a stream a survivor may be holding open

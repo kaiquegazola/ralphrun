@@ -84,9 +84,10 @@ export function reducer(state: PrdState, action: PrdAction): PrdState {
     case "appendPlannerChunk": {
       const messages = state.messages.slice();
       const last = messages[messages.length - 1];
-      // chunks are readline lines: join with a space so the live drafting
-      // message stays a single row by design, not by gluing words together.
-      messages[messages.length - 1] = { ...last, text: last.text ? `${last.text} ${action.text}` : action.text };
+      // chunks are readline lines: join with a newline so tool activity reads
+      // as the log it is — one event per row — instead of one ever-growing
+      // wrapped paragraph.
+      messages[messages.length - 1] = { ...last, text: last.text ? `${last.text}\n${action.text}` : action.text };
       return { ...state, messages };
     }
     case "applyPlannerResult": {

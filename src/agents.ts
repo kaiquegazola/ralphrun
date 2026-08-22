@@ -133,6 +133,12 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     // shell, so the model is one argv element. Quotes are only needed when a
     // human types `--executor "agy:Gemini 3.1 Pro (High)"` into a terminal.
     models: [
+      { value: "Gemini 3.7 Flash (High)", label: "Gemini 3.7 Flash (High)" },
+      { value: "Gemini 3.7 Flash (Medium)", label: "Gemini 3.7 Flash (Medium)" },
+      { value: "Gemini 3.7 Flash (Low)", label: "Gemini 3.7 Flash (Low)" },
+      { value: "Gemini 3.6 Flash (High)", label: "Gemini 3.6 Flash (High)" },
+      { value: "Gemini 3.6 Flash (Medium)", label: "Gemini 3.6 Flash (Medium)" },
+      { value: "Gemini 3.6 Flash (Low)", label: "Gemini 3.6 Flash (Low)" },
       { value: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash (Medium)" },
       { value: "Gemini 3.5 Flash (High)", label: "Gemini 3.5 Flash (High)" },
       { value: "Gemini 3.5 Flash (Low)", label: "Gemini 3.5 Flash (Low)" },
@@ -304,10 +310,14 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     label: "Codex CLI",
     bin: "codex",
     defaultModel: "",
+    // probed against a ChatGPT-account login on 2026-08: gpt-5.6-lua and
+    // gpt-4.5-preview are rejected outright ("not supported when using Codex
+    // with a ChatGPT account"), so only ids that answered stay listed — same
+    // posture as cursor above, a stale id hard-fails every task.
     models: [
       { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-      { value: "gpt-5.6-lua", label: "GPT-5.6 Lua" },
-      { value: "gpt-4.5-preview", label: "GPT-4.5 Preview" },
+      { value: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+      { value: "gpt-5.5", label: "GPT-5.5" },
     ],
     recommended: { planner: "gpt-5.6-sol", executor: "gpt-5.6-sol", advisor: "gpt-5.6-sol" },
     // verified: `codex exec` with no prompt argument prints
@@ -333,15 +343,16 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     // config, or the "custom" picker.
     models: [
       { value: "opencode/big-pickle", label: "Big Pickle (free)" },
-      { value: "opencode/deepseek-v4-flash-free", label: "DeepSeek V4 Flash (free)" },
       { value: "opencode/hy3-free", label: "Hy3 (free)" },
       { value: "opencode/mimo-v2.5-free", label: "MiMo V2.5 (free)" },
       { value: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra (free)" },
-      { value: "opencode/north-mini-code-free", label: "North Mini Code (free)" },
+      { value: "opencode/nemotron-3.5-lightning-free", label: "Nemotron 3.5 Lightning (free)" },
       { value: "opencode-go/deepseek-v4-flash", label: "Go · DeepSeek V4 Flash" },
       { value: "opencode-go/deepseek-v4-pro", label: "Go · DeepSeek V4 Pro" },
       { value: "opencode-go/glm-5.1", label: "Go · GLM 5.1" },
       { value: "opencode-go/glm-5.2", label: "Go · GLM 5.2" },
+      { value: "opencode-go/glm-5.3", label: "Go · GLM 5.3" },
+      { value: "opencode-go/gpt-5.6-luna", label: "Go · GPT-5.6 Luna" },
       { value: "opencode-go/grok-4.5", label: "Go · Grok 4.5" },
       { value: "opencode-go/kimi-k2.6", label: "Go · Kimi K2.6" },
       { value: "opencode-go/kimi-k2.7-code", label: "Go · Kimi K2.7 Code" },
@@ -350,9 +361,11 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       { value: "opencode-go/mimo-v2.5-pro", label: "Go · MiMo V2.5 Pro" },
       { value: "opencode-go/minimax-m2.7", label: "Go · MiniMax M2.7" },
       { value: "opencode-go/minimax-m3", label: "Go · MiniMax M3" },
+      { value: "opencode-go/ox-alpha-free", label: "Go · Ox Alpha" },
       { value: "opencode-go/qwen3.6-plus", label: "Go · Qwen 3.6 Plus" },
       { value: "opencode-go/qwen3.7-max", label: "Go · Qwen 3.7 Max" },
       { value: "opencode-go/qwen3.7-plus", label: "Go · Qwen 3.7 Plus" },
+      { value: "opencode-go/qwen3.8-max", label: "Go · Qwen 3.8 Max" },
     ],
     // advisor leans on a DIFFERENT model family than the executor — the whole
     // point of the advisor is a second opinion, not an echo.

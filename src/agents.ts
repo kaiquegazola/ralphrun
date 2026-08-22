@@ -330,6 +330,15 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       if (prompt) cmd.push(prompt); // codex takes the prompt LAST, after the flags
       return cmd;
     },
+    // `codex login status` is the whole probe: exit 0 = "Logged in", exit 1 =
+    // "Not logged in". No output parsing needed.
+    auth: {
+      loginCommand: "codex login",
+      check: (bin) => {
+        execSync(`${bin} login status`, { stdio: "ignore" }); // exit 0 = logged in, throws otherwise
+        return true;
+      },
+    },
   },
 
   opencode: {
@@ -381,8 +390,18 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       cmd.push(prompt); // opencode takes the prompt LAST, after the flags
       return cmd;
     },
-    // no auth probe: opencode auth is per-provider (`opencode auth list`),
-    // so there is no single reliable headless "logged in" check → "unknown".
+    // `opencode auth list` exits 0 either way — the configured-credential count
+    // is the answer. Auth IS per-provider, but any one credential means the cli
+    // can run something; a provider-specific gap surfaces as the model's own
+    // runtime error, which is no worse than the old "unknown" posture offered.
+    auth: {
+      loginCommand: "opencode auth login",
+      check: (bin) => {
+        const out = execSync(`${bin} auth list`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        const m = out.match(/(\d+) credentials/);
+        return !!m && Number(m[1]) > 0;
+      },
+    },
   },
 } satisfies Record<string, AgentDef>);
 

@@ -116,6 +116,52 @@ describe("checkAgent", () => {
     expect(checkAgent("cursorsdk")).toEqual({ cli: "cursorsdk", installed: false, loggedIn: "unknown" });
   });
 
+  it("codex: logged in when `login status` exits 0", () => {
+    whichSync.mockReturnValue("/bin/codex" as any);
+    exec.mockReturnValue("" as any);
+    const d = checkAgent("codex");
+    expect(d).toEqual({
+      cli: "codex",
+      installed: true,
+      loggedIn: true,
+      loginCommand: "codex login",
+    });
+  });
+
+  it("codex: not logged in when `login status` exits nonzero", () => {
+    whichSync.mockReturnValue("/bin/codex" as any);
+    exec.mockImplementation(() => {
+      throw new Error("nonzero"); // real cli prints "Not logged in" and exits 1
+    });
+    const d = checkAgent("codex");
+    expect(d.loggedIn).toBe(false);
+    expect(d.loginCommand).toBe("codex login");
+  });
+
+  it("opencode: logged in when `auth list` reports credentials", () => {
+    whichSync.mockReturnValue("/bin/opencode" as any);
+    exec.mockReturnValue("└  2 credentials\n" as any);
+    const d = checkAgent("opencode");
+    expect(d).toEqual({
+      cli: "opencode",
+      installed: true,
+      loggedIn: true,
+      loginCommand: "opencode auth login",
+    });
+  });
+
+  it("opencode: not logged in with zero credentials", () => {
+    whichSync.mockReturnValue("/bin/opencode" as any);
+    exec.mockReturnValue("└  0 credentials\n" as any);
+    expect(checkAgent("opencode").loggedIn).toBe(false);
+  });
+
+  it("opencode: not logged in when the count line never arrives (output drift)", () => {
+    whichSync.mockReturnValue("/bin/opencode" as any);
+    exec.mockReturnValue("something unexpected\n" as any);
+    expect(checkAgent("opencode").loggedIn).toBe(false);
+  });
+
   it("grok: installed but auth unknown (no status probe)", () => {
     whichSync.mockReturnValue("/bin/grok" as any);
     const d = checkAgent("grok");

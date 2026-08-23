@@ -4,6 +4,10 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: true,
+    // the suite is the CORE's. app/ is the Electrobun desktop app: its
+    // dependencies (and the Hutch devkit it projects into app/.hutch) ship
+    // their own tests, which are not ours to run or to fail on.
+    include: ["src/**/*.test.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],

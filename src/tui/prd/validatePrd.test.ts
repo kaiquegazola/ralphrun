@@ -66,7 +66,12 @@ it("rejects a null task entry", () => {
 
 it("rejects a task with a non-string id", () => {
   const r = validatePrd(prd({ tasks: [task({ id: 5 })] }));
-  expect(r.errors).toContain("task[0].id must be a string");
+  expect(r.errors).toContain("task[0].id must be a non-empty string");
+});
+
+it("rejects an EMPTY id — deps, logs and worktrees are all keyed by it", () => {
+  const r = validatePrd(prd({ tasks: [task({ id: "  " })] }));
+  expect(r.errors).toContain("task[0].id must be a non-empty string");
 });
 
 it("rejects duplicate task ids", () => {

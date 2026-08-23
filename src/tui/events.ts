@@ -16,6 +16,20 @@ export interface RunEvent {
   lineSource?: "executor" | "advisor" | "review" | "system";
   status?: "todo" | "doing" | "done" | "blocked" | "retry";
   reason?: string; // when status==="blocked" (e.g. "skipped by user" / "max retries")
+  /**
+   * The tree object snapshotting the workspace as this task FOUND it
+   * (git.captureReviewBase). A host with no dashboard uses it to show a diff
+   * that is this task's work and not whatever the user had uncommitted when
+   * the run started — the TUI reads the same thing off its own state.
+   */
+  baseline?: string;
+  /**
+   * WHERE that baseline was taken — the task's worktree, or the main checkout
+   * when this task has no cell of its own. A host cannot infer it: a missing
+   * worktree means either "ran in the main checkout" or "the cell was
+   * discarded", and those two want opposite diffs.
+   */
+  baselineDir?: string;
   elapsedMs?: number;
   timeoutMs?: number;
   globalElapsedMs?: number;

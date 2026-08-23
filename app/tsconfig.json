@@ -1,0 +1,19 @@
+{
+  // the devkit's tsconfig is what maps `electrobun/main` and `electrobun/view`
+  // to the SDK Hutch projects into .hutch/devkit — without it those imports
+  // resolve to the npm stub that only throws.
+  "extends": "./.hutch/devkit/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["bun", "react", "react-dom"]
+  },
+  "include": ["src", "electrobun.config.ts"]
+}

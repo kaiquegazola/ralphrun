@@ -295,7 +295,9 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
       errors.push(msg("prd.err.taskObject", { i }));
       return;
     }
-    if (typeof t.id !== "string") errors.push(msg("prd.err.id", { i }));
+    // non-EMPTY: an id is what deps point at, what the logs are keyed by and
+    // what a worktree is named after — an empty one is unaddressable everywhere
+    if (typeof t.id !== "string" || t.id.trim() === "") errors.push(msg("prd.err.id", { i }));
     else if (seen.has(t.id)) errors.push(msg("prd.err.dupId", { id: t.id }));
     else seen.add(t.id);
     if (typeof t.title !== "string") errors.push(msg("prd.err.title", { i }));

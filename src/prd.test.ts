@@ -154,6 +154,20 @@ describe("linkKind", () => {
 });
 
 describe("tasksInstallingDeps", () => {
+  it("counts the commands that REMOVE from the tree, not just the installs", () => {
+    // a shared node_modules is as broken by one task deleting a package as by
+    // another adding one — both write the tree every parallel verify reads
+    expect(
+      tasksInstallingDeps([
+        { id: "A", verify: "npm uninstall left-pad && npm test" },
+        { id: "B", verify: "pnpm remove foo" },
+        { id: "C", verify: "bun update" },
+        { id: "D", verify: "yarn upgrade" },
+        { id: "E", verify: "npm test" },
+      ]),
+    ).toEqual(["A", "B", "C", "D"]);
+  });
+
   it("names only the tasks whose verify installs, and skips those with none", () => {
     expect(
       tasksInstallingDeps([

@@ -11,7 +11,16 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { git, gitOut, headCommit } from "./git.js";
 
@@ -123,7 +132,15 @@ export function createTaskWorktree(workspace: string, taskId: string, links: str
     rmSync(dir, { recursive: true, force: true });
     git(workspace, "worktree", "prune");
     if (git(workspace, "worktree", "add", "--detach", dir, base) !== 0) return null;
-    for (const name of links) seedIgnoredDir(workspace, dir, name);
+    try {
+      for (const name of links) seedIgnoredDir(workspace, dir, name);
+    } catch (err) {
+      // the cell EXISTS now: leaving it behind keeps an administrative entry
+      // git will refuse to `add` over next time, for a task that is about to
+      // degrade to the main workspace anyway
+      removeTaskWorktree(workspace, dir);
+      throw err;
+    }
     return dir;
   } catch {
     return null;
@@ -162,7 +179,13 @@ export function ignoredDirsWouldBeShared(workspace: string): boolean {
   try {
     clean();
     mkdirSync(src, { recursive: true });
-    shared = !cloneDir(src, dst);
+    // With a FILE in it. An empty directory has nothing to reflink, so
+    // `cp --reflink=always` trivially succeeds on filesystems that cannot
+    // reflink at all — the probe would answer "isolated" and the real clone of
+    // node_modules would then fall back to a SHARED symlink, which is the exact
+    // hazard this refuses to run into.
+    writeFileSync(join(src, "probe"), "cow\n");
+    shared = !cloneDir(src, dst) || !existsSync(join(dst, "probe"));
   } catch {
     /* cannot even probe: keep the unsafe answer */
   }
@@ -258,18 +281,109 @@ const LOCK = join(".ralphrun", "run.lock");
 export function claimRunLock(workspace: string): number | null {
   const file = join(workspace, LOCK);
   mkdirSync(join(workspace, ".ralphrun"), { recursive: true });
-  try {
-    writeFileSync(file, String(process.pid), { flag: "wx" });
-    return null;
-  } catch {
-    const holder = Number(readFileSync(file, "utf8").trim());
+  const steal = `${file}.steal`;
+
+  // Bounded, because every path that loops here re-reads the lock: a takeover
+  // that lost its race has to look again rather than assume the corpse it saw
+  // is still there — that assumption is how two runs both became the owner.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      writeFileSync(file, String(process.pid), { flag: "wx" });
+      return null;
+    } catch {
+      // taken — by whom, and are they alive?
+    }
+    const holder = pidIn(file);
     if (holder === process.pid) return null; // already ours
     if (holder && pidAlive(holder)) return holder;
-    // Stale — the holder crashed. OVERWRITTEN rather than unlinked and
-    // recreated: one syscall, so there is no window in which the file is absent
-    // for a third run to slip into.
-    writeFileSync(file, String(process.pid));
+    if (!holder) continue; // the file vanished under us: try the claim again
+
+    // Stale. The TAKEOVER needs its own lock, or two runs that both find the
+    // same corpse both write their pid and both proceed — and the second one's
+    // reap deletes the first one's live worktrees.
+    try {
+      writeFileSync(steal, String(process.pid), { flag: "wx" });
+    } catch {
+      const thief = pidIn(steal);
+      if (thief && thief !== process.pid && pidAlive(thief)) return thief;
+      // litter from a crash INSIDE a takeover, or a winner that already
+      // finished — either way the lock itself is the source of truth, so drop
+      // the sidecar and read it again.
+      rmSync(steal, { force: true });
+      continue;
+    }
+    try {
+      // Under the steal lock, and only now: whoever won an earlier race has
+      // written their pid by this point, so a live one is the real owner.
+      const now = pidIn(file);
+      if (now && now !== process.pid && pidAlive(now)) return now;
+      writeFileSync(file, String(process.pid));
+    } finally {
+      rmSync(steal, { force: true });
+    }
     return null;
+  }
+  // Contention that never settled. `null` MUST NOT come back here: every caller
+  // reads it as "the lock is yours", and the whole point of this file is that a
+  // second run in the same workspace reaps the first one's live worktrees.
+  // BUSY_UNKNOWN is the honest answer when no pid can be named.
+  const last = pidIn(file);
+  return last && last !== process.pid ? last : BUSY_UNKNOWN;
+}
+
+/**
+ * "Somebody has this workspace and we could not find out who" — a lock we
+ * neither took nor could attribute, after repeated contention. Not a real pid:
+ * callers print it, and printing it is better than running unlocked.
+ */
+export const BUSY_UNKNOWN = -1;
+
+/** The pid a lock file names, or 0 when it is absent or unreadable. */
+function pidIn(file: string): number {
+  try {
+    return Number(readFileSync(file, "utf8").trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Run `fn` while this process holds the workspace, or report who does.
+ *
+ * For a HOST outside the loop (the desktop app) writing prd.json: checking the
+ * lock and then writing leaves a window in which a run claims the workspace
+ * between the two, and the write then rolls back statuses that run has already
+ * advanced. Never call it from a process that already holds the lock for a run
+ * of its own — the release at the end would drop that claim.
+ */
+export function withRunLock<T>(
+  workspace: string,
+  fn: () => T,
+): { ok: true; value: T } | { ok: false; holder: number } {
+  const holder = claimRunLock(workspace);
+  if (holder !== null) return { ok: false, holder };
+  try {
+    return { ok: true, value: fn() };
+  } finally {
+    releaseRunLock(workspace);
+  }
+}
+
+/**
+ * Who is running in this workspace right now — a pid, or null for nobody.
+ *
+ * READ-ONLY, unlike claimRunLock, which takes the lock as a side effect. A host
+ * that wants to write prd.json from outside needs to know whether a loop owns
+ * it first: the run may be a `ralphrun` in another terminal, which no desktop
+ * bookkeeping knows about.
+ */
+export function runLockHolder(workspace: string): number | null {
+  try {
+    const holder = Number(readFileSync(join(workspace, LOCK), "utf8").trim());
+    if (!holder || holder === process.pid) return null;
+    return pidAlive(holder) ? holder : null; // a dead holder is a crash's litter
+  } catch {
+    return null; // no lock file: nobody is running here
   }
 }
 
@@ -299,7 +413,18 @@ export function reapOrphanWorktrees(workspace: string): number {
   // while WORKTREES is built with join() and so uses the platform's. Comparing
   // them directly matched nothing on Windows, which silently disabled crash
   // recovery there — the reap counted zero and left every orphan cell behind.
-  const marker = "/" + WORKTREES.split(sep).join("/") + "/";
+  // ANCHORED at this workspace, not matched anywhere in the path: the same repo
+  // can have the user's own worktrees elsewhere, and `remove --force` on one of
+  // those would delete work nobody asked us to touch. BOTH spellings, because a
+  // repo under a symlinked directory reports its real path to git.
+  const slash = (p: string): string => p.split(sep).join("/");
+  let real = workspace;
+  try {
+    real = realpathSync.native(workspace);
+  } catch {
+    // a workspace that cannot be resolved is one the literal path still names
+  }
+  const homes = [...new Set([slash(workspace), slash(real)])].map((w) => `${w}/${slash(WORKTREES)}/`);
   let n = 0;
   for (const line of gitOut(workspace, "worktree", "list", "--porcelain")?.split("\n") ?? []) {
     if (!line.startsWith("worktree ")) continue;
@@ -307,7 +432,7 @@ export function reapOrphanWorktrees(workspace: string): number {
     // path match rather than realpath comparison: a repo checked out under a
     // symlinked temp dir reports its real path, and a user's own worktree
     // elsewhere is not ours to delete.
-    if (!dir.split(sep).join("/").includes(marker)) continue;
+    if (!homes.some((home) => slash(dir).startsWith(home))) continue;
     removeTaskWorktree(workspace, dir);
     n += 1;
   }
@@ -319,11 +444,13 @@ export function reapOrphanWorktrees(workspace: string): number {
 
 // Each manager and the sub-commands of it that WRITE the dependency tree. Bare
 // `yarn` is in the list because classic yarn with no arguments installs.
+// REMOVALS count too: `npm uninstall` and friends write the same tree, and a
+// parallel wave sharing it would have one task delete what another is using.
 const INSTALL_VERBS: Record<string, string[]> = {
-  npm: ["ci", "install", "i", "add"],
-  pnpm: ["install", "i", "add"],
-  yarn: ["install", "add"],
-  bun: ["install", "i", "add"],
+  npm: ["ci", "install", "i", "add", "update", "up", "uninstall", "remove", "rm", "un", "prune", "dedupe"],
+  pnpm: ["install", "i", "add", "update", "up", "remove", "rm", "uninstall", "un", "prune", "dedupe"],
+  yarn: ["install", "add", "up", "upgrade", "remove"],
+  bun: ["install", "i", "add", "update", "remove", "rm"],
 };
 
 /**
@@ -358,16 +485,44 @@ export function tasksInstallingDeps(tasks: { id: string; verify?: string }[]): s
   return tasks.filter((t) => t.verify && verifyInstallsDeps(t.verify)).map((t) => t.id);
 }
 
-/** Derived from the id, so crash recovery needs no bookkeeping file. */
-function worktreePath(workspace: string, taskId: string): string {
+/** DOS device names: on Windows a directory can never be called one of these. */
+const WIN32_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/;
+
+/**
+ * The directory name a task's cell gets. EXPORTED because a host that wants to
+ * find the cell of a task has to ask the same rule rather than reimplement it —
+ * a second copy is one free to drift, and it did.
+ */
+export function taskWorktreeName(taskId: string): string {
   // a task id is free text in prd.json; keep it inside the directory we own
   const safe = taskId.replace(/[^A-Za-z0-9._-]/g, "_");
   // Sanitizing is many-to-one — "api:get" and "api/get" are two distinct tasks
   // that both fold to "api_get" — and `add` starts by DELETING whatever sits at
   // the path, so in a wave the second task would reap the first one's live cell.
   // The digest makes the mapping injective again while staying derived.
-  const dir = safe === taskId ? safe : `${safe}-${createHash("sha1").update(taskId).digest("hex").slice(0, 8)}`;
-  return join(workspace, WORKTREES, dir);
+  // ".", ".." and "" survive the sanitizer unchanged and then resolve OUTSIDE
+  // the cell: join(ws, WORKTREES, "..") is `.ralphrun` itself, and the rmSync
+  // that clears the path would take run.lock and every other cell with it.
+  //
+  // The lowercase check is the same argument on a case-INSENSITIVE filesystem:
+  // "A" and "a" are two tasks in prd.json and one directory on macOS and
+  // Windows, so a wave's second `add` would clear the first one's live cell.
+  // Win32 folds more than case — it strips trailing dots and spaces ("foo." IS
+  // "foo") and reserves the DOS device names, where the create fails outright.
+  const plain =
+    safe === taskId &&
+    safe === safe.toLowerCase() &&
+    safe !== "" &&
+    safe !== "." &&
+    safe !== ".." &&
+    !/[. ]$/.test(safe) &&
+    !WIN32_DEVICE.test(safe);
+  return plain ? safe : `${safe}-${createHash("sha1").update(taskId).digest("hex").slice(0, 8)}`;
+}
+
+/** Derived from the id, so crash recovery needs no bookkeeping file. */
+function worktreePath(workspace: string, taskId: string): string {
+  return join(workspace, WORKTREES, taskWorktreeName(taskId));
 }
 
 /**

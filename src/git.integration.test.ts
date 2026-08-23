@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { captureReviewBase, commitPaths, headCommit, taskChangedPaths } from "./git.js";
 import {
   claimRunLock,
+  runLockHolder,
   cloneDir,
   createTaskWorktree,
   ignoredDirsWouldBeShared,
@@ -22,6 +23,7 @@ import {
   reapOrphanWorktrees,
   releaseRunLock,
   removeTaskWorktree,
+  withRunLock,
   seedIgnoredDir,
   worktreeLoss,
 } from "./worktree.js";
@@ -289,6 +291,66 @@ describe("per-task worktrees", () => {
     expect(headCommit(second)).toBe(base);
   });
 
+  it("reaps only the cells under THIS workspace", () => {
+    // `remove --force` deletes whatever it is handed, and the same repo can
+    // have the user's own worktrees elsewhere — matching `.ralphrun/worktrees`
+    // anywhere in the path would take those with it
+    seed();
+    const mine = createTaskWorktree(ws, "T1", [])!;
+    const theirs = join(mkdtempSync(join(tmpdir(), "rr-elsewhere-")), ".ralphrun", "worktrees", "T9");
+    run("worktree", "add", "--detach", theirs, headCommit(ws)!);
+
+    const n = reapOrphanWorktrees(ws);
+
+    expect(n).toBe(1);
+    expect(existsSync(mine)).toBe(false);
+    expect(existsSync(theirs)).toBe(true);
+    rmSync(theirs, { recursive: true, force: true });
+  });
+
+  it("gives two ids that differ only in case two different directories", () => {
+    // macOS and Windows fold case: "A" and "a" are two tasks in prd.json and
+    // ONE directory there, so the wave's second `add` would clear the first
+    // one's live cell
+    seed();
+    const upper = createTaskWorktree(ws, "A", [])!;
+    writeFileSync(join(upper, "wip.txt"), "in flight\n");
+
+    const lower = createTaskWorktree(ws, "a", [])!;
+
+    expect(lower).not.toBe(upper);
+    expect(existsSync(join(upper, "wip.txt"))).toBe(true);
+  });
+
+  it("gives two ids that differ only by a Win32 fold two directories", () => {
+    // Windows strips trailing dots: "T9" and "T9." are two tasks in prd.json
+    // and one directory there — the same reap-the-live-cell bug as case
+    seed();
+    const plain = createTaskWorktree(ws, "t9", [])!;
+    writeFileSync(join(plain, "wip.txt"), "in flight\n");
+
+    const dotted = createTaskWorktree(ws, "t9.", [])!;
+
+    expect(dotted).not.toBe(plain);
+    expect(existsSync(join(plain, "wip.txt"))).toBe(true);
+  });
+
+  it("keeps a dot-only task id inside the cell directory it owns", () => {
+    // ".." survives the sanitizer unchanged and join(ws, worktrees, "..") is
+    // `.ralphrun` itself — which `add` would clear first, taking run.lock and
+    // every live cell of the wave with it
+    seed();
+    const live = createTaskWorktree(ws, "T1", [])!;
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), "12345");
+
+    const cell = createTaskWorktree(ws, "..", []);
+
+    expect(cell).not.toBeNull();
+    expect(cell!.startsWith(join(ws, ".ralphrun", "worktrees") + "/")).toBe(true);
+    expect(existsSync(join(ws, ".ralphrun", "run.lock"))).toBe(true);
+    expect(existsSync(live)).toBe(true);
+  });
+
   // Discarding a cell is the rollback the serial loop never had, but it must not
   // be silent: a commit survives in the shared object database and is recoverable
   // by sha, while whatever the executor left uncommitted does not survive at all.
@@ -385,6 +447,27 @@ describe("the run lock", () => {
     expect(claimRunLock(ws)).toBe(process.ppid);
   });
 
+  it("names the live holder without taking the lock, so a host can ask first", () => {
+    // runLockHolder is the READ-ONLY twin: a desktop app that wants to rewrite
+    // prd.json has to know whether a `ralphrun` in another terminal owns it,
+    // and asking must not become owning.
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.ppid));
+    expect(runLockHolder(ws)).toBe(process.ppid);
+    expect(readFileSync(join(ws, ".ralphrun", "run.lock"), "utf8")).toBe(String(process.ppid));
+  });
+
+  it("reports nobody for an absent lock, a dead holder, or our own", () => {
+    expect(runLockHolder(ws)).toBeNull(); // no file at all
+
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), "999999"); // a crash's litter
+    expect(runLockHolder(ws)).toBeNull();
+
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.pid));
+    expect(runLockHolder(ws)).toBeNull(); // ours is not somebody else's
+  });
+
   it("is idempotent for the process that already holds it", () => {
     expect(claimRunLock(ws)).toBeNull();
     expect(claimRunLock(ws)).toBeNull();
@@ -413,6 +496,54 @@ describe("the run lock", () => {
 
   it("does not throw when there is no lock to release", () => {
     expect(() => releaseRunLock(ws)).not.toThrow();
+  });
+
+  it("leaves no takeover litter behind after breaking a stale lock", () => {
+    // the takeover itself is exclusive (a `wx` sidecar), and the sidecar has to
+    // be gone afterwards or the NEXT crash could never be recovered
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), "999999");
+    expect(claimRunLock(ws)).toBeNull();
+    expect(existsSync(join(ws, ".ralphrun", "run.lock.steal"))).toBe(false);
+  });
+
+  it("refuses the takeover when a live run already won the race", () => {
+    // the sidecar of a takeover in flight is what a loser sees; finding it gone
+    // is NOT permission to overwrite the lock, because the winner has written
+    // its pid into it by then — re-reading is what stops two owners
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    // a dead thief's litter, and a lock a LIVE run owns by now
+    writeFileSync(join(ws, ".ralphrun", "run.lock.steal"), "999998");
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.ppid));
+
+    expect(claimRunLock(ws)).toBe(process.ppid);
+    expect(readFileSync(join(ws, ".ralphrun", "run.lock"), "utf8")).toBe(String(process.ppid));
+  });
+
+  it("runs a host's write while holding the workspace, and gives it back", () => {
+    // the desktop app writes prd.json from OUTSIDE the loop: checking the lock
+    // and then writing leaves a window for a run to claim the workspace between
+    // the two, and that write would roll back what the run already advanced
+    let heldBy: string | null = null;
+    const done = withRunLock(ws, () => {
+      heldBy = readFileSync(join(ws, ".ralphrun", "run.lock"), "utf8");
+      return "written";
+    });
+
+    expect(done).toEqual({ ok: true, value: "written" });
+    expect(heldBy).toBe(String(process.pid));
+    expect(existsSync(join(ws, ".ralphrun", "run.lock"))).toBe(false); // handed back
+  });
+
+  it("refuses the host's write and names the run that owns the workspace", () => {
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.ppid));
+    let ran = false;
+
+    const done = withRunLock(ws, () => (ran = true));
+
+    expect(done).toEqual({ ok: false, holder: process.ppid });
+    expect(ran).toBe(false);
   });
 });
 

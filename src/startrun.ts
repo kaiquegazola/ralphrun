@@ -29,7 +29,13 @@ import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
 import { type CostTally } from "./stream.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
-import { claimRunLock, ignoredDirsWouldBeShared, reapOrphanWorktrees, tasksInstallingDeps } from "./worktree.js";
+import {
+  claimRunLock,
+  ignoredDirsWouldBeShared,
+  reapOrphanWorktrees,
+  tasksInstallingDeps,
+  withRunLock,
+} from "./worktree.js";
 
 export interface RunOptions {
   prd: string;
@@ -141,10 +147,11 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
     process.exit(1);
   }
   const prd0 = loaded.prd;
-  if (loaded.normalized) {
-    savePRD(prdPath, prd0);
-    log(progress, t("loop.log.recovered"));
-  }
+  // DEFERRED to just after the run lock is ours: a normalized backlog written
+  // now would land on top of whatever a run already in this workspace has
+  // advanced since, rolling its task statuses back.
+  let pendingSave = loaded.normalized;
+  if (loaded.normalized) log(progress, t("loop.log.recovered"));
   // Through log(), not stderr: under the TUI a stderr line scrolls past unread,
   // and it would never reach progress.md — the only record an unattended run
   // leaves. Only here, never on a mid-run reload, which would repeat it per task.
@@ -202,7 +209,7 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
               changed = true;
             }
           }
-          if (changed) savePRD(prdPath, prd0);
+          if (changed) pendingSave = true; // same rule: not before the lock
         }
         ready = true;
       } else if (action === "config") {
@@ -252,6 +259,12 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
     // worktree can legitimately be live, so turning the feature OFF after a
     // crash must still clean up what the crash left. Same invariant as
     // normalizePrd resetting a stuck `doing` task, one layer down.
+    // the workspace is ours now, so the deferred backlog write is safe
+    if (pendingSave) {
+      savePRD(prdPath, prd0);
+      pendingSave = false;
+    }
+
     const reaped = reapOrphanWorktrees(workspace);
     if (reaped > 0) log(progress, t("loop.log.worktreeReaped", { n: reaped }));
 
@@ -281,6 +294,13 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
       log(progress, t("loop.log.browserActive", { tool: BROWSER_TOOL, cmd: BROWSER_UPDATE_HINT }));
     }
   }
+
+  // A dry run claims no lock, so it persists the recovery only when nobody owns
+  // the workspace: a normalized snapshot written over a LIVE run would roll its
+  // task statuses back to whatever this process read.
+  // HELD across the write: a run that claims the workspace between a check and
+  // the write is exactly what would roll its statuses back.
+  if (pendingSave) withRunLock(workspace, () => savePRD(prdPath, prd0));
 
   const elapsedTracker = createElapsedTracker(performance.now());
   // A tracker holds ONE task slot, so a wave needs one tracker per in-flight

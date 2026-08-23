@@ -3,7 +3,6 @@
 // One task cell — worktree, scope gate, retry ladder, review-blocked gate,
 // commit — lives in taskrun.ts, along with pickWave and the integration gate.
 
-import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { type Config } from "./config.js";
@@ -11,6 +10,7 @@ import { t } from "./i18n.js";
 import { findTask, type PRD, type Task } from "./prd.js";
 import { log, setReporter } from "./log.js";
 import { invalidatePlan } from "./plan-cache.js";
+import { savePrdAtomic } from "./prdwrite.js";
 import { formatCost } from "./stream.js";
 import { configureAgents, runMode, startRun, type RunOptions } from "./startrun.js";
 import { createTaskRunner, type TaskRunnerCtx } from "./taskrun.js";
@@ -30,7 +30,9 @@ export type { RunOptions };
  * See runOneTask's persist().
  */
 function savePRD(path: string, prd: PRD): void {
-  writeFileSync(path, JSON.stringify(prd, null, 2));
+  // EVERY status the loop writes lands here, and a truncated backlog is one the
+  // next read sees as having no tasks at all
+  savePrdAtomic(path, prd);
 }
 
 function sleep(ms: number): Promise<void> {

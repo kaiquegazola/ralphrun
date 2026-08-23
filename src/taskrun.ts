@@ -18,6 +18,7 @@ import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } fro
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
+import { reviewGate } from "./gate.js";
 import { readyTasks, type PRD, type Task } from "./prd.js";
 import { appendLearnedNote, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
 import { formatReviewCommit, formatReviewFindings, readStandards, type ReviewCommit } from "./prompts.js";
@@ -95,10 +96,17 @@ function landBlockReason(landed: LandResult): string {
  * had no gate at all and the task just went blocked. Both callers of the same
  * decision now route through here.
  *
- * Headless cannot prompt — nobody is watching, and a run that waits forever for
- * an answer is worse than one that decides — so its gate is a POLICY. It obeys
- * the same safety property as the TUI's approve key: `verified` is the only door
- * to "approve", so no policy can accept a task whose tests failed.
+ * Headless USUALLY cannot prompt — nobody is watching, and a run that waits
+ * forever for an answer is worse than one that decides — so its gate is a
+ * POLICY. The exception is a host that installed a review gate (gate.ts): a GUI
+ * showing this task in a decision inbox IS somebody watching, and letting it
+ * answer is the difference between a human approving the work and the cell
+ * being discarded before anyone saw it.
+ *
+ * All three paths obey the same safety property as the TUI's approve key:
+ * `verified` is the only door to "approve", so neither a policy nor a host can
+ * accept a task whose tests failed — a gate that answers "approve" anyway is
+ * downgraded to "block" right here.
  *
  * Every headless refusal is logged with WHY, because progress.md is the only
  * audit trail a run nobody watched leaves behind. An acceptance is logged by the
@@ -113,6 +121,13 @@ async function reviewBlockedGate(
   verified: boolean,
 ): Promise<"retry" | "approve" | "block" | "quit"> {
   if (tui) return tui.waitReviewBlocked(displayReason, verified);
+  const host = reviewGate();
+  if (host) {
+    const answer = await host({ taskId: id, reason: displayReason, canApprove: verified });
+    if (answer !== "approve" || verified) return answer;
+    log(progress, t("loop.log.headlessBlocked", { id, why: t("loop.reason.policyNeedsVerify") }));
+    return "block";
+  }
   const wantsAccept = cfg.review_blocked_policy === "accept";
   if (wantsAccept && verified) return "approve";
   log(
@@ -388,8 +403,17 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     // moved" and passes every escape. Without this clause a run with
     // commit_per_task off and review off has scopes that are documented as
     // enforced and are not checked at all.
-    if (reviewOn || ctx.cfg.commit_per_task || (task.scope?.length ?? 0) > 0) {
-      if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(taskWorkspace));
+    // reviewGate(): a HOST that shows this task in a decision inbox needs the
+    // baseline too — without it the diff it renders is measured from HEAD and
+    // folds in whatever the user already had uncommitted.
+    if (reviewOn || ctx.cfg.commit_per_task || (task.scope?.length ?? 0) > 0 || reviewGate() !== null) {
+      if (!taskBaselines.has(task.id)) {
+        const captured = captureReviewBase(taskWorkspace);
+        taskBaselines.set(task.id, captured);
+        // published so a GUI host can scope this task's diff to it; the TUI
+        // reads the same value straight off ctx.
+        if (captured) emit({ taskId: task.id, baseline: captured, baselineDir: taskWorkspace });
+      }
     }
     if (reviewOn) taskReviewBase = taskBaselines.get(task.id);
     // in worktree mode this IS the base the worktree was cut from, so it doubles

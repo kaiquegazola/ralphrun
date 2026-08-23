@@ -9,6 +9,9 @@ vi.mock("node:fs", () => ({
   mkdirSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
+  // the backlog is swapped in atomically (tmp + rename), never truncated
+  renameSync: vi.fn(),
+  rmSync: vi.fn(),
 }));
 vi.mock("./config.js", () => ({ loadConfig: vi.fn(), parseAgent: vi.fn() }));
 // i18n (real) imports userconfig, whose node:fs named imports the partial fs
@@ -51,6 +54,9 @@ vi.mock("./worktree.js", () => ({
   // null = the workspace was free
   claimRunLock: vi.fn(() => null),
   releaseRunLock: vi.fn(),
+  // nobody owns the workspace: a dry run's recovery write is safe
+  runLockHolder: vi.fn(() => null),
+  withRunLock: <T,>(_ws: string, fn: () => T) => ({ ok: true as const, value: fn() }),
 }));
 vi.mock("./run.js", () => ({ runTask: vi.fn() }));
 // the JIT-expansion hook must never spawn a REAL advisor here: fixtures are
@@ -198,7 +204,9 @@ function livePrdRaw(): () => { architecture_notes: string } {
   let content = PRD_JSON;
   mRead.mockImplementation(() => content);
   mWrite.mockImplementation((p, data) => {
-    if (String(p).endsWith("prd.json")) content = String(data);
+    // the backlog is swapped in atomically, so the body lands on
+    // `prd.json.<pid>.<n>.tmp` and is renamed into place
+    if (/prd\.json(\.\d+\.\d+\.tmp)?$/.test(String(p))) content = String(data);
   });
   return () => JSON.parse(content);
 }
@@ -1594,7 +1602,8 @@ describe("runLoop parallel waves", () => {
     let content = prdWith(tasks);
     mRead.mockImplementation(() => content);
     mWrite.mockImplementation((p, data) => {
-      if (String(p).endsWith("prd.json")) content = String(data);
+      // atomic swap: the body lands on `prd.json.<pid>.<n>.tmp` first
+      if (/prd\.json(\.\d+\.\d+\.tmp)?$/.test(String(p))) content = String(data);
     });
     return () =>
       Object.fromEntries(JSON.parse(content).tasks.map((t: { id: string }) => [t.id, t])) as ReturnType<

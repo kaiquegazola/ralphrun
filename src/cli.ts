@@ -1,6 +1,6 @@
-// cli.ts — Commander setup. Root action = run the loop; subcommands: init, config.
+// cli.ts — Commander setup. Root action = run the loop; subcommands: init, create, config.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
@@ -9,6 +9,7 @@ import { resolveLocale, setLocale, t } from "./i18n.js";
 import { runLoop } from "./loop.js";
 import { initWizard } from "./wizard.js";
 import { editConfig, resetGlobal, showConfig, showGlobal } from "./configcmd.js";
+import { addProject, canonical, listProjects } from "./projectreg.js";
 
 // Commander .description() strings evaluate at import time, BEFORE parse —
 // peek argv for --lang so descriptions (and --help) render in the right locale.
@@ -112,6 +113,30 @@ program
     // same file the wizard just wrote.
     if (res.run) await runLoop({ prd: res.prdPath, config: opts.config });
     else console.log(t("cli.savedRunHint", { path: res.prdPath }));
+  });
+
+// `ralphrun create .` — the terminal door into the desktop app's project list.
+// Registering IS the whole command: a project is a folder, and everything else
+// (PRDs, config, worktrees) already lives inside it.
+program
+  .command("create")
+  .description(t("cli.create.desc"))
+  .argument("[dir]", t("cli.opt.workspace"), ".")
+  .option("--name <name>", t("cli.create.optName"))
+  .action((dir: string, opts: { name?: string }) => {
+    const abs = resolve(dir);
+    // a project is a FOLDER — `ralphrun create package.json` would otherwise
+    // register a file and leave an unusable entry in the shared registry
+    if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+      console.error(t("cli.create.noDir", { dir: abs }));
+      process.exit(1);
+    }
+    // canonical on BOTH sides: the registry stores realpaths, so comparing a
+    // symlink (or a different casing) raw would report a re-registration as new
+    const canon = canonical(abs);
+    const known = listProjects().some((p) => p.dir === canon);
+    const rec = addProject(abs, opts.name);
+    console.log(t(known ? "cli.create.already" : "cli.create.done", { name: rec.name, dir: rec.dir }));
   });
 
 const configCmd = program.command("config");

@@ -6,10 +6,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>()),
   existsSync: vi.fn(),
+  statSync: vi.fn(() => ({ isDirectory: () => true })),
 }));
 vi.mock("./loop.js", () => ({ runLoop: vi.fn() }));
 vi.mock("./wizard.js", () => ({ initWizard: vi.fn() }));
 vi.mock("./userconfig.js", () => ({ loadUserConfig: vi.fn(() => ({ version: 1 })) }));
+vi.mock("./projectreg.js", () => ({
+  addProject: vi.fn(),
+  listProjects: vi.fn(() => []),
+  canonical: (p: string) => p,
+}));
 vi.mock("./configcmd.js", () => ({
   editConfig: vi.fn(),
   showConfig: vi.fn(),
@@ -17,7 +23,7 @@ vi.mock("./configcmd.js", () => ({
   resetGlobal: vi.fn(),
 }));
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { getLocale, setLocale } from "./i18n.js";
 import { readFileSync } from "node:fs";
 import { sep } from "node:path";
@@ -25,6 +31,7 @@ import { peekLang, program } from "./cli.js";
 import { runLoop } from "./loop.js";
 import { initWizard } from "./wizard.js";
 import { editConfig, resetGlobal, showConfig, showGlobal } from "./configcmd.js";
+import { addProject, listProjects } from "./projectreg.js";
 
 const run = (args: string[]) => program.parseAsync(["node", "ralphrun", ...args]);
 
@@ -172,6 +179,46 @@ describe("config command", () => {
     await expect(run(["config", "reset"])).rejects.toThrow("exit");
     expect(process.exit).toHaveBeenCalledWith(1);
     expect(resetGlobal).not.toHaveBeenCalled();
+  });
+});
+
+describe("create command", () => {
+  beforeEach(() => {
+    vi.mocked(addProject).mockReturnValue({ id: "abc", name: "qc", dir: "/dev/qc", addedAt: 1 });
+    vi.mocked(statSync).mockReturnValue({ isDirectory: () => true } as never);
+  });
+
+  it("registers the current directory by default", async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    await run(["create"]);
+    expect(addProject).toHaveBeenCalledWith(expect.any(String), undefined);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("registered"));
+  });
+
+  it("passes an explicit --name through", async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    await run(["create", "/dev/qc", "--name", "QC"]);
+    expect(addProject).toHaveBeenCalledWith(expect.stringContaining("qc"), "QC");
+  });
+
+  it("says so instead of duplicating when the folder is already registered", async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(listProjects).mockReturnValue([{ id: "abc", name: "qc", dir: "/dev/qc", addedAt: 1 }]);
+    await run(["create", "/dev/qc"]);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("already"));
+  });
+
+  it("refuses a folder that does not exist", async () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    await expect(run(["create", "/nope"])).rejects.toThrow("exit");
+    expect(addProject).not.toHaveBeenCalled();
+  });
+
+  it("refuses a path that exists but is a file — a project is a folder", async () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(statSync).mockReturnValue({ isDirectory: () => false } as never);
+    await expect(run(["create", "/dev/qc/package.json"])).rejects.toThrow("exit");
+    expect(addProject).not.toHaveBeenCalled();
   });
 });
 

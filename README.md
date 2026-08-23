@@ -845,6 +845,63 @@ loop starts, not diagnosed halfway through it.
 - **Shape.** Unknown dep ids, duplicate ids, wrong field types, an empty task
   list, and a `scope` that is not an array of strings.
 
+## Desktop app — mission control (`app/`)
+
+The CLI is one run per terminal. `app/` is the **mission-control** desktop app
+over the same core: several projects, several runs, worktrees drawn as the
+workspaces they physically are, and human intervention as an inbox instead of a
+prompt that blocks the loop. Built with [Electrobun](https://electrobun.dev)
+(Bun main process + system webview, React in the view).
+
+```bash
+cd app
+bun install
+npx electrobun prepare   # projects the Electrobun SDK into app/.hutch (once per machine)
+bun run dev              # build + launch
+bun run test             # the app's own suite (vitest + happy-dom)
+bun run typecheck
+bun run build            # packaged .app / .dmg under app/build/
+```
+
+| Screen | What it answers |
+|---|---|
+| **Home** | what needs a human right now, what is running, what to resume |
+| **Projetos** → **Projeto** | a project is a FOLDER; inside it, PRDs are the units |
+| **Run detail** | the board by wave, plus the raw stream (calm / surgical) |
+| **Worktrees** | one desk per doing task, and the trunk they merge back into |
+| **Decisões** | review-blocked and stalled tasks, answered without pausing the board |
+| **Workforce** | continuous preflight, the executor/advisor pair, agent identity |
+| **Configurações** | project `ralph.config.json` and ralphrun's global config |
+
+Nothing here is a second source of truth. Runs are real child processes running
+the same `runLoop`; status lives in `prd.json`; project settings are written to
+the same `ralph.config.json` the CLI reads, and backlogs live at the project
+ROOT (`prd.json`, `prd-<name>.json`) precisely so the core resolves that same
+config file for them. The project list is shared too: `ralphrun create .`
+registers the folder you are standing in and it shows up in the app
+immediately — the app watches that file.
+
+Four boundaries worth knowing:
+
+- **One process per run.** The core keeps per-run state in module globals (the
+  event bus, the locale, the plan cache), so parallel runs have to be a process
+  boundary. Each run spawns `app/resources/run-child.js`, which streams NDJSON
+  events back — that is also what makes one stuck run killable on its own.
+- **One run per project at a time.** The core takes a lock on the workspace, so
+  a second backlog in the same repo *queues*. Parallelism inside a project is a
+  wave (worktree per task); parallelism across projects is what the queue admits,
+  bounded by the global "runs simultâneas" setting.
+- **The inbox is a real gate, not a status view.** A GUI run installs a review
+  gate (`src/gate.ts`), so a task the reviewer refused *stops and waits* instead
+  of being decided by `review_blocked_policy`. "Aceitar" then runs the loop's own
+  approve path — verify, commit, cherry-pick — because the cell is still open.
+  Without a host gate nothing changes: headless runs still answer from policy.
+- **Decisions are applied by the process that owns the backlog.** THE prd.json
+  rule is that every read-modify-write must be synchronous inside the loop's
+  process, so a decision on a live run travels down the child's stdin and is
+  applied there (`src/requeue.ts`). Only a run that has already ended is answered
+  by writing the file directly.
+
 ## Development
 
 ```bash
@@ -868,7 +925,13 @@ Layout:
 ```
 src/
   index.ts      # shebang entry
-  cli.ts        # Commander program: run (root) + init + config (+ --lang)
+  cli.ts        # Commander program: run (root) + init + create + config (+ --lang)
+  projectreg.ts # the shared project list (folders) — written by `ralphrun
+                #   create` and by the desktop app, so one format, one writer
+  gate.ts       # the seam a HEADLESS host uses to answer a review-blocked task
+                #   (the desktop inbox); absent = the policy decides, as before
+  requeue.ts    # apply one human decision to one task, INSIDE the process that
+                #   owns prd.json — the only place that write is safe
   config.ts     # DEFAULTS, parse_agent, load_config (global < project < flags)
   userconfig.ts # per-user global config (sanitize + atomic write)
   i18n.ts       # en + pt-br dicts, typed t()
@@ -917,8 +980,23 @@ src/
                          #   markdown-lite renderer, view
 ```
 
+The desktop app is a separate package with its own dependencies and its own
+suite:
+
+```
+app/
+  electrobun.config.ts  # app identity + what gets bundled (bun, views, copies)
+  src/shared/           # types + the RPC schema, imported by BOTH processes
+  src/bun/              # main process: run supervisor, registry, settings,
+                        #   worktrees, workforce, studio — thin wrappers over
+                        #   the core, plus run-child.ts (one process per run)
+  src/mainview/         # React: shell + one file per screen, ui.tsx primitives
+```
+
 Tests: vitest, 100% line/branch/function coverage enforced on all non-view code
-(`npm run test:cov`). Ink view components are excluded by design.
+(`npm run test:cov`). Ink view components are excluded by design. The desktop
+app runs its own vitest suite (`cd app && bun run test`) under happy-dom, without a
+coverage gate — its screens are checked by rendering them, not by counting lines.
 
 ## License
 

@@ -15,10 +15,22 @@
 // it can still be imported from any layer without a cycle.
 
 import { execSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, isAbsolute, join } from "node:path";
 
-import { EXEC_ALLOWED_COMMANDS, EXEC_DENIED_COMMANDS } from "./reviewexec.js";
+import {
+  EXEC_ALLOWED_COMMANDS,
+  EXEC_DENIED_COMMANDS,
+  INDIRECT_PAIRS,
+  INDIRECT_PROGRAMS,
+  INDIRECT_SUBFORMS,
+  INSTALL_VERBS,
+  INTERPRETERS,
+  INLINE_CODE_FLAGS,
+  RELEASE_VERBS,
+  RUNNERS,
+} from "./reviewexec.js";
 import { parseClaudeStream, type StreamEvent } from "./stream.js";
 import { configDir } from "./userconfig.js";
 
@@ -83,11 +95,22 @@ export interface AgentDef {
    * carries must be the one reviewexec.ts decides, not a hand-written variant,
    * or the policy ralphrun documents stops being the policy the cli enforces.
    *
-   * Absent = this cli cannot be told which commands it may run, so it stays on
-   * `reviewArgs` even when the config asks for execution. Granting it a blanket
-   * "run anything" instead would be the opposite of the point.
+   * Absent = this cli cannot be told ON THE COMMAND LINE which commands it may
+   * run. It may still carry the grant as config (`reviewEnv`, opencode); with
+   * neither, it stays on `reviewArgs` even when the config asks for execution.
+   * Granting it a blanket "run anything" instead would be the opposite of the
+   * point.
    */
   reviewExecArgs?: string[];
+  /**
+   * The grant for a cli whose permissions are enforced from CONFIG rather than
+   * an argv flag. Called with the same grant buildCmd was given ("read" or
+   * "exec"); the returned env is merged over process.env for that one spawn
+   * only, and `cleanup` runs on EVERY settle path — the grant may carry a temp
+   * file the cli reads at startup, and nobody else will remove it. Absent =
+   * the cli needs no config to review.
+   */
+  reviewEnv?(tools: "read" | "exec", cwd: string): { env: Record<string, string>; cleanup(): void };
   /**
    * Server-side advisor: extra args that make THIS cli consult an advisor model
    * mid-task, in one call. Present = the cli supports NATIVE mode. Absent = CROSS.
@@ -119,6 +142,411 @@ export interface AgentDef {
    * Throwing (non-zero exit) is read as "not logged in" by the caller.
    */
   auth?: { loginCommand: string; check(bin: string): boolean };
+}
+
+/**
+ * Leading runner flags the exec grant tolerates before the program name. The
+ * decision skips ANY leading flag (firstVerb), but a glob cannot say "any
+ * flag" without also matching `npx -c <shell>` — a shell by another name — so
+ * the config grant carries only the auto-confirm switches a reviewer actually
+ * writes (`npx -y tsc`) and stays over-blocking on the rest: the failure
+ * direction the README prefers.
+ */
+const RUNNER_CONFIRM_FLAGS = ["-y", "--yes"];
+
+/**
+ * opencode's review grant, as a generated config FILE. opencode enforces tool
+ * permissions from its config — not argv — and OPENCODE_CONFIG points it at a
+ * specific file. A file, not the inline OPENCODE_CONFIG_CONTENT env var: the
+ * exec policy is tens of KB of rules, and Windows' CreateProcess environment
+ * block dies at 32KB — the review would fail to spawn before reviewing.
+ * Rules evaluate last-match-wins in insertion order (opencode's documented
+ * contract), so the shape mirrors claude's grant exactly: a fallback deny
+ * first, the read tools next, and on an exec review the denied command shapes
+ * AFTER the allowed prefixes — that ordering is what makes `npm publish` lose
+ * to the `npm*` allow, the same way --disallowedTools beats --allowedTools.
+ * The patterns are generated from reviewexec.ts's own lists, so the policy the
+ * README documents and the policy opencode enforces cannot drift apart.
+ *
+ * One fidelity upgrade over the argv grants: `npx`/`bunx`/`uvx` are expanded into
+ * `npx <allowed program>*` shapes instead of a bare `npx*` allow, and a
+ * hand-off to ANOTHER indirect form (`npx uv run …`, `npx npm exec …`) is
+ * denied unless the program under it is allowed too — two levels of the
+ * decision function's lookthrough, where the argv grants carry none. The
+ * residual is depth three and beyond (`npx pnpm dlx uv run curl`), where the
+ * cross product stops being worth its bytes; that is the same
+ * prefix-coarseness the claude flags live with at depth one, documented in the
+ * README.
+ */
+function opencodeReviewEnv(tools: "read" | "exec", cwd: string): { env: Record<string, string>; cleanup(): void } {
+  const permission: Record<string, unknown> = {
+    "*": "deny",
+    read: "allow",
+    grep: "allow",
+    glob: "allow",
+    list: "allow",
+    bash: tools === "exec" ? execBashRules() : "deny",
+    edit: "deny",
+    webfetch: "deny",
+  };
+  // The user's own opencode config — a file they pointed OPENCODE_CONFIG at,
+  // or inline JSON in OPENCODE_CONFIG_CONTENT — is merged in as the BASE, with
+  // this grant's permission keys moved LAST (delete-then-set: a spread would
+  // keep an existing key's position, and a user `{read: "deny"}` sorting after
+  // the grant's `read: "allow"` would deny every read). Their providers,
+  // agents and MCP servers survive; every key the grant names wins the tie;
+  // anything it does not name still falls to the grant's `"*": "deny"`, which
+  // now sorts after the user's own rules.
+  const base = existingOpencodeConfig(cwd);
+  const mergedPermission = permissionWithGrantLast(base, permission);
+  // opencode merges PER-AGENT permissions over top-level ones, so the grant
+  // locks the default agent (`build`) to the same rules — whichever layer wins
+  // the merge, the rules are the grant's. The user's other agent fields (and
+  // other agents) survive.
+  const locked = withAgentLock({ ...base, permission: mergedPermission }, mergedPermission);
+  // The user's own permission rules NEVER ride the inline layer: they can be
+  // arbitrarily large, and the grant's keys override them anyway. They live in
+  // the file (when one is written) and in the user's own config sources.
+  const baseWithoutPermission = { ...base };
+  delete baseWithoutPermission.permission;
+  if (tools === "read") {
+    // A read grant is a few hundred bytes, so it rides INLINE when it fits —
+    // and OPENCODE_CONFIG_CONTENT is the LAST config layer opencode loads,
+    // after the workspace's own `.opencode/opencode.json`: nothing the
+    // workspace ships can loosen a read review's denies.
+    const inline = JSON.stringify(withAgentLock({ ...baseWithoutPermission, permission }, permission));
+    if (inlineFits(inline)) {
+      return { env: { OPENCODE_CONFIG_CONTENT: inline }, cleanup: () => {} };
+    }
+    // a user config big enough to blow the env rides in a file; CONTENT keeps
+    // just the grant — small, and still the final layer
+    return writeGrantFile(JSON.stringify(locked), JSON.stringify(withAgentLock({ permission }, permission)));
+  }
+  // The exec bash rules are tens of KB — past any env block — so the FILE
+  // carries the full merged config (bash rules, the agent lock and the user's
+  // own permission rules included), and CONTENT carries the grant WITHOUT bash
+  // as the final layer — top-level AND on the default agent, so the workspace
+  // cannot loosen edit/webfetch even where its agent config outranks the file.
+  // Residual, documented in the README: bash on an executing review resolves
+  // through the file, which the workspace's own config could loosen.
+  const withoutBash = { ...permission };
+  delete withoutBash.bash;
+  return writeGrantFile(
+    JSON.stringify(locked),
+    JSON.stringify(withAgentLock({ permission: withoutBash }, withoutBash)),
+  );
+}
+
+/** Windows' CreateProcess environment block dies at 32KB — the budget below is
+ * for the WHOLE environment the child gets, inherited variables included, with
+ * margin for the child's own additions */
+const INLINE_CONFIG_LIMIT = 20_000;
+
+/** does the inline layer fit in the env block alongside everything inherited? */
+export function inlineFits(
+  inline: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  let inherited = 0;
+  for (const [k, v] of Object.entries(env)) inherited += k.length + (v?.length ?? 0) + 2;
+  return inline.length + inherited <= INLINE_CONFIG_LIMIT;
+}
+
+/** write the merged config to a temp file; CONTENT carries the small final layer */
+function writeGrantFile(full: string, inline: string): { env: Record<string, string>; cleanup(): void } {
+  // Atomic enough: a write failure removes the directory it may have created,
+  // so a half-written grant never lingers and never reaches a reviewer.
+  const dir = mkdtempSync(join(tmpdir(), "ralphrun-opencode-"));
+  const config = join(dir, "opencode-review.json");
+  try {
+    writeFileSync(config, full);
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+  return {
+    env: { OPENCODE_CONFIG: config, OPENCODE_CONFIG_CONTENT: inline },
+    // the whole directory: mkdtemp made one per grant, and only removing the
+    // file would leak it on every review of a long session
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+/** the same grant, set on the default agent whose per-agent rules outrank top-level ones */
+function withAgentLock(config: Record<string, unknown>, permission: Record<string, unknown>): Record<string, unknown> {
+  const agent = isRecord(config.agent) ? { ...config.agent } : {};
+  const build = isRecord(agent.build) ? { ...agent.build } : {};
+  build.permission = permission;
+  agent.build = build;
+  return { ...config, agent };
+}
+
+/** the user's own config, file then inline — later sources win, matching opencode's own order */
+function existingOpencodeConfig(cwd: string): Record<string, unknown> {
+  const base: Record<string, unknown> = {};
+  const sources: string[] = [];
+  // a relative OPENCODE_CONFIG is relative to the REVIEWER's cwd (the
+  // workspace), not to ralphrun's — resolve before reading, and pass the
+  // ABSOLUTE path back so the child, whose cwd IS the workspace, reads the
+  // same file this merged
+  if (process.env.OPENCODE_CONFIG) {
+    const configured = process.env.OPENCODE_CONFIG;
+    sources.push(readFileSyncSafe(isAbsolute(configured) ? configured : join(cwd, configured)));
+  }
+  if (process.env.OPENCODE_CONFIG_CONTENT?.trim()) sources.push(process.env.OPENCODE_CONFIG_CONTENT);
+  for (const source of sources) {
+    try {
+      const parsed: unknown = parseJsonOrJsonc(source);
+      // a non-object carries no mergeable config, so it is skipped, not inherited
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        mergeDeepInto(base, parsed as Record<string, unknown>);
+      }
+    } catch {
+      // unparseable even as JSONC: skipped rather than inherited
+    }
+  }
+  return base;
+}
+
+/** deep merge for plain-object values — a shallow assign drops the user's
+ * nested `mcp`/`provider` entries the moment both sources name the section */
+function mergeDeepInto(dst: Record<string, unknown>, src: Record<string, unknown>): void {
+  for (const [k, v] of Object.entries(src)) {
+    const into = dst[k];
+    if (
+      v && typeof v === "object" && !Array.isArray(v) &&
+      into && typeof into === "object" && !Array.isArray(into)
+    ) {
+      mergeDeepInto(into as Record<string, unknown>, v as Record<string, unknown>);
+    } else {
+      dst[k] = v;
+    }
+  }
+}
+
+/** JSON.parse, falling back to a JSONC strip — opencode configs are commonly JSONC */
+function parseJsonOrJsonc(source: string): unknown {
+  try {
+    return JSON.parse(source);
+  } catch {
+    return JSON.parse(stripJsonc(source));
+  }
+}
+
+/**
+ * JSONC → JSON: comments and trailing commas, string-aware so a `"url":
+ * "https://…"` survives its `//`. Malformed input still throws — the caller
+ * skips it rather than inheriting half of something.
+ */
+function stripJsonc(source: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (inString) {
+      out += ch;
+      if (ch === "\\") {
+        out += source[i + 1] ?? "";
+        i++;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    if (ch === ",") {
+      // the next SIGNIFICANT character decides: whitespace AND comments do
+      // not count, or `, /* x */ }` would keep its dangling comma
+      let j = i + 1;
+      for (;;) {
+        while (j < source.length && /\s/.test(source[j])) j++;
+        if (source[j] === "/" && source[j + 1] === "/") {
+          while (j < source.length && source[j] !== "\n") j++;
+          continue;
+        }
+        if (source[j] === "/" && source[j + 1] === "*") {
+          j += 2;
+          while (j < source.length && !(source[j] === "*" && source[j + 1] === "/")) j++;
+          j += 2; // past the closing slash — the main loop's for(++) covers this there
+          continue;
+        }
+        break;
+      }
+      if (source[j] === "}" || source[j] === "]") continue; // trailing comma: drop
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function readFileSyncSafe(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return ""; // unreadable: the same skip an unparseable file gets
+  }
+}
+
+/** the grant's permission keys, moved to the END of the user's ordering */
+function permissionWithGrantLast(
+  base: Record<string, unknown>,
+  grant: Record<string, unknown>,
+): Record<string, unknown> {
+  const userPermission = base.permission;
+  const merged: Record<string, unknown> =
+    userPermission && typeof userPermission === "object" && !Array.isArray(userPermission)
+      ? { ...(userPermission as Record<string, unknown>) }
+      : {};
+  for (const [k, v] of Object.entries(grant)) {
+    delete merged[k]; // drop the user's position, then append: the grant sorts last
+    merged[k] = v;
+  }
+  return merged;
+}
+
+/**
+ * The exec bash rules. opencode resolves them last-match-wins, so the ORDER is
+ * the enforcement and every phase must sit over the one before it:
+ *
+ *   1. the fallback deny
+ *   2. depth-1 allows — EXACT-TOKEN shapes (`node`, `node *`), because a
+ *      prefix like `node*` also admits `nodejs -e` and `node_modules/.bin/x`,
+ *      binaries the decision refuses by name; an indirect runner is expanded
+ *      into `npx <allowed program>` for the same reason
+ *   3. hand-off denies — a runner, reached directly or through an indirect
+ *      program, may not hand off to ANOTHER indirect form (`uv run curl`,
+ *      `npx uv run curl`: both match the broad runner allows above, and the
+ *      decision looks through both to refuse curl)
+ *   4. the hand-offs re-open for an ALLOWED program only (`uv run prettier`)
+ *   5. the denied command shapes ride over every expansion — `npm publish`
+ *      loses to `npm *` exactly like --disallowedTools beats --allowedTools,
+ *      and `pnpm exec npm publish` loses to `pnpm exec npm *`
+ *   6. the shell-metacharacter refusals over everything — the decision refuses
+ *      any command carrying one (`npm test; git push` is not the command it
+ *      claims to be), and these globs match the whole line, so without them a
+ *      chain would ride in on a leading allow
+ *
+ * Every pattern is generated from reviewexec.ts's own lists, so the policy the
+ * README documents and the policy opencode enforces cannot drift apart. The
+ * boundary is exact by construction: exactly ONE hand-off, and never into
+ * another runner — `npm exec npx vitest` is denied even though the decision
+ * allows it, an over-block the README documents rather than a recursion with
+ * no bottom.
+ */
+function execBashRules(): Record<string, string> {
+  const rules: Record<string, string> = { "*": "deny" };
+  // exact-token shape: the bare program, and the program with arguments
+  const withArgs = (cmd: string): string[] => [cmd, `${cmd} *`];
+  // 2. depth-1 allows
+  for (const c of EXEC_ALLOWED_COMMANDS) {
+    if (INDIRECT_PROGRAMS.includes(c)) {
+      for (const a of EXEC_ALLOWED_COMMANDS) {
+        for (const shape of withArgs(`${c} ${a}`)) rules[shape] = "allow";
+        for (const f of RUNNER_CONFIRM_FLAGS) {
+          for (const shape of withArgs(`${c} ${f} ${a}`)) rules[shape] = "allow";
+        }
+      }
+    } else {
+      for (const shape of withArgs(c)) rules[shape] = "allow";
+    }
+  }
+  // 3. hand-off denies, at the top level and under an indirect program (bare
+  // or behind a confirm flag — `npx -y uv run curl` must not ride `npx -y uv *`).
+  // The TOP level denies only the two-token PAIRS: a bare `npx vitest` is the
+  // depth-1 expansion above, not a hand-off — a `npx*` deny here would sit
+  // after those allows and, last-match-wins, silence every one of them.
+  const flagCtxs = ["", ...RUNNER_CONFIRM_FLAGS.map((f) => `${f} `)];
+  for (const sub of INDIRECT_PAIRS) rules[`${sub}*`] = "deny";
+  for (const p of INDIRECT_PROGRAMS) {
+    for (const ctx of flagCtxs) {
+      for (const sub of INDIRECT_SUBFORMS) rules[`${p} ${ctx}${sub}*`] = "deny";
+    }
+  }
+  // 4. the hand-offs re-open for an allowed program, top level only — and
+  // NEVER into another runner: a hand-off under a hand-off (`npm exec npx
+  // vitest`) stays denied, which over-blocks a shape no reviewer writes in
+  // exchange for a boundary that is exact instead of bottomless
+  for (const sub of INDIRECT_PAIRS) {
+    for (const a of EXEC_ALLOWED_COMMANDS) {
+      if (INDIRECT_PROGRAMS.includes(a)) continue;
+      for (const shape of withArgs(`${sub} ${a}`)) rules[shape] = "allow";
+    }
+  }
+  // 5. the denied command shapes, over every expansion — exact, plus a
+  // flag-cluster form: the decision scans every non-flag word, so
+  // `npm --access public publish` is a publish and `npm publish` alone would
+  // let it ride the broad `npm *` allow. The config has no argv ceiling, so
+  // the denied set is the FULL policy — every install verb, every interpreter
+  // inline flag — not the CLI-sized subset the claude flags had to shrink to.
+  const denied = new Set(EXEC_DENIED_COMMANDS);
+  for (const r of RUNNERS) {
+    for (const v of [...RELEASE_VERBS, ...INSTALL_VERBS, "i"]) denied.add(`${r} ${v}`);
+  }
+  for (const i of INTERPRETERS) {
+    for (const f of INLINE_CODE_FLAGS) denied.add(`${i} ${f}`);
+  }
+  for (const d of denied) {
+    // the bare prefix too: `node --eval=code` is an inline code the exact and
+    // with-args shapes would miss
+    rules[`${d}*`] = "deny";
+    for (const shape of withArgs(d)) rules[shape] = "deny";
+    for (const p of INDIRECT_PROGRAMS) {
+      for (const shape of withArgs(`${p} ${d}`)) rules[shape] = "deny";
+      for (const f of RUNNER_CONFIRM_FLAGS) {
+        for (const shape of withArgs(`${p} ${f} ${d}`)) rules[shape] = "deny";
+      }
+    }
+    for (const sub of INDIRECT_SUBFORMS) rules[`${sub} ${d}*`] = "deny";
+    // the flag-cluster form needs a clean runner-verb pair (`npm i -g` has a
+    // trailing flag of its own, and its exact shapes above already cover it)
+    const parts = d.split(" ");
+    if (parts.length !== 2) continue;
+    const [runner, verb] = parts;
+    rules[`${runner} -* ${verb}*`] = "deny";
+    for (const p of INDIRECT_PROGRAMS) {
+      rules[`${p} ${runner} -* ${verb}*`] = "deny";
+      for (const f of RUNNER_CONFIRM_FLAGS) rules[`${p} ${f} ${runner} -* ${verb}*`] = "deny";
+    }
+    for (const sub of INDIRECT_SUBFORMS) rules[`${sub} ${runner} -* ${verb}*`] = "deny";
+  }
+  // 5.5 a `run` script is judged by its NAME: `npm run publish` is a publish,
+  // because the decision checks whether the script name CONTAINS a release
+  // verb — the same contains, as a glob with room on both sides, behind a
+  // flag cluster too (`npm --silent run publish`)
+  for (const r of RUNNERS) {
+    for (const ctx of [
+      "",
+      ...INDIRECT_PROGRAMS.map((p) => `${p} `),
+      ...INDIRECT_PROGRAMS.flatMap((p) => RUNNER_CONFIRM_FLAGS.map((f) => `${p} ${f} `)),
+      ...INDIRECT_SUBFORMS.map((s) => `${s} `),
+    ]) {
+      for (const v of RELEASE_VERBS) {
+        rules[`${ctx}${r} run *${v}*`] = "deny";
+        rules[`${ctx}${r} -* run *${v}*`] = "deny";
+      }
+    }
+  }
+  // 6. metacharacters over everything
+  for (const meta of [";", "&", "|", "<", ">", "`", "$", "\n", "\r"]) rules[`*${meta}*`] = "deny";
+  return rules;
 }
 
 // null-prototype: a lookup like AGENTS["constructor"] / AGENTS["hasOwnProperty"]
@@ -279,10 +707,20 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       executor: "claude-sonnet-5-high",
       advisor: "claude-opus-4-8-high",
     },
-    buildCmd: ({ bin, prompt, model, autoApprove }) => {
-      const cmd = [bin, "agent", "--trust", "-p", prompt];
+    // verified against cursor's docs: plan mode is the CLI's read-only posture
+    // ("planning, read-only behavior" — the same mode the cursorsdk backend
+    // already reviews in), and `--plan` is its documented shorthand. It stays
+    // on the exec request too: cursor has no per-command allowlist on argv, so
+    // the wider grant would be a blanket one.
+    reviewArgs: ["--plan"],
+    buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs }) => {
+      const cmd = [bin, "agent", "--trust"];
       if (model) cmd.push("--model", model);
       if (autoApprove) cmd.push("--force");
+      // every flag BEFORE `-p`: its prompt is the print mode's payload, and a
+      // flag landing after that text is a flag the cli never parses
+      if (reviewArgs) cmd.push(...reviewArgs);
+      cmd.push("-p", prompt);
       return cmd;
     },
     auth: {
@@ -348,10 +786,17 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     // verified: `codex exec` with no prompt argument prints
     // "Reading prompt from stdin..." and consumes it
     promptVia: "stdin",
-    buildCmd: ({ bin, prompt, model, autoApprove }) => {
+    // verified against codex's own CLI source: `codex exec` runs headless with
+    // approval_policy Never (it cannot prompt), and `--sandbox read-only` is
+    // codex's named mode for exactly this posture — reads and read-only shell
+    // permitted, every write refused. It stays on the exec request too: codex
+    // has no per-command allowlist, so the wider grant would be a blanket one.
+    reviewArgs: ["--sandbox", "read-only"],
+    buildCmd: ({ bin, prompt, model, autoApprove, reviewArgs }) => {
       const cmd = [bin, "exec"];
       if (model) cmd.push("-m", model);
       if (autoApprove) cmd.push("--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust");
+      if (reviewArgs) cmd.push(...reviewArgs);
       if (prompt) cmd.push(prompt); // codex takes the prompt LAST, after the flags
       return cmd;
     },
@@ -415,6 +860,10 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       cmd.push(prompt); // opencode takes the prompt LAST, after the flags
       return cmd;
     },
+    // The grant rides in env, not argv (see reviewEnv): opencode has no
+    // read-only flag on the command line — `--auto` is a blanket approve, which
+    // is the one thing a review call must never carry.
+    reviewEnv: opencodeReviewEnv,
     // `opencode auth list` exits 0 either way — the configured-credential count
     // is the answer. Auth IS per-provider, but any one credential means the cli
     // can run something; a provider-specific gap surfaces as the model's own

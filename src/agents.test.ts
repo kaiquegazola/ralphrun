@@ -2,8 +2,8 @@
 // cli is ONE entry and every consumer picks it up; these tests fail if an entry
 // is added half-way (the bug that left codex/agy out of BINARIES/DEFAULT_MODELS).
 
-import { readFileSync, readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import {
   AGENTS,
@@ -11,6 +11,7 @@ import {
   agentDef,
   binOf,
   defaultModelOf,
+  inlineFits,
   loadAgentManifests,
   manifestDir,
   nativeAdvisorArgs,
@@ -22,14 +23,18 @@ import { EXEC_ALLOWED_COMMANDS, EXEC_DENIED_COMMANDS } from "./reviewexec.js";
 import { buildCmd } from "./adapters.js";
 import { configDir } from "./userconfig.js";
 
-// Only the two calls the manifest loader makes. Stubbing them also pins the
-// registry under test to the BUILT-INS: a manifest sitting in the developer's
-// own config dir must not decide whether this suite passes.
-vi.mock("node:fs", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs")>()),
-  readdirSync: vi.fn(),
-  readFileSync: vi.fn(),
-}));
+// Only the three calls the manifest loader and the opencode grant make. The
+// spies wrap the actuals, so the grant's real file I/O still works and a test
+// can override one call (a failing config write) without touching the rest.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readdirSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn((...args: Parameters<typeof actual.writeFileSync>) => actual.writeFileSync(...args)),
+  };
+});
 
 const ROLES: AgentRole[] = ["planner", "executor", "advisor"];
 
@@ -118,6 +123,383 @@ describe("registry completeness", () => {
     // whole command line dies past 8191 characters — and the failure there is the
     // reviewer never running at all.
     expect(joined.length).toBeLessThan(6000);
+  });
+
+  // opencode's grant is config-borne, but it is held to the SAME invariants as
+  // claude's argv grant: generated from the shared lists, never a blanket
+  // approve, and the denies must OUTRANK the allow prefixes (opencode resolves
+  // rules last-match-wins, so order is the enforcement). A READ grant is small
+  // enough to ride inline as the LAST config layer — nothing in the workspace
+  // can loosen it. The exec bash rules are tens of KB (past Windows' 32KB env
+  // block), so they ride in a temp FILE that cleanup() removes with its dir.
+  it("opencode carries its review grant in config, generated from the shared lists", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    expect(def.reviewArgs).toBeUndefined(); // the argv stays clean; the grant is config-borne
+
+    const readGrant = def.reviewEnv!("read", "/ws");
+    const read = JSON.parse(readGrant.env.OPENCODE_CONFIG_CONTENT);
+    expect(read.permission.bash).toBe("deny");
+    expect(read.permission.edit).toBe("deny");
+    expect(read.permission.webfetch).toBe("deny");
+    expect(read.permission.read).toBe("allow");
+    expect(read.permission["*"]).toBe("deny");
+    // per-agent permissions outrank top-level ones in opencode's merge, so the
+    // default agent is locked to the same rules — either layer wins
+    expect(read.agent.build.permission.bash).toBe("deny");
+    readGrant.cleanup(); // inline grant: nothing to remove
+
+    const execGrant = def.reviewEnv!("exec", "/ws");
+    // the inline layer is final for every key BUT bash, which is too big for
+    // the env and rides in the file
+    const inline = JSON.parse(execGrant.env.OPENCODE_CONFIG_CONTENT);
+    expect(inline.permission.bash).toBeUndefined();
+    expect(inline.permission.edit).toBe("deny");
+    expect(inline.permission["*"]).toBe("deny");
+    const exec = JSON.parse(fs.readFileSync(execGrant.env.OPENCODE_CONFIG, "utf8"));
+    const bash = exec.permission.bash as Record<string, string>;
+    expect(bash["*"]).toBe("deny"); // fallback first...
+    const keys = Object.keys(bash);
+    // the agent lock (with the bash rules) rides the file too — the env could
+    // not carry it
+    expect(exec.agent.build.permission.bash).toBeTypeOf("object");
+    // ...allows next, denies LAST: last matching rule wins, so `npm publish`
+    // must lose to the `npm *` shape exactly like --disallowedTools beats
+    // --allowedTools on claude
+    expect(keys.indexOf("npm *")).toBeLessThan(keys.indexOf("npm publish"));
+    // EXACT-TOKEN shapes: a prefix like `node*` would also admit `nodejs -e`
+    // and `node_modules/.bin/x` — binaries the decision refuses by name
+    for (const cmd of EXEC_ALLOWED_COMMANDS) {
+      if (["npx", "bunx", "uvx"].includes(cmd)) {
+        // an indirect runner is expanded into per-program shapes, never a bare
+        // `npx *`: the decision looks THROUGH npx to the real program
+        expect(bash[`${cmd} *`]).toBeUndefined();
+        expect(bash[`${cmd} vitest`]).toBe("allow");
+      } else {
+        expect(bash[cmd]).toBe("allow");
+        expect(bash[`${cmd} *`]).toBe("allow");
+      }
+    }
+    expect(bash["nodejs -e"]).toBeUndefined();
+    expect(bash["node -e"]).toBe("deny"); // inline code stays refused
+    for (const cmd of EXEC_DENIED_COMMANDS) {
+      expect(bash[cmd]).toBe("deny");
+      expect(bash[`${cmd} *`]).toBe("deny");
+      // the denies reach one level under an indirect runner too: `npx npm
+      // publish` must lose to `npx npm *` the same way `npm publish` loses
+      expect(bash[`npx ${cmd}`]).toBe("deny");
+      expect(bash[`npx -y ${cmd} *`]).toBe("deny");
+      expect(keys.indexOf("npx vitest *")).toBeLessThan(keys.indexOf(`npx ${cmd}`));
+    }
+    // the decision skips leading flags (firstVerb), so `npx -y tsc` is allowed
+    // by the policy and the grant must not over-block it
+    expect(bash["npx -y tsc *"]).toBe("allow");
+    // ...but a flag cluster before a VERB is still the verb: the decision
+    // scans every non-flag word, so `npm --access public publish` must lose
+    expect(bash["npm -* publish*"]).toBe("deny");
+    expect(bash["npx npm -* publish*"]).toBe("deny");
+    expect(bash["npx -y npm -* publish*"]).toBe("deny");
+    expect(bash["pnpm exec npm -* publish*"]).toBe("deny");
+    expect(keys.indexOf("npm *")).toBeLessThan(keys.indexOf("npm -* publish*"));
+    // ...and the shell-metacharacter refusals sit over every allow, so a chain
+    // cannot ride in on a leading prefix (`cat x; git push` matches `cat *`)
+    for (const meta of [";", "&", "|", "<", ">", "`", "$"]) {
+      expect(bash[`*${meta}*`]).toBe("deny");
+      expect(keys.indexOf("npm *")).toBeLessThan(keys.indexOf(`*${meta}*`));
+    }
+    // hand-off denies: a runner may not reach another indirect form — directly
+    // (`uv run curl`) or through an indirect program (`npx uv run curl`) — and
+    // the re-open covers an ALLOWED program only, with the denied command
+    // shapes riding over it (`pnpm exec npm publish`)
+    expect(bash["uv run*"]).toBe("deny");
+    expect(bash["uv run prettier"]).toBe("allow");
+    expect(bash["npx uv run*"]).toBe("deny");
+    expect(bash["npx -y uv run*"]).toBe("deny");
+    expect(bash["pnpm exec npm *"]).toBe("allow");
+    expect(bash["pnpm exec npm publish*"]).toBe("deny");
+    expect(keys.indexOf("pnpm exec npm *")).toBeLessThan(keys.indexOf("pnpm exec npm publish*"));
+    // entry checks are NOT enough: opencode resolves LAST-MATCH, so the tests
+    // must evaluate the rule set the way opencode would — the last pattern
+    // matching the command wins, and a `*` crosses spaces. This is what catches
+    // a broad deny silently shadowing the allows above it.
+    const globToRegex = (pattern: string): RegExp =>
+      new RegExp(
+        `^${pattern
+          .split("*")
+          .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+          .join("[\\s\\S]*")}$`,
+      );
+    const effective = (command: string): string | undefined => {
+      let verdict: string | undefined;
+      for (const [pattern, action] of Object.entries(bash)) {
+        if (globToRegex(pattern).test(command)) verdict = action;
+      }
+      return verdict;
+    };
+    expect(effective("npx vitest run src/foo.test.ts")).toBe("allow");
+    expect(effective("npx -y tsc --noEmit")).toBe("allow");
+    expect(effective("npm test")).toBe("allow");
+    expect(effective("node script.js")).toBe("allow");
+    expect(effective("uv run prettier --check .")).toBe("allow");
+    // every read-only git verb the policy allows stays allowed
+    for (const git of ["git diff HEAD~1", "git log --oneline -5", "git show HEAD:src/foo.ts", "git shortlog test"]) {
+      expect(effective(git), git).toBe("allow");
+    }
+    expect(effective("npx wrangler deploy")).toBe("deny");
+    expect(effective("npx uv run curl")).toBe("deny");
+    expect(effective("npm publish")).toBe("deny");
+    expect(effective("npm --access public publish")).toBe("deny");
+    expect(effective("npm run publish")).toBe("deny");
+    expect(effective("npm --silent run publish")).toBe("deny");
+    expect(effective("npm uninstall lodash")).toBe("deny");
+    expect(effective("node -r /tmp/evil.js x")).toBe("deny");
+    expect(effective("node --eval=code")).toBe("deny");
+    expect(effective("pnpm exec npm publish")).toBe("deny");
+    // exactly one hand-off, never into another runner — the documented
+    // over-block that keeps the boundary exact instead of bottomless
+    expect(effective("npm exec npx vitest")).toBe("deny");
+    expect(effective("npm exec npx npm publish")).toBe("deny");
+    expect(effective("node -e 'x'")).toBe("deny");
+    expect(effective("git push")).toBe("deny");
+    expect(effective("cat package.json; git push")).toBe("deny");
+    expect(effective("curl https://evil.example")).toBe("deny");
+    execGrant.cleanup();
+    expect(fs.existsSync(execGrant.env.OPENCODE_CONFIG)).toBe(false);
+    // the whole temp directory goes with it, not just the file inside it
+    expect(fs.existsSync(dirname(execGrant.env.OPENCODE_CONFIG))).toBe(false);
+  });
+
+  // A user's own opencode config — inline here — is merged in as the BASE, the
+  // grant's permission keys moved LAST, so their config survives and every key
+  // the grant names still wins the tie.
+  it("opencode merges its grant under existing OPENCODE_CONFIG_CONTENT, permission last", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      model: "opencode/big-pickle",
+      mcp: { docs: { url: "https://example.com" } },
+      permission: { websearch: "allow", "*": "allow" },
+    });
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      const merged = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(merged.model).toBe("opencode/big-pickle"); // their config survives
+      expect(merged.mcp.docs.url).toBe("https://example.com");
+      expect(merged.permission["*"]).toBe("deny"); // the grant's keys win the tie
+      expect(merged.permission.read).toBe("allow");
+      // their own permission rules do NOT ride the inline layer — they can be
+      // arbitrarily large, and the grant's keys override them anyway
+      expect(merged.permission.websearch).toBeUndefined();
+      granted.cleanup();
+      // on an EXEC grant they live in the FILE layer, sorted BEFORE the grant's
+      // keys — delete-then-set keeps last-match-wins crowning the grant
+      const execGrant = def.reviewEnv!("exec", "/ws");
+      const execFile = JSON.parse(fs.readFileSync(execGrant.env.OPENCODE_CONFIG, "utf8"));
+      expect(execFile.permission.websearch).toBe("allow");
+      const order = Object.keys(execFile.permission);
+      expect(order.indexOf("websearch")).toBeLessThan(order.indexOf("*"));
+      expect(execFile.agent.build.permission["*"]).toBe("deny");
+      execGrant.cleanup();
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previous;
+    }
+  });
+
+  // The same merge for a config FILE the user pointed OPENCODE_CONFIG at —
+  // resolved against the REVIEWER's cwd (the workspace), not ralphrun's, and
+  // DEEP-merged, so a section named by both sources keeps the other's entries.
+  it("opencode merges its grant under a user's OPENCODE_CONFIG file too", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previousPath = process.env.OPENCODE_CONFIG;
+    const previousContent = process.env.OPENCODE_CONFIG_CONTENT;
+    process.env.OPENCODE_CONFIG = "opencode.json"; // relative: the reviewer's cwd, not ralphrun's
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ mcp: { issues: { url: "https://issues.example.com" } } });
+    vi.mocked(readFileSync).mockReturnValueOnce(
+      JSON.stringify({ model: "from-file", mcp: { docs: { url: "https://docs.example.com" } } }),
+    );
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      expect(readFileSync).toHaveBeenLastCalledWith(join("/ws", "opencode.json"), "utf8");
+      const merged = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(merged.model).toBe("from-file");
+      expect(merged.mcp.docs.url).toBe("https://docs.example.com"); // the file's nested entries survive
+      expect(merged.mcp.issues.url).toBe("https://issues.example.com"); // ...alongside the inline ones
+      expect(merged.permission.read).toBe("allow");
+      granted.cleanup();
+    } finally {
+      if (previousPath === undefined) delete process.env.OPENCODE_CONFIG;
+      else process.env.OPENCODE_CONFIG = previousPath;
+      if (previousContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previousContent;
+    }
+  });
+
+  // A file that cannot be read is skipped, not inherited — same as content
+  // that does not parse or carries no object.
+  it("opencode skips an unreadable OPENCODE_CONFIG file", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previousPath = process.env.OPENCODE_CONFIG;
+    process.env.OPENCODE_CONFIG = "/gone/opencode.json";
+    vi.mocked(readFileSync).mockImplementationOnce(() => {
+      throw new Error("ENOENT");
+    });
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      const merged = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(merged.model).toBeUndefined();
+      expect(merged.permission.read).toBe("allow");
+      granted.cleanup();
+    } finally {
+      if (previousPath === undefined) delete process.env.OPENCODE_CONFIG;
+      else process.env.OPENCODE_CONFIG = previousPath;
+    }
+  });
+
+  // opencode configs are commonly JSONC — comments and trailing commas — and
+  // a strict JSON.parse would silently drop the user's providers and models.
+  it("opencode merges a JSONC config, comments and trailing commas included", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    process.env.OPENCODE_CONFIG_CONTENT = [
+      "{",
+      '  /* the free tier model — pinned',
+      '     across every task */',
+      '  "model": "opencode/big-pickle", // chosen at /connect',
+      '  "note": "a \\"quoted\\" value", // escapes survive too',
+      '  "url": "https://example.com", // a URL its // must survive',
+      '  "mcp": {"docs": {"url": "https://docs.example.com"}}, // comma before a comment, before the brace',
+      '  "extra": 1, /* a block comment after the comma too */',
+      "}",
+    ].join("\n");
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      const merged = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(merged.model).toBe("opencode/big-pickle");
+      expect(merged.url).toBe("https://example.com");
+      expect(merged.note).toBe('a "quoted" value');
+      expect(merged.mcp.docs.url).toBe("https://docs.example.com");
+      expect(merged.permission.read).toBe("allow");
+      granted.cleanup();
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previous;
+    }
+  });
+
+  // A user config big enough to blow the env block rides in a file; CONTENT
+  // keeps only the permission — small, and still the final layer.
+  it("opencode moves a huge user config to the file and keeps CONTENT to the permission", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ models: "x".repeat(25_000) });
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      expect(granted.env.OPENCODE_CONFIG.length).toBeGreaterThan(0); // the file exists
+      const file = JSON.parse(fs.readFileSync(granted.env.OPENCODE_CONFIG, "utf8"));
+      expect(file.models).toHaveLength(25_000); // the user's config survives, in the file
+      const inline = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(inline.models).toBeUndefined(); // and stays out of the env
+      expect(inline.permission.read).toBe("allow");
+      expect(inline.agent.build.permission.read).toBe("allow");
+      granted.cleanup();
+      expect(fs.existsSync(granted.env.OPENCODE_CONFIG)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previous;
+    }
+  });
+
+  // The agent lock must not erase the user's own agent config — their fields
+  // survive and only the permission is replaced.
+  it("opencode's agent lock keeps the user's own agent fields", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      agent: { build: { description: "mine" }, reviewer: { description: "theirs" } },
+    });
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      const merged = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(merged.agent.build.description).toBe("mine");
+      expect(merged.agent.build.permission.bash).toBe("deny");
+      expect(merged.agent.reviewer.description).toBe("theirs"); // other agents untouched
+      granted.cleanup();
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previous;
+    }
+  });
+
+  // The inline budget counts the WHOLE environment the child gets — a big
+  // inherited CI env pushes even a modest grant into the file.
+  it("opencode falls back to the file when the inherited environment eats the budget", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    const previousBig = process.env.RALPHRUN_TEST_BIG_ENV;
+    process.env.RALPHRUN_TEST_BIG_ENV = "x".repeat(19_500);
+    delete process.env.OPENCODE_CONFIG_CONTENT;
+    try {
+      const granted = def.reviewEnv!("read", "/ws");
+      expect(granted.env.OPENCODE_CONFIG.length).toBeGreaterThan(0); // file path, not inline
+      expect(granted.env.OPENCODE_CONFIG_CONTENT.length).toBeLessThan(1000); // permission only
+      const inline = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+      expect(inline.permission.read).toBe("allow");
+      granted.cleanup();
+      expect(fs.existsSync(granted.env.OPENCODE_CONFIG)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previous;
+      if (previousBig === undefined) delete process.env.RALPHRUN_TEST_BIG_ENV;
+      else process.env.RALPHRUN_TEST_BIG_ENV = previousBig;
+    }
+  });
+
+  // the budget counts values it cannot measure as zero rather than crashing —
+  // an env entry without a string value is one variable, not a TypeError
+  it("the inline budget tolerates an env entry with no value", () => {
+    expect(inlineFits("x", { A: undefined, B: "y" })).toBe(true);
+    expect(inlineFits("x".repeat(20_000), { B: "y" })).toBe(false);
+  });
+
+  // Content that does not parse cannot be merged, so it is replaced rather
+  // than inherited — and a non-object (array, string, null) likewise.
+  it("opencode replaces unparseable or non-object OPENCODE_CONFIG_CONTENT", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const def = AGENTS.opencode;
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    for (const junk of ["{ nope", JSON.stringify(["a"]), JSON.stringify("s"), "null", "  ", '{ "a": "x\\']) {
+      process.env.OPENCODE_CONFIG_CONTENT = junk;
+      try {
+        const granted = def.reviewEnv!("read", "/ws");
+        const merged = JSON.parse(granted.env.OPENCODE_CONFIG_CONTENT);
+        expect(merged.permission.read).toBe("allow");
+        expect(merged.model).toBeUndefined();
+        granted.cleanup();
+      } finally {
+        if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+        else process.env.OPENCODE_CONFIG_CONTENT = previous;
+      }
+    }
+  });
+
+  // A grant whose config cannot be WRITTEN must throw — the caller fails the
+  // review on it, and must never hand a reviewer the cli's unscoped defaults —
+  // and the directory it may have created goes with the failure. (A read
+  // grant writes nothing: it rides inline.)
+  it("opencode removes the temp directory when the config write fails", () => {
+    const def = AGENTS.opencode;
+    vi.mocked(writeFileSync).mockImplementationOnce(() => {
+      throw new Error("ENOSPC");
+    });
+    expect(() => def.reviewEnv!("exec", "/ws")).toThrow("ENOSPC");
   });
 
 });

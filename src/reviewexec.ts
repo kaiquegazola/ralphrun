@@ -55,7 +55,7 @@ const RUNTIMES = [
 ];
 
 /** package managers: allowed, but their publishing/auth subcommands are not (below) */
-const RUNNERS = ["bun", "bunx", "bundle", "composer", "npm", "npx", "pipenv", "pnpm", "poetry", "uv", "uvx", "yarn"];
+export const RUNNERS = ["bun", "bunx", "bundle", "composer", "npm", "npx", "pipenv", "pnpm", "poetry", "uv", "uvx", "yarn"];
 
 /** git subcommands that only READ the repository — a positive list, since git's mutating surface is most of it */
 const GIT_READ_ONLY = ["blame", "describe", "diff", "grep", "log", "ls-files", "rev-parse", "shortlog", "show", "status"];
@@ -63,9 +63,10 @@ const GIT_READ_ONLY = ["blame", "describe", "diff", "grep", "log", "ls-files", "
 /**
  * Subcommands that publish, deploy or authenticate, on whichever runner offers
  * them. Checked against the first non-flag argument, which is where every
- * package manager puts its verb.
+ * package manager puts its verb. Exported for the config-borne grants that
+ * must mirror the run-script check.
  */
-const RELEASE_VERBS = ["publish", "unpublish", "deploy", "release", "login", "logout", "adduser", "token", "version"];
+export const RELEASE_VERBS = ["publish", "unpublish", "deploy", "release", "login", "logout", "adduser", "token", "version"];
 
 /**
  * Installs, on any runner. Not a workspace-local write like a build artifact.
@@ -75,18 +76,20 @@ const RELEASE_VERBS = ["publish", "unpublish", "deploy", "release", "login", "lo
  * and are SHARED by symlink where it cannot (worktree.ts seedIgnoredDir /
  * ignoredDirsWouldBeShared) — so the mutation can outlive the worktree being
  * discarded. An install is also minutes of wall clock, and the cell already has
- * its dependencies seeded, so a reviewer never needs this.
+ * its dependencies seeded, so a reviewer never needs this. Exported for the
+ * config-borne grants, which have no argv ceiling and carry the full set.
  */
-const INSTALL_VERBS = ["install", "ci", "add", "remove", "uninstall", "update", "upgrade", "sync"];
+export const INSTALL_VERBS = ["install", "ci", "add", "remove", "uninstall", "update", "upgrade", "sync"];
 
 /**
  * Interpreters take their program on the command line, which makes the flag the
  * payload: `node -e "<anything>"` is a shell with a different name, and it
  * carries no character SHELL_META would catch. Running a FILE stays allowed —
- * that is no wider than the test suite, which runs the same code.
+ * that is no wider than the test suite, which runs the same code. Exported for
+ * the config-borne grants, which carry the full cross.
  */
-const INTERPRETERS = ["deno", "node", "php", "python", "python3", "ruby"];
-const INLINE_CODE_FLAGS = ["-e", "--eval", "-p", "--print", "-c", "--command", "-r", "-"];
+export const INTERPRETERS = ["deno", "node", "php", "python", "python3", "ruby"];
+export const INLINE_CODE_FLAGS = ["-e", "--eval", "-p", "--print", "-c", "--command", "-r", "-"];
 
 /**
  * Runners whose real program is an ARGUMENT: `npx wrangler deploy` is a deploy,
@@ -94,8 +97,10 @@ const INLINE_CODE_FLAGS = ["-e", "--eval", "-p", "--print", "-c", "--command", "
  * whole programs. The decision recurses into the remainder, which terminates
  * because each hop consumes at least one argument.
  */
-const INDIRECT_PAIRS = ["npm exec", "pnpm dlx", "pnpm exec", "yarn dlx", "bun x", "uv run", "poetry run", "pipenv run", "bundle exec"];
-const INDIRECT_PROGRAMS = ["npx", "bunx", "uvx"];
+export const INDIRECT_PAIRS = ["npm exec", "pnpm dlx", "pnpm exec", "yarn dlx", "bun x", "uv run", "poetry run", "pipenv run", "bundle exec"];
+export const INDIRECT_PROGRAMS = ["npx", "bunx", "uvx"];
+/** every indirect form — a runner reached through another runner is a hand-off */
+export const INDIRECT_SUBFORMS = [...INDIRECT_PAIRS, ...INDIRECT_PROGRAMS];
 
 /**
  * A metacharacter is how a second command rides along on a first one that

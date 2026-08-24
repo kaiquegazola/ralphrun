@@ -23,7 +23,7 @@ describe("buildCmd", () => {
   });
   it("cursor with model + autoApprove uses cursor-agent binary", () => {
     expect(buildCmd("cursor", "P", "gpt", "/w", true)).toEqual([
-      "cursor-agent", "agent", "--trust", "-p", "P", "--model", "gpt", "--force",
+      "cursor-agent", "agent", "--trust", "--model", "gpt", "--force", "-p", "P",
     ]);
   });
   it("cursor without model, no autoApprove", () => {
@@ -69,10 +69,32 @@ describe("buildCmd", () => {
     expect(allowed).toContain("Read");
     expect(allowed).toContain("Bash(vitest:*)");
   });
-  // asking for tools from a cli with no verified read-only flag must be a no-op,
-  // not a guessed flag that makes every review fail on an unknown argument
+  // codex exec cannot prompt (approval_policy Never headless), and its
+  // read-only sandbox is the cli's own named mode for this posture. With no
+  // per-command allowlist the exec request falls back to the same sandbox
+  // rather than to a blanket one. (The prompt itself rides on stdin — codex is
+  // a promptVia:stdin cli — so the argv stays prompt-free.)
+  it("codex reviews sandboxed read-only, flags before the piped prompt", () => {
+    expect(buildCmd("codex", "P", "", "/w", false, "read")).toEqual([
+      "codex", "exec", "--sandbox", "read-only",
+    ]);
+    expect(buildCmd("codex", "P", "gpt-5.6-sol", "/w", false, "exec")).toEqual([
+      "codex", "exec", "-m", "gpt-5.6-sol", "--sandbox", "read-only",
+    ]);
+  });
+  // plan mode is cursor's documented read-only behavior, and the flags ride
+  // BEFORE the prompt, where the cli can still parse them
+  it("cursor reviews in plan mode", () => {
+    expect(buildCmd("cursor", "P", "composer-2.5", "/w", false, "read")).toEqual([
+      "cursor-agent", "agent", "--trust", "--model", "composer-2.5", "--plan", "-p", "P",
+    ]);
+  });
+  // asking for tools from a cli with no verified argv grant must be a no-op,
+  // not a guessed flag that makes every review fail on an unknown argument.
+  // opencode is here on purpose: its grant is config-borne (reviewEnv), so its
+  // argv is unchanged by design.
   it("a cli that declares no reviewArgs is unchanged by the request", () => {
-    for (const cli of ["grok", "cursor", "codex", "opencode", "agy"]) {
+    for (const cli of ["grok", "opencode", "agy"]) {
       for (const want of ["read", "exec"] as const) {
         expect(buildCmd(cli, "P", "", "/w", false, want)).toEqual(buildCmd(cli, "P", "", "/w", false));
       }

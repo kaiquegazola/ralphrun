@@ -15,6 +15,7 @@ vi.mock("./prompts.js", () => ({
 
 // We must use actual streams so readline works
 import { PassThrough } from "node:stream";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 const mockChild = {
   stdout: new PassThrough(),
   stderr: new PassThrough(),
@@ -26,6 +27,15 @@ vi.mock("./spawn.js", async (importOriginal) => ({
   spawn: vi.fn(() => mockChild),
   killTree: vi.fn(),
 }));
+// the opencode grant creates a temp dir per call — mocked so a test can force
+// the creation failure without unmounting the real file reads around it
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    mkdtempSync: vi.fn((...args: Parameters<typeof actual.mkdtempSync>) => actual.mkdtempSync(...args)),
+  };
+});
 
 import { buildCmd, promptViaStdin } from "./adapters.js";
 import { killTree, spawn } from "./spawn.js";
@@ -368,16 +378,103 @@ describe("advisorReview", () => {
   });
 
   // The grant comes from the cli, not from us: telling a cli with no execution
-  // flags that it may run things produces a reviewer that only fails at it.
+  // grant (no argv flags, no config env — grok) that it may run things produces
+  // a reviewer that only fails at it.
   it("stays read-only when the cli has no execution grant, config or not", async () => {
     diffMock.mockReturnValue("some diff");
     const execCfg = { ...cfg, review_runs_commands: true } as unknown as Config;
-    const p = advisorReview(task, prd, { cli: "opencode", model: "m" }, execCfg, "ws", "prog", "std");
+    const p = advisorReview(task, prd, { cli: "grok", model: "m" }, execCfg, "ws", "prog", "std");
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
+    expect(buildCmd).toHaveBeenCalledWith("grok", "rp", "m", "ws", false, "read");
+    expect(vi.mocked(reviewPrompt).mock.calls[0][5]).toBe(false);
+  });
+
+  // opencode's grant is config-borne (reviewEnv), so with review_runs_commands
+  // on it joins claude as an executing reviewer — and earns review_timeout, the
+  // budget of a test run. The 300s kill that shipped this test is exactly what
+  // a suite-running reviewer used to die of.
+  it("hands opencode an exec config and review_timeout when review_runs_commands is on", async () => {
+    vi.useFakeTimers();
+    try {
+      diffMock.mockReturnValue("some diff");
+      const execCfg = { ...cfg, review_runs_commands: true, review_timeout: 900 } as unknown as Config;
+      const p = advisorReview(task, prd, { cli: "opencode", model: "m" }, execCfg, "ws", "prog", "std");
+      expect(buildCmd).toHaveBeenCalledWith("opencode", "rp", "m", "ws", false, "exec");
+      expect(vi.mocked(reviewPrompt).mock.calls[0][5]).toBe(true);
+      const env = spawnMock.mock.calls[0][2].env as Record<string, string>;
+      const granted = JSON.parse(readFileSync(env.OPENCODE_CONFIG, "utf8"));
+      expect(granted.permission.bash).toBeTypeOf("object"); // allow/deny shapes, not a flat deny
+      // merged over process.env, never replacing it — auth and PATH survive
+      expect(env.PATH).toBe(process.env.PATH);
+      // advisor_timeout (300s) would have killed a suite mid-run
+      vi.advanceTimersByTime(300_000);
+      expect(killTreeMock).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(600_000);
+      expect(killTreeMock).toHaveBeenCalledWith(mockChild);
+      finishSpawn(1);
+      await p;
+      // cleanup runs on the settle path: the temp config does not outlive the call
+      expect(existsSync(env.OPENCODE_CONFIG)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // and with the config off, the grant rides INLINE as the read posture: bash
+  // flat out denied, only the file tools allowed — never a permission ask that
+  // nobody headless could answer.
+  it("hands opencode a read-only config when review_runs_commands is off", async () => {
+    diffMock.mockReturnValue("some diff");
+    const p = advisorReview(task, prd, { cli: "opencode", model: "m" }, cfg, "ws", "prog", "std");
+    const env = spawnMock.mock.calls[0][2].env as Record<string, string>;
+    const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
     mockChild.stdout.end("APPROVE\n");
     finishSpawn(0);
     await p;
     expect(buildCmd).toHaveBeenCalledWith("opencode", "rp", "m", "ws", false, "read");
-    expect(vi.mocked(reviewPrompt).mock.calls[0][5]).toBe(false);
+    expect(config.permission.bash).toBe("deny");
+  });
+
+  // a skip before the spawn must still remove the temp config it wrote
+  it("cleans the opencode grant up when the review is aborted before spawning", async () => {
+    diffMock.mockReturnValue("some diff");
+    const ac = new AbortController();
+    ac.abort();
+    const p = advisorReview(task, prd, { cli: "opencode", model: "m" }, cfg, "ws", "prog", "std", undefined, undefined, ac.signal);
+    expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  // ...and so must a spawn that throws synchronously
+  it("cleans the opencode grant up when the spawn throws", async () => {
+    diffMock.mockReturnValue("some diff");
+    spawnMock.mockImplementationOnce(() => {
+      throw new Error("boom");
+    });
+    expect(await advisorReview(task, prd, { cli: "opencode", model: "m" }, cfg, "ws", "prog", "std")).toEqual({
+      approved: false,
+      changes: "",
+      diff: "some diff",
+    });
+  });
+
+  // A grant that cannot even be created must fail the review — never hand the
+  // reviewer the cli's unscoped defaults and let it run anyway. (Only an EXEC
+  // grant writes a file, so only it can fail this way.)
+  it("fails the review safely when the grant config cannot be created", async () => {
+    diffMock.mockReturnValue("some diff");
+    vi.mocked(mkdtempSync).mockImplementationOnce(() => {
+      throw new Error("ENOSPC");
+    });
+    const execCfg = { ...cfg, review_runs_commands: true } as unknown as Config;
+    expect(await advisorReview(task, prd, { cli: "opencode", model: "m" }, execCfg, "ws", "prog", "std")).toEqual({
+      approved: false,
+      changes: "",
+      diff: "some diff",
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it("passes the task baseline to the diff capture", async () => {

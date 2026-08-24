@@ -3,7 +3,7 @@
 import { createInterface } from "node:readline";
 
 import { buildCmd, promptViaStdin } from "./adapters.js";
-import { agentDef } from "./agents.js";
+import { agentDef, type AgentDef } from "./agents.js";
 import type { AgentSpec, Config } from "./config.js";
 import { runCursorSdkText } from "./cursor-sdk.js";
 import { t } from "./i18n.js";
@@ -32,12 +32,14 @@ export interface AdvisorReviewResult {
 
 /**
  * Is THIS reviewer actually going to run commands? Both halves matter: the user
- * has to have opted in, and the cli has to have an execution grant to be given.
- * Asked once and used twice — the flags and the prompt have to agree, or a
- * reviewer spends its round trying tools it was never handed.
+ * has to have opted in, and the cli has to have an execution grant to be given —
+ * as argv flags (claude) or as config-borne env (opencode). Asked once and used
+ * twice — the flags/env and the prompt have to agree, or a reviewer spends its
+ * round trying tools it was never handed.
  */
 function reviewerRuns(advis: AgentSpec, cfg: Config): boolean {
-  return !!cfg.review_runs_commands && !!agentDef(advis.cli)?.reviewExecArgs;
+  const def = agentDef(advis.cli);
+  return !!cfg.review_runs_commands && !!(def?.reviewExecArgs || def?.reviewEnv);
 }
 
 // exported for expand.ts: the JIT expansion rides the same spawn/parse path as
@@ -63,18 +65,38 @@ export function runAdvisorCli(
   // there is nothing to inspect and it stays text-only.
   const exec = source === "review" && reviewerRuns(advis, cfg);
   const cmd = buildCmd(advis.cli, prompt, advis.model, workspace, false, source === "review" ? (exec ? "exec" : "read") : "none");
+  // The config-borne grant (opencode) rides in the env, scoped to the same
+  // "read"/"exec" decision the argv flags got — a reviewer whose prompt says it
+  // may run the suite must not open a config that forbids it, and vice versa.
+  // The grant may carry a temp file the cli reads at startup, so its cleanup
+  // runs on EVERY settle path below — nobody else will remove it.
+  let granted: ReturnType<NonNullable<AgentDef["reviewEnv"]>> | undefined;
+  try {
+    granted = source === "review" ? agentDef(advis.cli)?.reviewEnv?.(exec ? "exec" : "read", workspace) : undefined;
+  } catch {
+    // a grant that cannot even be written must fail the review — NEVER fall
+    // through to an unscoped reviewer running on the cli's permissive defaults
+    return Promise.resolve(null);
+  }
+  const env = granted?.env;
   // Only the executing reviewer gets the longer budget: it is running a suite,
   // not composing an answer. Everything else keeps advisor_timeout, so a hung
   // read-only review still dies when it always did.
   const timeoutSecs = exec ? (cfg.review_timeout ?? cfg.advisor_timeout) : cfg.advisor_timeout;
   return new Promise((resolve) => {
     // never start one after the abort: the caller is already unwinding
-    if (signal?.aborted) return resolve(null);
+    if (signal?.aborted) {
+      granted?.cleanup();
+      return resolve(null);
+    }
     try {
       const viaStdin = promptViaStdin(advis.cli);
       const proc = spawn(cmd[0], cmd.slice(1), {
         cwd: workspace,
         stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
+        // merged OVER process.env, never replacing it: the cli's auth, model
+        // config and PATH all have to survive the grant
+        ...(env ? { env: { ...process.env, ...env } } : {}),
       });
       if (viaStdin) writePrompt(proc, prompt);
 
@@ -101,6 +123,7 @@ export function runAdvisorCli(
         signal?.removeEventListener("abort", onAbort);
         outRl.close();
         errRl.close();
+        granted?.cleanup();
         resolve(v);
       };
 
@@ -132,6 +155,7 @@ export function runAdvisorCli(
       proc.on("close", () => finish(out.trim() || null));
       proc.on("error", () => finish(null));
     } catch {
+      granted?.cleanup();
       resolve(null);
     }
   });

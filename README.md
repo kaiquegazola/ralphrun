@@ -540,25 +540,56 @@ runs *without* auto-approve (guidance text only).
 **The review call gets read-only tools.** The reviewer used to judge a diff
 truncated at 12k chars — and, when the executor changed nothing, no evidence at
 all. It now runs with an explicit per-CLI allowlist so it can open the files that
-view left out. Today that is `claude` only (`--allowedTools Read,Grep,Glob`);
-every other CLI reviews the diff text alone, unchanged, because a guessed flag
-would fail the whole review on an unknown argument. Auto-approve stays **off** on
-this call, and the allowlist is never a blanket approve flag — that is what keeps
-the reviewer from writing.
+view left out. Each grant is a flag (or config) the target CLI itself verifies
+and enforces — a guessed flag would fail the whole review on an unknown
+argument, so every entry below was checked against the CLI's own documented
+behavior:
+
+- `claude` — `--allowedTools Read,Grep,Glob`.
+- `codex` — `--sandbox read-only`: codex's own named mode for this posture, and
+  `codex exec` runs headless with approvals off, so it cannot prompt either.
+- `cursor` — `--plan`, the CLI's documented read-only mode.
+- `cursorsdk` — reviews in-process in plan mode (the SDK's read-only posture).
+- `opencode` — no read-only flag exists on its command line (`--auto` is a
+  blanket approve, the one thing a review must never carry), so its grant is
+  generated config from the same `reviewexec.ts` lists, in two layers. A READ
+  grant is a few hundred bytes and rides inline (`OPENCODE_CONFIG_CONTENT`),
+  which is the LAST config layer opencode loads — nothing the workspace ships
+  can loosen it. The EXEC bash rules are tens of KB — past Windows' 32KB
+  process-environment block — so they ride in a generated file
+  (`OPENCODE_CONFIG` points at it) while the inline layer carries every other
+  permission key; the documented residual is that the workspace's own
+  `.opencode/opencode.json` loads after the file and could loosen bash on an
+   executing review. The user's own opencode config — file or inline, JSON or
+  JSONC — is merged in as the base, so their providers, agents and MCP servers
+  survive; the grant's permission keys sort last, which is what wins under
+  opencode's last-match-wins rules, and the same rules are also set on the
+  default agent (`agent.build.permission`), because per-agent permissions
+  outrank top-level ones in opencode's merge.
+
+`grok` and `agy` have no verified granular flag and stay without a grant: they
+review the diff text alone. Auto-approve stays **off** on this call for every
+CLI, and no grant is ever a blanket approve flag — that is what keeps the
+reviewer from writing.
 
 > **The "read-only" is the target CLI's, not ralphrun's.** ralphrun spawns
 > `claude -p`; the agent's tool calls happen inside that process and never pass
 > through ralphrun, so there is nothing here that could inspect or refuse them.
-> If the CLI's allowlist leaks, ralphrun cannot tell and cannot stop it. Adding a
-> CLI to this list means verifying its flag grants reads *without* writes and
-> *without* prompting — nobody is on the other end of a review to answer a
-> permission prompt, so a CLI that asks just burns `advisor_timeout`.
+> If the CLI's allowlist leaks — or a config file outranks it — ralphrun cannot
+> tell and cannot stop it. Adding a CLI to this list means verifying its flag
+> grants reads *without* writes and *without* prompting — nobody is on the other
+> end of a review to answer a permission prompt, so a CLI that asks just burns
+> `advisor_timeout`.
 
 **With `review_runs_commands` on, the reviewer gets a wider, scoped grant.** The
 decision of what it may run is one pure function over `(program, args)`
 (`src/reviewexec.ts`), and the per-CLI flags are *generated* from its own lists,
 so neither the program list nor the denials are maintained twice. It is
-default-deny:
+default-deny. Today the wider grant reaches the reviewer two ways: as argv
+allow/deny flags on `claude`, and as the same lists generated into opencode's
+config file as bash rules (last matching rule wins, so the spelled-out denials —
+and the shell-metacharacter refusals — outrank the allow prefixes; the same
+arrangement, in a different medium). It is default-deny:
 
 - **Allowed**: reads (`cat`, `grep`, `rg`, `ls`, `git log|diff|show|blame|…`),
   builds and tests (`node`, `npm`, `pnpm`, `npx`, `pytest`, `go`, `cargo`, `make`,
@@ -575,11 +606,22 @@ default-deny:
   command it claims to be.
 - **A runner is decided on its real program**: `npx wrangler deploy` is a deploy,
   not an `npx`, so the decision looks through `npx`/`bunx`/`pnpm dlx`/`uv run`/
-  `bundle exec` to what actually runs.
+  `bundle exec` to what actually runs. opencode's config encodes that
+  lookthrough with EXACT-TOKEN shapes (`node`, not `node*`, so `nodejs -e` and
+  `node_modules/.bin/x` match nothing) and denies a hand-off to another
+  indirect form — `npx uv run curl` and `uv run curl` match no allow; the
+  hand-off re-opens for an allowed program only (`uv run prettier`), with the
+  denied command shapes riding over it (`pnpm exec npm publish` still loses).
+  The boundary is exact by construction — exactly one hand-off, never into
+  another runner — so `npm exec npx vitest` is denied even though the decision
+  function allows it: an over-block no reviewer writes, traded for a rule with
+  no recursion. The argv grants carry none of these levels.
 - **The flags are coarser than the function.** A CLI allowlist matches a command
   by PREFIX, so what it can carry is "this program, plus these spelled-out
-  denials". The lookthrough above, the shell-metacharacter refusal and the
-  "`./node` is a path, not the allowed `node`" refusal are the *function's*, and
+  denials". The shell-metacharacter refusal and the "`./node` is a path, not the
+  allowed `node`" refusal are the *function's* — opencode's config carries the
+  metacharacter half as explicit deny globs, so a chain cannot ride in on a
+  leading allow — and
   a CLI that is handed the flags alone does not enforce them. That is why the
   program list contains nothing whose own flags write (`find` is off it) — the
   prefix matcher could not take those back.

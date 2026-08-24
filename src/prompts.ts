@@ -78,6 +78,10 @@ Rules:
   attempt fails, the NEXT one is handed those lines, so they are the difference
   between it continuing and it starting the same investigation over. Keep them
   short and factual; skip praise and skip restating the task.
+- When this is a review/fix cycle, close with this compact report so the next
+  executor and reviewer can track progress: EXECUTION_REPORT: changed=<files or
+  summary>; tests=<command/result>; addressed=<finding ids>; remaining=<ids or
+  none>; dead_end=<short reason or none>. Keep it factual and under 800 chars.
 - If the only way forward is off limits, do NOT ask and do NOT pretend the task
   is done. End your turn with a final line of exactly this shape:
   ${BLOCKED_MARKER} <one line saying what is blocked and why>
@@ -173,6 +177,36 @@ is, and "the acceptance already holds" is a claim about them — check it instea
 export interface VerificationEvidence {
   passed: boolean;
   output: string;
+}
+
+export type ReviewSeverity = "blocker" | "major" | "minor";
+
+/** A reviewer finding that can be tracked across executor/reviewer cycles. */
+export interface ReviewFinding {
+  id: string;
+  severity: ReviewSeverity;
+  criterion?: string;
+  location?: string;
+  problem: string;
+  fix: string;
+  evidence?: string;
+}
+
+/** The durable-in-memory handoff for one review cycle. */
+export interface ReviewContext {
+  cycle: number;
+  maxCycles: number;
+  previousFindings?: ReviewFinding[];
+  previousHandoff?: string;
+  previousVerification?: VerificationEvidence;
+  previousDiff?: string;
+}
+
+export interface ParsedReview {
+  approved: boolean;
+  changes: string;
+  findings?: ReviewFinding[];
+  note?: string;
 }
 
 /**
@@ -272,6 +306,45 @@ This is that attempt's own account of what it did and found. Treat it as a lead,
 ${trimmed}`;
 }
 
+export function formatReviewFindings(findings: ReviewFinding[]): string {
+  return findings
+    .map((f) => {
+      const meta = [f.severity, f.criterion, f.location].filter(Boolean).join(" | ");
+      return `- ${f.id} [${meta}]: ${f.problem}\n  Required fix: ${f.fix}${f.evidence ? `\n  Evidence: ${f.evidence}` : ""}`;
+    })
+    .join("\n");
+}
+
+/** Add the current cycle's state to a fresh executor session. */
+export function injectReviewContext(prompt: string, context?: ReviewContext, findings: ReviewFinding[] = []): string {
+  if (!context && !findings.length) return prompt;
+  const current = findings.length ? formatReviewFindings(findings) : "(none)";
+  const previous = context?.previousFindings?.length ? formatReviewFindings(context.previousFindings) : "(none)";
+  return `${prompt}
+
+## Review cycle context
+Cycle: ${context?.cycle ?? "unknown"} / ${context?.maxCycles ?? "unknown"}
+
+### Findings currently requiring attention
+${current}
+
+### Findings from the preceding cycle
+${previous}
+${context?.previousVerification ? `
+### Previous verification
+Result: ${context.previousVerification.passed ? "PASSED" : "FAILED"}
+${context.previousVerification.output.trim().slice(-2500)}
+` : ""}${context?.previousDiff ? `
+### Previous diff fingerprint
+${context.previousDiff.slice(-1000)}
+` : ""}${context?.previousHandoff ? `
+### Previous executor report
+${context.previousHandoff}
+` : ""}
+
+Resolve every current blocker/major finding you can. In your closing report name the finding IDs you addressed, what changed, and any finding that remains open. Do not repeat an approach explicitly reported as a dead end.`;
+}
+
 export function reviewPrompt(
   task: Task,
   prd: PRD,
@@ -280,6 +353,7 @@ export function reviewPrompt(
   verification?: VerificationEvidence,
   /** the reviewer may run commands — see runningPosture */
   canRun = false,
+  context?: ReviewContext,
 ): string {
   return `${canRun ? runningPosture(task) : READING_POSTURE}
 
@@ -287,8 +361,16 @@ Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.
 
 Reply with EXACTLY one of:
-  APPROVE
-  CHANGES: <short bullet list of the required fixes>
+  VERDICT: APPROVE
+  {"verdict":"APPROVE","findings":[]}
+  VERDICT: CHANGES
+  {"verdict":"CHANGES","findings":[{"id":"R1","severity":"blocker|major|minor","criterion":"AC-1","location":"path:line","problem":"...","fix":"...","evidence":"..."}]}
+
+The JSON object must be on one line. Use a unique stable finding id for every issue. Only
+blocker/major findings should be returned with CHANGES; minor observations belong in neither
+the gate nor the required fixes. Every blocking finding needs a concrete fix and evidence
+(acceptance criterion, file/line, test output, or an observed behavior). Do not return a
+finding merely because a different implementation would be nicer.
 
 After APPROVE only, you MAY add one more line:
   NOTE: <one line a LATER task would waste an agent run without>
@@ -309,26 +391,58 @@ Task ${task.id} — ${task.title}: ${task.description}
 
 Acceptance:
 ${task.acceptance.map((a) => "- " + a).join("\n")}
-${standardsBlock(standards)}${verificationBlock(task, verification)}
+${standardsBlock(standards)}${verificationBlock(task, verification)}${reviewContextBlock(context)}
 ${diff.trim() ? `## Diff\n${diff}` : `## No diff\n${NO_DIFF_NOTICE}`}`;
 }
 
+function reviewContextBlock(context?: ReviewContext): string {
+  if (!context) return "";
+  const prior = context.previousFindings?.length ? formatReviewFindings(context.previousFindings) : "(none)";
+  return `
+## Review state
+Cycle ${context.cycle} of the absolute ${context.maxCycles} cycle ceiling.
+The executor has already received the previous findings and report. Re-evaluate them against
+the current diff. Keep the same finding id when the issue remains; remove it only when the
+current code and evidence show it is fixed. A new finding needs new evidence.
+
+### Previous findings
+${prior}
+${context.previousHandoff ? `
+### Previous executor report
+${context.previousHandoff}
+` : ""}${context.previousVerification ? `
+### Previous verification result
+${context.previousVerification.passed ? "PASSED" : "FAILED"}: ${context.previousVerification.output.trim().slice(-2500)}
+` : ""}`;
+}
+
 /**
- * Only the two documented shapes approve. Anything else — empty, prose, a
- * refusal — is NOT an approval: a gate that could not read the verdict has
- * judged nothing, and defaulting to APPROVE is how an off-format reply used to
- * mark a task done. `changes` is empty in that case on purpose (advisor.ts logs
- * the raw text): there is nothing concrete to hand the executor, so the fix loop
- * stops instead of spending its rounds on an answer nobody could parse.
+ * Only the structured JSON shape and the legacy APPROVE/CHANGES shape can
+ * approve. Anything else — empty, prose, a refusal — is NOT an approval: a gate
+ * that could not read the verdict has judged nothing, and defaulting to APPROVE
+ * is how an off-format reply used to mark a task done. `changes` is empty in
+ * that case on purpose (advisor.ts logs the raw text): there is nothing concrete
+ * to hand the executor, so the fix loop stops instead of spending its rounds on
+ * an answer nobody could parse.
  */
-export function parseReview(verdict: string): { approved: boolean; changes: string; note?: string } {
+export function parseReview(verdict: string): ParsedReview {
   if (!verdict) return { approved: false, changes: "" };
-  if (verdict.trim().toUpperCase().startsWith("APPROVE")) {
+
+  const structured = parseStructuredReview(verdict);
+  if (structured) return structured;
+
+  const normalized = verdict.trim();
+  const explicitVerdict = normalized.match(/^VERDICT\s*:\s*(APPROVE|CHANGES)\b/i);
+  if (explicitVerdict?.[1].toUpperCase() === "APPROVE" || normalized.toUpperCase().startsWith("APPROVE")) {
     // Only ever read off an APPROVE. A note attached to a rejection describes an
     // attempt that is about to be redone, so it is not durable — and taking one
     // there would let a task write to the architecture notes without ever
     // passing a gate.
     return { approved: true, changes: "", note: parseNote(verdict) };
+  }
+  if (explicitVerdict?.[1].toUpperCase() === "CHANGES") {
+    const lines = normalized.split("\n").slice(1).join("\n").trim();
+    return { approved: false, changes: lines.slice(0, 4000) };
   }
   const up = verdict.toUpperCase();
   const idx = up.indexOf("CHANGES");
@@ -339,6 +453,63 @@ export function parseReview(verdict: string): { approved: boolean; changes: stri
     return { approved: false, changes };
   }
   return { approved: false, changes: "" };
+}
+
+function parseStructuredReview(verdict: string): ParsedReview | undefined {
+  const jsonCandidates = verdict
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{") && line.endsWith("}"));
+  const inlineJson = verdict.match(/\{[\s\S]*\}/)?.[0];
+  const candidates = inlineJson && !jsonCandidates.includes(inlineJson) ? [...jsonCandidates, inlineJson] : jsonCandidates;
+  for (const candidate of candidates) {
+    try {
+      const raw: unknown = JSON.parse(candidate);
+      if (!raw || typeof raw !== "object") continue;
+      const value = raw as { verdict?: unknown; findings?: unknown; note?: unknown };
+      const verdictValue = typeof value.verdict === "string" ? value.verdict.toUpperCase() : "";
+      if (verdictValue !== "APPROVE" && verdictValue !== "CHANGES") continue;
+      const findings = Array.isArray(value.findings)
+        ? value.findings.map(normalizeFinding).filter(Boolean) as ReviewFinding[]
+        : [];
+      const approved = verdictValue === "APPROVE";
+      const result: ParsedReview = {
+        approved,
+        changes: approved ? "" : findingsToChanges(findings),
+        findings,
+      };
+      if (approved && typeof value.note === "string" && value.note.trim()) {
+        result.note = value.note.trim().slice(0, MAX_NOTE_CHARS);
+      }
+      return result;
+    } catch {
+      // A malformed structured answer falls through to the fail-closed legacy parser.
+    }
+  }
+  return undefined;
+}
+
+function normalizeFinding(raw: unknown): ReviewFinding | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  const problem = typeof value.problem === "string" ? value.problem.trim() : "";
+  const fix = typeof value.fix === "string" ? value.fix.trim() : "";
+  if (!id || !problem || !fix) return undefined;
+  const severity = value.severity === "major" || value.severity === "minor" ? value.severity : "blocker";
+  return {
+    id: id.slice(0, 40),
+    severity,
+    ...(typeof value.criterion === "string" && value.criterion.trim() ? { criterion: value.criterion.trim().slice(0, 160) } : {}),
+    ...(typeof value.location === "string" && value.location.trim() ? { location: value.location.trim().slice(0, 240) } : {}),
+    problem: problem.slice(0, 1200),
+    fix: fix.slice(0, 1200),
+    ...(typeof value.evidence === "string" && value.evidence.trim() ? { evidence: value.evidence.trim().slice(0, 1200) } : {}),
+  };
+}
+
+function findingsToChanges(findings: ReviewFinding[]): string {
+  return findings.length ? formatReviewFindings(findings).slice(0, 4000) : "";
 }
 
 const MAX_NOTE_CHARS = 300;

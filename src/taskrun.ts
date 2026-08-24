@@ -19,7 +19,7 @@ import { log } from "./log.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readyTasks, type PRD, type Task } from "./prd.js";
 import { appendLearnedNote, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
-import { readStandards } from "./prompts.js";
+import { formatReviewFindings, readStandards } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
 import { type RunOptions } from "./startrun.js";
@@ -655,7 +655,9 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         }
         if (action === "retry") {
           freshTask.status = "todo";
-          const feedback = result.reviewChanges?.trim() || reason;
+          const feedback = result.reviewFindings?.length
+            ? formatReviewFindings(result.reviewFindings)
+            : result.reviewChanges?.trim() || reason;
           pendingReviewFeedback.set(task.id, feedback);
           if (result.handoff) pendingHandoff.set(task.id, result.handoff);
           log(progress, t("loop.log.reviewRetry", { id: task.id, reason: displayReason }));

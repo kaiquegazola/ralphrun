@@ -9,6 +9,7 @@ vi.mock("./prompts.js", () => ({
   buildPrompt: vi.fn(() => "PROMPT"),
   injectAdvice: vi.fn(() => "PROMPT+ADVICE"),
   injectHandoff: vi.fn((p: string) => p),
+  injectReviewContext: vi.fn((p: string) => p),
   readStandards: vi.fn(() => "STD"),
 }));
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
@@ -103,6 +104,7 @@ describe("runTask CROSS", () => {
     await runTask(task, prd, c, "/ws", "/prog", undefined, undefined, "task-start");
     expect(mReview).toHaveBeenCalledWith(
       task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start", { passed: true, output: "out" }, undefined,
+      expect.objectContaining({ cycle: 1, maxCycles: 3 }),
     );
   });
 
@@ -117,6 +119,7 @@ describe("runTask CROSS", () => {
     expect(mReview).toHaveBeenCalledWith(
       task, prd, c.advisor, c, "/ws", "/prog", "STD", "base-tree",
       { passed: false, output: "1 failing: expected 2 got 3" }, undefined,
+      expect.objectContaining({ cycle: 1, maxCycles: 1 }),
     );
   });
 
@@ -252,6 +255,23 @@ describe("runTask CROSS", () => {
     expect(result.verificationPassed).toBe(false);
     expect(mReview).toHaveBeenCalledTimes(2);
     expect(mExec).toHaveBeenCalledTimes(2); // initial exec + one fix, then stop before another identical fix
+  });
+
+  it("caps an advancing review loop at the absolute 20-cycle ceiling", async () => {
+    let reviewNo = 0;
+    mReview.mockImplementation(async () => {
+      reviewNo += 1;
+      return { approved: false, changes: "fix the next thing", diff: "D" + reviewNo };
+    });
+    const c = cfg({
+      advisor: { cli: "grok", model: "g" },
+      max_review_rounds: 99,
+      max_stalled_review_rounds: 0,
+    });
+    const result = await runTask(task, prd, c, "/ws", "/prog");
+    expect(result.reason).toBe("review_exhausted");
+    expect(mReview).toHaveBeenCalledTimes(20);
+    expect(mExec).toHaveBeenCalledTimes(20); // initial execution + 19 fixes, all reviewable
   });
 
   // verificationPassed is the ONLY thing that can override a refusing reviewer

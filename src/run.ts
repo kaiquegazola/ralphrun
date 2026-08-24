@@ -6,7 +6,15 @@ import type { Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
-import { buildPrompt, injectAdvice, injectHandoff, readStandards } from "./prompts.js";
+import {
+  buildPrompt,
+  formatReviewFindings,
+  injectAdvice,
+  injectHandoff,
+  injectReviewContext,
+  readStandards,
+  type ReviewFinding,
+} from "./prompts.js";
 import { runExecutor } from "./executor.js";
 import { getAdvice, advisorReview } from "./advisor.js";
 import { runVerify, assembleFeedback } from "./verify.js";
@@ -16,11 +24,13 @@ import { advisorPlanKey, routeAdvisorPlan } from "./plan-cache.js";
 import { addCost, type CostTally } from "./stream.js";
 
 export type RunTaskFailureReason = "failed" | "review_exhausted" | "review_stalled";
+export const MAX_REVIEW_CYCLES = 20;
 
 export interface RunTaskResult {
   ok: boolean;
   reason?: RunTaskFailureReason;
   reviewChanges?: string;
+  reviewFindings?: ReviewFinding[];
   verificationPassed?: boolean;
   /** every executor call this attempt made, including the fix rounds */
   cost: CostTally;
@@ -135,20 +145,28 @@ export async function runTask(
   const taskReviewBase = reviewOn ? (reviewBase === undefined ? captureReviewBase(workspace) : reviewBase) : null;
   let lastApproved = !reviewOn; // review off → approval is vacuously true
   let lastReviewChanges = "";
+  let lastReviewFindings: ReviewFinding[] = [];
   let lastVerificationPassed = false;
   let previousStallSignature = "";
   let stalledRounds = 0;
+  let previousDiff = "";
+  let previousVerificationOutput = "";
+  let previousVerificationPassed = false;
   let failureReason: RunTaskFailureReason = "failed";
   const maxStalledRounds = Math.max(0, cfg.max_stalled_review_rounds ?? 2);
+  // max_review_rounds is now the configurable soft budget, capped by the
+  // absolute safety ceiling. The default is 20; the adaptive gate below stops
+  // earlier when there is no actionable progress.
+  const maxReviewCycles = Math.min(MAX_REVIEW_CYCLES, Math.max(1, cfg.max_review_rounds ?? MAX_REVIEW_CYCLES));
 
-  for (let rnd = 1; rnd <= cfg.max_review_rounds; rnd++) {
+  for (let rnd = 1; rnd <= maxReviewCycles; rnd++) {
     // A skip or quit kills the child, but runExecutor still RETURNS — and a
     // failed exec always assembles feedback, so the loop would otherwise spend
     // every remaining round re-verifying and re-reviewing an attempt the user
     // already abandoned. The phases below are individually interruptible too;
     // this is what stops the next round from starting at all.
     if (signal?.aborted) break;
-    emit({ taskId: task.id, subphase: "verifying", round: { n: rnd, max: cfg.max_review_rounds } });
+    emit({ taskId: task.id, subphase: "verifying", round: { n: rnd, max: maxReviewCycles } });
     const { passed: testOk, output: testOut } = await runVerify(task, workspace, progress, signal);
     lastVerificationPassed = testOk;
     emit({ taskId: task.id, subphase: "reviewing" });
@@ -157,7 +175,16 @@ export async function runTask(
     // by guessing. run.ts still gates on testOk itself below — the reviewer gets
     // it as evidence, never as an approval (see verificationBlock in prompts.ts).
     if (reviewOn && advis) addCost(cost, undefined); // unmetered, same as the planner above
-    const { approved, changes, diff = "", note } =
+    const priorFindings = lastReviewFindings;
+    const reviewContext = {
+      cycle: rnd,
+      maxCycles: maxReviewCycles,
+      previousFindings: priorFindings,
+      previousHandoff: lastHandoff,
+      previousVerification: rnd > 1 ? { passed: previousVerificationPassed, output: previousVerificationOutput } : undefined,
+      previousDiff,
+    };
+    const { approved, changes, diff = "", note, findings = [] } =
       reviewOn && advis
         ? await advisorReview(
             task,
@@ -170,10 +197,12 @@ export async function runTask(
             taskReviewBase,
             { passed: testOk, output: testOut },
             signal,
+            reviewContext,
           )
         : { approved: true, changes: "", diff: "" };
     lastApproved = approved;
     if (changes.trim()) lastReviewChanges = changes;
+    lastReviewFindings = findings;
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
     if (ok && testOk && approved) {
       log(progress, t("run.log.pass", { id: task.id, n: rnd }));
@@ -183,23 +212,42 @@ export async function runTask(
       log(progress, t("run.log.reviewChanges", { id: task.id, n: rnd }));
       if (changes.trim()) log(progress, t("run.log.reviewFeedback", { id: task.id, changes: compactReviewChanges(changes, 1000) }));
     }
-    const feedback = assembleFeedback(ok, testOk, testOut, approved, changes);
+    const reviewFeedback = changes.trim() || (findings.length ? formatReviewFindings(findings) : "");
+    const feedback = assembleFeedback(ok, testOk, testOut, approved, reviewFeedback);
     if (!feedback.trim()) break; // failing but nothing actionable; let task-level retry handle it
-    const stallSignature = reviewStallSignature(ok, testOk, testOut, approved, changes, diff);
+    const stallSignature = reviewStallSignature(ok, testOk, testOut, approved, reviewFeedback, diff, findings, lastHandoff);
     if (stallSignature === previousStallSignature) stalledRounds += 1;
     else stalledRounds = 0;
     previousStallSignature = stallSignature;
+    previousDiff = diff;
+    previousVerificationOutput = testOut;
+    previousVerificationPassed = testOk;
     if (maxStalledRounds > 0 && stalledRounds >= maxStalledRounds) {
       log(progress, t("run.log.stalledReview", { id: task.id, n: rnd, reason: t("run.reason.repeatedStall") }));
       failureReason = "review_stalled";
       break;
     }
+    // Do not spend an executor call on a fix that cannot receive a review: the
+    // absolute ceiling counts reviewer cycles, and this is the last one.
+    if (reviewOn && rnd >= maxReviewCycles) break;
     log(
       progress,
       t("run.log.fixing", { id: task.id, n: rnd, exec: String(ok), tests: String(testOk), approved: String(approved) }),
     );
     let fixPrompt = buildPrompt(task, prd, standards);
     if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
+    fixPrompt = injectReviewContext(
+      fixPrompt,
+      {
+        cycle: rnd,
+        maxCycles: maxReviewCycles,
+        previousFindings: priorFindings,
+        previousHandoff: lastHandoff,
+        previousVerification: { passed: testOk, output: testOut },
+        previousDiff: diff,
+      },
+      findings,
+    );
     fixPrompt += "\n\n" + feedback;
     emit({ taskId: task.id, subphase: "fixing" });
     ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
@@ -212,6 +260,7 @@ export async function runTask(
       ok: false,
       reason: failureReason === "review_stalled" ? "review_stalled" : "review_exhausted",
       reviewChanges: lastReviewChanges,
+      reviewFindings: lastReviewFindings,
       // The ONLY thing that can override a refusing reviewer, so it has to mean
       // "something judged this and said yes". runVerify answers `passed: true`
       // for a task with no verify command — correct there, since nothing is
@@ -263,6 +312,8 @@ function reviewStallSignature(
   approved: boolean,
   changes: string,
   diff: string,
+  findings: ReviewFinding[] = [],
+  handoff = "",
 ): string {
   return [
     execOk ? "exec:1" : "exec:0",
@@ -271,7 +322,22 @@ function reviewStallSignature(
     "verify:" + normalizeSignal(testOut.slice(-3000)),
     "changes:" + normalizeSignal(changes),
     "diff:" + normalizeSignal(diff),
+    "findings:" +
+      findings
+        .map((f) => f.id + "|" + f.severity + "|" + (f.criterion ?? "") + "|" + (f.location ?? "") + "|" + f.problem + "|" + f.fix)
+        .join("\n"),
+    "handoff:" + executionReportSignal(handoff),
   ].join("\n");
+}
+
+function executionReportSignal(handoff: string): string {
+  const line = handoff
+    .split("\n")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("EXECUTION_REPORT:"));
+  // Free-form closing prose is context for the next agent, not proof of
+  // progress. Only the explicit report participates in the stall decision.
+  return line ? normalizeSignal(line) : "";
 }
 
 function normalizeSignal(value: string): string {

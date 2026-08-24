@@ -194,7 +194,7 @@ describe("advisorReview", () => {
     mockChild.stdout.end("CHANGES: x\n");
     finishSpawn(0);
     await p;
-    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification, false);
+    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification, false, undefined);
   });
 
   it("delegates to parseReview on success", async () => {

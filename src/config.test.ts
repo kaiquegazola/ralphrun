@@ -63,6 +63,7 @@ describe("loadConfig", () => {
   it("keeps the executing reviewer off, with its own budget ready if it is turned on", () => {
     expect(DEFAULTS.review_runs_commands).toBe(false);
     expect(DEFAULTS.review_timeout).toBeGreaterThan(DEFAULTS.advisor_timeout);
+    expect(DEFAULTS.max_review_rounds).toBe(20);
   });
 
   it("merges file config, using configFlag path", () => {

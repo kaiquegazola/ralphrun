@@ -214,6 +214,20 @@ describe("reviewPrompt", () => {
     expect(out).not.toContain("Output (tail)");
   });
 
+  it("carries review state and prior findings to the reviewer", () => {
+    const out = reviewPrompt(task, prd, "STD", "the diff", undefined, false, {
+      cycle: 2,
+      maxCycles: 20,
+      previousFindings: [
+        { id: "R1", severity: "major", criterion: "AC-1", problem: "missing guard", fix: "add guard" },
+      ],
+      previousHandoff: "EXECUTION_REPORT: addressed=R1",
+    }).replace(/\s+/g, " ");
+    expect(out).toContain("Cycle 2 of the absolute 20 cycle ceiling");
+    expect(out).toContain("R1");
+    expect(out).toContain("EXECUTION_REPORT: addressed=R1");
+  });
+
   // THE point of the section. run.ts gates on the same flag independently, so a
   // reviewer handed a green run and no instruction reads it as a verdict and
   // rubber-stamps — which quietly turns two gates back into one.
@@ -290,6 +304,10 @@ describe("parseReview", () => {
   it("APPROVE -> approved", () => {
     expect(parseReview("  approve  ")).toEqual({ approved: true, changes: "" });
   });
+  it("accepts the textual VERDICT form from the structured protocol", () => {
+    expect(parseReview("VERDICT: APPROVE")).toEqual({ approved: true, changes: "", note: undefined });
+    expect(parseReview("VERDICT: CHANGES\n- add the missing guard").changes).toContain("add the missing guard");
+  });
   it("CHANGES with colon -> not approved with trimmed changes", () => {
     const r = parseReview("CHANGES: fix x\nfix y");
     expect(r.approved).toBe(false);
@@ -311,6 +329,27 @@ describe("parseReview", () => {
   });
   it("no APPROVE / no CHANGES -> NOT approved, with nothing to hand the executor", () => {
     expect(parseReview("looks fine to me")).toEqual({ approved: false, changes: "" });
+  });
+  it("parses a structured review finding with evidence", () => {
+    const r = parseReview(
+      'VERDICT: CHANGES\n{"verdict":"CHANGES","findings":[{"id":"R1","severity":"major","criterion":"AC-2","location":"src/foo.ts:42","problem":"missing guard","fix":"reject empty input","evidence":"test reproduces it"}]}',
+    );
+    expect(r.approved).toBe(false);
+    expect(r.findings).toEqual([
+      {
+        id: "R1",
+        severity: "major",
+        criterion: "AC-2",
+        location: "src/foo.ts:42",
+        problem: "missing guard",
+        fix: "reject empty input",
+        evidence: "test reproduces it",
+      },
+    ]);
+    expect(r.changes).toContain("R1");
+  });
+  it("parses structured approval and does not carry findings", () => {
+    expect(parseReview('{"verdict":"APPROVE","findings":[]}')).toEqual({ approved: true, changes: "", findings: [] });
   });
 });
 

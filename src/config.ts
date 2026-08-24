@@ -26,6 +26,7 @@ export interface Config {
   advisor_timeout: number;
   max_retries_per_task: number;
   review_after: boolean;
+  /** Soft review-cycle budget; run.ts caps it at the absolute 20-cycle ceiling. */
   max_review_rounds: number;
   max_stalled_review_rounds: number;
   /**
@@ -128,7 +129,10 @@ export const DEFAULTS: Config = {
   advisor_timeout: 300,
   max_retries_per_task: 3,
   review_after: true,
-  max_review_rounds: 3,
+  // Adaptive review loops stop on lack of actionable progress. This remains
+  // the configurable soft budget, while run.ts caps it at 20 as an absolute
+  // circuit breaker.
+  max_review_rounds: 20,
   max_stalled_review_rounds: 2,
   advisor_plan_threshold: DEFAULT_ADVISOR_PLAN_THRESHOLD,
   heartbeat_secs: 30,

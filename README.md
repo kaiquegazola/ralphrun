@@ -16,7 +16,7 @@ UI in English and Português (pt-BR).
 | Mode | When | How |
 |---|---|---|
 | **NATIVE** | executor **and** advisor are both `claude` | one `claude -p ... --advisor <model>`; the advisor tool runs server-side, Claude decides when to consult mid-task and reviews before declaring done. No ralphrun-side review call, so no review round counters and no `## Learned during runs` notes. |
-| **CROSS** | different CLIs (e.g. `grok`/`cursor` executor + `claude` advisor) | **planner before** → executor → **review-after** loop (`APPROVE` / `CHANGES`, re-run with fixes), up to `max_review_rounds`. |
+| **CROSS** | different CLIs (e.g. `grok`/`cursor` executor + `claude` advisor) | **planner before** → executor → adaptive review/fix loop; it continues while findings are actionable and progress is visible, with an absolute ceiling of 20 cycles. |
 
 Every CLI authenticates with its own subscription login — **no API keys**. The
 one exception is the optional in-process `cursorsdk` backend, which takes a
@@ -107,7 +107,7 @@ tail -f ralph.out
   "advisor_timeout": 300,
   "max_retries_per_task": 3,
   "review_after": true,
-  "max_review_rounds": 3,
+  "max_review_rounds": 20,
   "max_stalled_review_rounds": 2,
   "advisor_plan_threshold": 3,
   "heartbeat_secs": 30,
@@ -192,12 +192,19 @@ tail -f ralph.out
   `progress.md`, since that log is the only audit trail a run nobody watched
   leaves behind.
 
+- **`max_review_rounds` is a soft budget, capped at 20 cycles.** The loop normally
+  stops earlier when the reviewer approves, there is no actionable feedback, or
+  the same finding/test/diff repeats without progress. `max_stalled_review_rounds`
+  remains the repeated-state circuit breaker. Set this value lower when a project
+  wants a tighter budget; values above 20 are capped.
+
 - **`review_runs_commands` multiplies what every round costs.** It is `false` by
   default and it should stay that way unless you want it. Off, a review round is
   one agent turn that reads a diff and answers. On, it is an agent that runs the
   acceptance scenario, a reproduction, an edge case — real work, real tool calls,
   real minutes — and it happens on *every* round of *every* task, up to
-  `max_review_rounds`. Assume a several-fold jump in both wall clock and spend.
+  the adaptive review budget (at most 20 cycles). Assume a several-fold jump in
+  both wall clock and spend.
   What you buy is the integration bug: a reviewer that only reads a diff never
   catches the one where each piece is fine and the assembly is not.
 
@@ -345,8 +352,8 @@ test suite.
 
 The clocks that *do* bound a task are wall-clock ones, and `task_timeout` is not
 the only one. It bounds **a single executor call**, not a task: in CROSS mode a
-task pays it once up front and once per fix round, so an attempt can legitimately
-run up to `max_review_rounds + 1` times that, plus its advisor and review calls
+task pays it once up front and once per reviewable fix round, so an attempt can
+run up to the adaptive review budget (20 cycles absolute), plus its advisor and review calls
 (`advisor_timeout`, `review_timeout`). And every `verify` command is killed at a
 **fixed 600s** — not configurable, so a suite that takes longer than ten minutes
 fails its gate on every backend and in every mode.
@@ -471,7 +478,7 @@ imported or run there). Login is only *verified* for `claude`, `cursor` and
 Same agent as `cursor`, no per-call process boot, native cancel and typed
 events. **There is no benchmark of this backend yet** — the only measured number
 is that `cursor-agent --version` alone costs 1.07s per invocation, and ralphrun
-calls the executor up to `max_review_rounds + 1` times per task. Treat the
+can call the executor up to the adaptive review budget (20 cycles absolute) per task. Treat the
 speedup as unproven.
 
 Setup, all three parts required:
@@ -694,6 +701,16 @@ need the log in English; the samples below are the `en` rendering.
   given over a change the reviewer only half saw. Where the CLI supports it (see
   [Permissions](#permissions)) the reviewer can also open the real files instead
   of judging the cut view.
+- **Review findings are tracked across cycles**: the reviewer is asked for a
+  one-line JSON verdict with stable finding IDs, severity, affected acceptance
+  criterion, location, concrete fix and evidence. The executor receives the
+  current findings, the previous verification result, its previous closing
+  report and the preceding diff before every fix call. Legacy `APPROVE` /
+  `CHANGES` replies remain accepted as a compatibility fallback.
+- **The loop follows progress, not just a counter**: a changed diff, changed
+  verification result or changed finding set resets the stall detector. An
+  identical state becomes `review_stalled`; an actionable state can continue
+  until it is approved or reaches the absolute 20-cycle circuit breaker.
 
 > **Workspace default is the current directory.** Run ralphrun from inside your
 > project dir (or pass `--workspace`), *not* from the tool dir.

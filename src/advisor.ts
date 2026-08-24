@@ -9,7 +9,14 @@ import { runCursorSdkText } from "./cursor-sdk.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
-import { advisorPrompt, parseReview, reviewPrompt, type VerificationEvidence } from "./prompts.js";
+import {
+  advisorPrompt,
+  parseReview,
+  reviewPrompt,
+  type ReviewContext,
+  type ReviewFinding,
+  type VerificationEvidence,
+} from "./prompts.js";
 import { captureDiff } from "./git.js";
 import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
@@ -73,6 +80,7 @@ export interface AdvisorReviewResult {
   approved: boolean;
   changes: string;
   diff: string;
+  findings?: ReviewFinding[];
   /**
    * A durable fact for the architecture notes, when the reviewer judged this
    * task taught one. Rides on the review call the task already makes, so it
@@ -294,6 +302,7 @@ export async function advisorReview(
   reviewBase?: string | null,
   verification?: VerificationEvidence,
   signal?: AbortSignal,
+  context?: ReviewContext,
 ): Promise<AdvisorReviewResult> {
   // The reviewer is a GATE, so "no verdict" is not a verdict. Each branch below
   // used to return approved:true, which is how a task reached `done` with
@@ -308,7 +317,7 @@ export async function advisorReview(
   // A round that just got several minutes longer and several times more
   // expensive has to say so in the durable log, not only in the config file.
   if (runs) log(progress, t("advisor.reviewExec", { id: task.id, s: cfg.review_timeout ?? cfg.advisor_timeout }));
-  const prompt = reviewPrompt(task, prd, standards, diff, verification, runs);
+  const prompt = reviewPrompt(task, prd, standards, diff, verification, runs, context);
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal, progress);
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the

@@ -254,7 +254,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
           mode === "NATIVE"
             ? t("loop.dry.reviewNative")
             : cfg.advisor && cfg.review_after
-              ? t("loop.dry.reviewOn", { n: cfg.max_review_rounds })
+              ? t("loop.dry.reviewOn", { n: Math.min(20, Math.max(1, cfg.max_review_rounds)) })
               : t("loop.dry.reviewOff");
         console.log(t("loop.dry.next", { id: batch[0].id, title: batch[0].title }));
         console.log(t("loop.dry.mode", { mode, executor: exe, advisor: adv }));
@@ -283,4 +283,3 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     releaseRunLock(workspace);
   }
 }
-

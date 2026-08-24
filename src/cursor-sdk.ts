@@ -2,8 +2,8 @@
 // @cursor/sdk, as a sibling of the `cursor` CLI backend.
 //
 // Why: the CLI pays a process boot per call (measured 1.07s for
-// `cursor-agent --version` alone) and ralphrun calls the executor up to
-// max_review_rounds+1 times per task; in-process also gives typed events, a
+// `cursor-agent --version` alone) and ralphrun can call the executor up to the
+// 20-cycle review ceiling per task; in-process also gives typed events, a
 // real cancel, and no cmd.exe 8191-char argv limit on Windows.
 //
 // Nothing in here deletes anything: `cwd` is the user's own repository, never a

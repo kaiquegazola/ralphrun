@@ -57,6 +57,11 @@ Rules:
   passes, under the project's own commit convention. Committing yourself splits
   one task across several commits and leaves them behind even when it fails.
 - Explore the existing workspace first, then implement.
+- Before editing, inspect the current files and acceptance criteria. If the task is
+  already completely satisfied by the workspace (possibly by an earlier run), do
+  not rewrite it just to create a diff: run the available validations and report
+  that state explicitly. This is a claim for the reviewer to verify, never an
+  approval by itself.
 - Run the build/tests yourself to confirm acceptance before finishing.
 - NOBODY is reading your output and NOBODY can reply to you. Asking for
   confirmation or authorization does not pause anything — it just burns this
@@ -78,10 +83,13 @@ Rules:
   attempt fails, the NEXT one is handed those lines, so they are the difference
   between it continuing and it starting the same investigation over. Keep them
   short and factual; skip praise and skip restating the task.
-- When this is a review/fix cycle, close with this compact report so the next
-  executor and reviewer can track progress: EXECUTION_REPORT: changed=<files or
-  summary>; tests=<command/result>; addressed=<finding ids>; remaining=<ids or
-  none>; dead_end=<short reason or none>. Keep it factual and under 800 chars.
+- Close with this compact report so the next executor and reviewer can track
+  progress: EXECUTION_REPORT: state=<changed|already_satisfied>;
+  changed=<files or none>; tests=<command/result>; addressed=<finding ids>;
+  remaining=<ids or none>; evidence=<why already satisfied or none>;
+  dead_end=<short reason or none>. Use state=already_satisfied only after
+  inspecting the relevant files and validating that every acceptance criterion
+  already holds. Keep it factual and under 800 chars.
 - If the only way forward is off limits, do NOT ask and do NOT pretend the task
   is done. End your turn with a final line of exactly this shape:
   ${BLOCKED_MARKER} <one line saying what is blocked and why>
@@ -173,6 +181,12 @@ anything to be built, changed, fixed or removed, no diff means it did not happen
 Read the files this task names before you answer. With no diff they are the only evidence there
 is, and "the acceptance already holds" is a claim about them — check it instead of assuming it.`;
 
+const ALREADY_SATISFIED_NO_DIFF_NOTICE = `The executor made NO new changes in this attempt and reported
+state=already_satisfied. This is an untrusted claim that an earlier run already implemented the task.
+Read the files this task names and verify every acceptance criterion independently. APPROVE only if
+all criteria already hold in the current workspace; otherwise reply CHANGES with the concrete work
+still missing so the executor can implement it.`;
+
 /** What the objective verify gate found on this attempt, as the reviewer sees it. */
 export interface VerificationEvidence {
   passed: boolean;
@@ -192,12 +206,62 @@ export interface ReviewFinding {
   evidence?: string;
 }
 
+/** The state an executor reports after inspecting the workspace. */
+export type ExecutionReportState = "changed" | "already_satisfied";
+
+/**
+ * Structured context from the executor. This is never an approval: the
+ * reviewer must verify it against the files and acceptance criteria.
+ */
+export interface ExecutionReport {
+  state: ExecutionReportState;
+  changed?: string;
+  tests?: string;
+  addressed?: string;
+  remaining?: string;
+  evidence?: string;
+  deadEnd?: string;
+  raw: string;
+}
+
+/** Parse the executor's compact report from its closing handoff, if present. */
+export function parseExecutionReport(handoff?: string): ExecutionReport | undefined {
+  const raw = handoff
+    ?.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("EXECUTION_REPORT:"))
+    .at(-1);
+  if (!raw) return undefined;
+
+  const state = readReportField(raw, "state");
+  if (state !== "changed" && state !== "already_satisfied") return undefined;
+  return {
+    state,
+    changed: readReportField(raw, "changed"),
+    tests: readReportField(raw, "tests"),
+    addressed: readReportField(raw, "addressed"),
+    remaining: readReportField(raw, "remaining"),
+    evidence: readReportField(raw, "evidence"),
+    deadEnd: readReportField(raw, "dead_end"),
+    raw,
+  };
+}
+
+function readReportField(report: string, field: string): string | undefined {
+  const body = report.replace(/^EXECUTION_REPORT:\s*/i, "");
+  const match = body.match(new RegExp(`(?:^|;\\s*)${field}=([^;]*)`, "i"));
+  const value = match?.[1]?.trim();
+  return value || undefined;
+}
+
 /** The durable-in-memory handoff for one review cycle. */
 export interface ReviewContext {
   cycle: number;
   maxCycles: number;
   previousFindings?: ReviewFinding[];
   previousHandoff?: string;
+  /** Executor's structured report, always untrusted reviewer context. */
+  executionReport?: ExecutionReport;
   previousVerification?: VerificationEvidence;
   previousDiff?: string;
 }
@@ -361,7 +425,7 @@ ${context.previousDiff.slice(-1000)}
 ` : ""}${context?.previousHandoff ? `
 ### Previous executor report
 ${context.previousHandoff}
-` : ""}
+` : ""}${executionReportBlock(context?.executionReport)}
 
 Resolve every current blocker/major finding you can. In your closing report name the finding IDs you addressed, what changed, and any finding that remains open. Do not repeat an approach explicitly reported as a dead end.`;
 }
@@ -419,7 +483,7 @@ Task ${task.id} — ${task.title}: ${task.description}
 Acceptance:
 ${task.acceptance.map((a) => "- " + a).join("\n")}
 ${standardsBlock(standards)}${verificationBlock(task, verification)}${reviewContextBlock(context)}
-${diff.trim() ? `## Diff\n${diff}` : `## No diff\n${NO_DIFF_NOTICE}`}`;
+${diff.trim() ? `## Diff\n${diff}` : `## No diff\n${context?.executionReport?.state === "already_satisfied" ? ALREADY_SATISFIED_NO_DIFF_NOTICE : NO_DIFF_NOTICE}`}`;
 }
 
 function reviewContextBlock(context?: ReviewContext): string {
@@ -434,6 +498,7 @@ current code and evidence show it is fixed. A new finding needs new evidence.
 
 ### Previous findings
 ${prior}
+${executionReportBlock(context.executionReport)}
 ${context.previousHandoff ? `
 ### Previous executor report
 ${context.previousHandoff}
@@ -441,6 +506,26 @@ ${context.previousHandoff}
 ### Previous verification result
 ${context.previousVerification.passed ? "PASSED" : "FAILED"}: ${context.previousVerification.output.trim().slice(-2500)}
 ` : ""}`;
+}
+
+function executionReportBlock(report?: ExecutionReport): string {
+  if (!report) return "";
+  const details = [
+    `state=${report.state}`,
+    report.changed && `changed=${report.changed}`,
+    report.tests && `tests=${report.tests}`,
+    report.addressed && `addressed=${report.addressed}`,
+    report.remaining && `remaining=${report.remaining}`,
+    report.evidence && `evidence=${report.evidence}`,
+    report.deadEnd && `dead_end=${report.deadEnd}`,
+  ].filter(Boolean).join("; ");
+  return `
+### Structured executor state (untrusted)
+The executor reported: ${details}
+This is context only, not evidence or approval. Inspect the current workspace and acceptance
+criteria yourself. If state=already_satisfied but any criterion is missing, return CHANGES with
+a concrete fix; the executor will receive it and continue implementing.
+`;
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   injectAdvice,
   injectHandoff,
   injectReviewContext,
+  parseExecutionReport,
   readStandards,
   type ReviewCommit,
   type ReviewFinding,
@@ -81,6 +82,12 @@ export async function runTask(
   const onFinal = (text: string): void => {
     lastHandoff = text;
   };
+  const execute = async (...args: Parameters<typeof runExecutor>): Promise<boolean> => {
+    // A call that emits no final text has no current report. Do not let a prior
+    // round's already_satisfied claim masquerade as the fix attempt's state.
+    lastHandoff = undefined;
+    return runExecutor(...args);
+  };
 
   // No verify command and no reviewer: "done" here means nothing more than "the
   // executor exited 0". That is a legitimate setup, but it is silent, and a PRD
@@ -94,7 +101,7 @@ export async function runTask(
     log(progress, t("run.log.native", { id: task.id, cli: execu.cli, model: execu.model, advisorModel: advis.model }));
     emit({ taskId: task.id, subphase: "executing", attempt });
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
-    const ok = await runExecutor(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal);
+    const ok = await execute(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
     const passed = ok && (await runVerify(task, workspace, progress, signal)).passed;
     return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
@@ -141,7 +148,7 @@ export async function runTask(
   if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
-  let ok = await runExecutor(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
+  let ok = await execute(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -184,6 +191,7 @@ export async function runTask(
       maxCycles: maxReviewCycles,
       previousFindings: priorFindings,
       previousHandoff: lastHandoff,
+      executionReport: parseExecutionReport(lastHandoff),
       previousVerification: rnd > 1 ? { passed: previousVerificationPassed, output: previousVerificationOutput } : undefined,
       previousDiff,
     };
@@ -263,7 +271,7 @@ export async function runTask(
     );
     fixPrompt += "\n\n" + feedback;
     emit({ taskId: task.id, subphase: "fixing" });
-    ok = await runExecutor(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
+    ok = await execute(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
   }
 
   log(progress, t("run.log.exhausted", { id: task.id }));

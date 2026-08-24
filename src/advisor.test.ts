@@ -184,6 +184,27 @@ describe("advisorReview", () => {
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("changed nothing"));
   });
 
+  it("labels an empty diff as an already-satisfied claim when the executor reported it", async () => {
+    diffMock.mockReturnValue("   ");
+    vi.mocked(parseReview).mockReturnValueOnce({ approved: true, changes: "" });
+    const context = {
+      cycle: 1,
+      maxCycles: 20,
+      executionReport: {
+        state: "already_satisfied" as const,
+        changed: "none",
+        evidence: "acceptance already holds",
+        raw: "EXECUTION_REPORT: state=already_satisfied; changed=none; evidence=acceptance already holds",
+      },
+    };
+    const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std", undefined, undefined, undefined, context);
+    mockChild.stdout.end("APPROVE\n");
+    finishSpawn(0);
+    await p;
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("already satisfied"));
+    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "   ", undefined, false, context);
+  });
+
   // The verify verdict is evidence about the same attempt as the diff, so it has
   // to survive the trip from run.ts to the prompt — the reviewer used to judge a
   // diff without knowing whether anything ran on it.

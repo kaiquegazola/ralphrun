@@ -9,6 +9,7 @@ import {
   injectAdvice,
   injectHandoff,
   reviewPrompt,
+  parseExecutionReport,
   parseReview,
 } from "./prompts.js";
 import type { PRD, Task } from "./prd.js";
@@ -110,6 +111,13 @@ describe("buildPrompt", () => {
   it("tells the executor to leave committing to the loop", () => {
     const p = buildPrompt(task, prd);
     expect(p).toContain("Do NOT run `git add` or `git commit`");
+  });
+
+  it("asks for a preflight check and an explicit already-satisfied state", () => {
+    const out = buildPrompt(task, prd).replace(/\s+/g, " ");
+    expect(out).toContain("Before editing, inspect the current files and acceptance criteria");
+    expect(out).toContain("state=<changed|already_satisfied>");
+    expect(out).toContain("Use state=already_satisfied only after inspecting");
   });
 
   it("stops advisor guidance from widening the rules", () => {
@@ -292,6 +300,46 @@ describe("reviewPrompt", () => {
     expect(out).toContain("declares NO verify command");
     expect(out).toContain("only");
     expect(out).not.toContain("Result: PASSED"); // nothing ran, so there is no verdict to report
+  });
+
+  it("passes an already-satisfied executor claim as untrusted reviewer context", () => {
+    const out = reviewPrompt(task, prd, "STD", "", undefined, false, {
+      cycle: 1,
+      maxCycles: 20,
+      executionReport: {
+        state: "already_satisfied",
+        changed: "none",
+        tests: "npm test passed",
+        evidence: "all acceptance criteria are present",
+        raw: "EXECUTION_REPORT: state=already_satisfied; changed=none; tests=npm test passed; evidence=all acceptance criteria are present",
+      },
+    }).replace(/\s+/g, " ");
+    expect(out).toContain("state=already_satisfied");
+    expect(out).toContain("context only, not evidence or approval");
+    expect(out).toContain("return CHANGES with a concrete fix");
+    expect(out).toContain("NO new changes in this attempt");
+    expect(out).toContain("APPROVE only if all criteria already hold");
+    expect(out).not.toContain("An unchanged workspace is NOT evidence");
+  });
+});
+
+describe("parseExecutionReport", () => {
+  it("parses the structured already-satisfied state", () => {
+    expect(parseExecutionReport(
+      "EXECUTION_REPORT: state=already_satisfied; changed=none; tests=typecheck passed; evidence=acceptance already holds; remaining=none; dead_end=none",
+    )).toMatchObject({
+      state: "already_satisfied",
+      changed: "none",
+      tests: "typecheck passed",
+      evidence: "acceptance already holds",
+      remaining: "none",
+      deadEnd: "none",
+    });
+  });
+
+  it("ignores legacy reports without an explicit state", () => {
+    expect(parseExecutionReport("EXECUTION_REPORT: changed=none; tests=passed; remaining=none")).toBeUndefined();
+    expect(parseExecutionReport("final prose without a report")).toBeUndefined();
   });
 });
 

@@ -10,6 +10,7 @@ vi.mock("./prompts.js", () => ({
   injectAdvice: vi.fn(() => "PROMPT+ADVICE"),
   injectHandoff: vi.fn((p: string) => p),
   injectReviewContext: vi.fn((p: string) => p),
+  parseExecutionReport: vi.fn(() => undefined),
   readStandards: vi.fn(() => "STD"),
 }));
 vi.mock("./log.js", () => ({ log: vi.fn(), setReporter: vi.fn() }));
@@ -20,7 +21,7 @@ import { runTask } from "./run.js";
 import { runExecutor } from "./executor.js";
 import { getAdvice, advisorReview } from "./advisor.js";
 import { runVerify, assembleFeedback } from "./verify.js";
-import { injectAdvice } from "./prompts.js";
+import { injectAdvice, parseExecutionReport } from "./prompts.js";
 import { log } from "./log.js";
 import { emit } from "./tui/events.js";
 import { captureReviewBase } from "./git.js";
@@ -34,6 +35,7 @@ const mReview = vi.mocked(advisorReview);
 const mVerify = vi.mocked(runVerify);
 const mFeedback = vi.mocked(assembleFeedback);
 const mInject = vi.mocked(injectAdvice);
+const mParseExecutionReport = vi.mocked(parseExecutionReport);
 const mLog = vi.mocked(log);
 const mEmit = vi.mocked(emit);
 const mCaptureReviewBase = vi.mocked(captureReviewBase);
@@ -411,6 +413,35 @@ describe("runTask CROSS", () => {
     expect(result).toMatchObject({ ok: false, reason: "review_exhausted" });
     expect(mExec).toHaveBeenCalledTimes(1); // no blind fix round was attempted
     expect(mReview).toHaveBeenCalledTimes(3); // configured soft limit, below the absolute 20-cycle ceiling
+  });
+
+  it("does not carry an old already-satisfied report into a silent fix round", async () => {
+    const oldReport = "EXECUTION_REPORT: state=already_satisfied; changed=none; tests=passed; evidence=previous run";
+    mExec.mockReset();
+    mExec
+      .mockImplementationOnce(async (...args: unknown[]) => {
+        (args[9] as (text: string) => void)?.(oldReport);
+        return true;
+      })
+      .mockResolvedValue(true);
+    mParseExecutionReport.mockImplementation((handoff) =>
+      handoff === oldReport
+        ? { state: "already_satisfied", changed: "none", tests: "passed", evidence: "previous run", raw: oldReport }
+        : undefined,
+    );
+    mReview
+      .mockResolvedValueOnce({ approved: false, changes: "add the missing route", diff: "D" })
+      .mockResolvedValueOnce({ approved: true, changes: "", diff: "D2" });
+    mFeedback.mockReturnValue("add the missing route");
+
+    await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 2 }), "/ws", "/prog");
+    expect(mReview.mock.calls[0][10]).toEqual(expect.objectContaining({
+      executionReport: expect.objectContaining({ state: "already_satisfied" }),
+    }));
+    expect(mReview.mock.calls[1][10]).toEqual(expect.objectContaining({
+      previousHandoff: undefined,
+      executionReport: undefined,
+    }));
   });
 });
 

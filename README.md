@@ -706,6 +706,12 @@ need the log in English; the samples below are the `en` rendering.
   task's acceptance can hold without one. A task that only asks to confirm
   something already works can be approved; one that asks for work to be done
   cannot.
+- **Already-satisfied work is explicit context**: before editing, the executor
+  inspects the current workspace and may report
+  `EXECUTION_REPORT: state=already_satisfied` when an earlier run already made
+  the task satisfy its acceptance. That report is untrusted context, not an
+  approval: the reviewer checks the files independently and can return
+  `CHANGES`, which sends the executor back into the normal fix cycle.
 - **Truncated review diffs say so**: the diff handed to the reviewer is capped,
   and now carries an explicit marker when it was cut, so an approval is never
   given over a change the reviewer only half saw. Where the CLI supports it (see

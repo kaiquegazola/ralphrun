@@ -316,7 +316,14 @@ export async function advisorReview(
   // An empty diff is NOT decided here: whether a task can be satisfied with no
   // change is a judgement about that task, so the reviewer makes it (the prompt
   // says what it is looking at). Only the spawn is unconditional now.
-  if (!diff.trim()) log(progress, t("advisor.reviewNoDiff", { id: task.id }));
+  if (!diff.trim()) {
+    log(
+      progress,
+      t(context?.executionReport?.state === "already_satisfied" ? "advisor.reviewAlreadySatisfied" : "advisor.reviewNoDiff", {
+        id: task.id,
+      }),
+    );
+  }
   const runs = reviewerRuns(advis, cfg);
   // A round that just got several minutes longer and several times more
   // expensive has to say so in the durable log, not only in the config file.

@@ -43,6 +43,7 @@ export function runExecutor(
    * thrown away.
    */
   onFinal?: (text: string) => void,
+  runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<boolean> {
   // in-process backend: it owns its own heartbeat and marker classification,
   // because there is no child process to attach readline to
@@ -97,6 +98,7 @@ export function runExecutor(
     const proc = spawn(cmd[0], cmd.slice(1), {
       cwd: workspace,
       stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
+      env: runtimeEnv ? { ...process.env, ...runtimeEnv } : undefined,
     });
     if (viaStdin) writePrompt(proc, prompt);
 

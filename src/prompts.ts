@@ -107,9 +107,17 @@ Architecture notes: ${prd.architecture_notes}
 ${standardsBlock(standards)}
 Task ${task.id} — ${task.title}: ${task.description}
 Acceptance: ${task.acceptance.join("; ")}
+Verify: ${task.verify || "(not declared)"}
+
+Concurrency preflight: assess whether this task's implementation or verify can run
+alongside another task. Look for shared database writes/resets/migrations, Redis or
+queue mutation, fixed ports, Docker/cluster services, and test setup that truncates
+or drops shared state. Treat missing isolation evidence as unsafe. State the resource
+risks and required isolation or serialization in the plan; this is guidance, not
+permission to change the PRD.
 
 Give a short, concrete plan: the approach, the 1-2 non-obvious design decisions,
-and the failure modes to avoid. Max ~10 lines.`;
+the concurrency/resource assessment, and the failure modes to avoid. Max ~14 lines.`;
 }
 
 // expand.ts companion: a SKELETON task (staged authoring left it without
@@ -125,14 +133,16 @@ export function taskExpandPrompt(task: Task, prd: PRD): string {
     task.description ? `description: ${task.description}` : "",
     task.acceptance?.length ? `acceptance: ${task.acceptance.join("; ")}` : "",
     task.scope?.length ? `scope: ${task.scope.join(", ")}` : "",
+    task.parallel ? `parallel: ${task.parallel}` : "",
+    task.resources ? `resources: ${JSON.stringify(task.resources)}` : "",
     task.verify ? `verify: ${task.verify}` : "",
   ]
     .filter(Boolean)
     .join("\n");
   return `You are expanding ONE task of an existing plan into its full executable spec.
 Do NOT write code — reply with ONLY one fenced json block containing the FULL task object:
-{"id": "...", "title": "...", "status": "todo", "deps": [], "retries": 0, "description": "...", "acceptance": ["..."], "verify": "..."}
-Do NOT include a scope field: scoping stays with the planner and the user.
+{"id": "...", "title": "...", "status": "todo", "deps": [], "retries": 0, "description": "...", "acceptance": ["..."], "scope": [], "parallel": "safe", "resources": {}, "verify": "..."}
+Do not invent or change scope, parallel, or resources: those stay with the planner and the user. Preserve them when already written.
 ${existing ? `\nAlready-written fields (keep their intent; you may refine wording, never drop or contradict them):\n${existing}\n` : ""}
 Project: ${prd.project}
 Stack: ${prd.stack}
@@ -262,6 +272,8 @@ export interface ReviewContext {
   previousHandoff?: string;
   /** Executor's structured report, always untrusted reviewer context. */
   executionReport?: ExecutionReport;
+  /** Runtime-only environment; never rendered into the reviewer prompt. */
+  runtimeEnv?: NodeJS.ProcessEnv;
   previousVerification?: VerificationEvidence;
   previousDiff?: string;
 }

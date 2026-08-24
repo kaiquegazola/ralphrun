@@ -9,6 +9,7 @@
 
 import { performance } from "node:perf_hooks";
 
+import { agentDef } from "./agents.js";
 import { type Config } from "./config.js";
 import { BROWSER_INSTALL_HINT, BROWSER_UPDATE_HINT, browserStatusAsync, taskUsesBrowser, type BrowserStatus } from "./browser.js";
 import { applyTaskPatch, expandSkeletonTask, isSkeletonTask, type TaskPatch } from "./expand.js";
@@ -20,6 +21,7 @@ import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readyTasks, type PRD, type Task } from "./prd.js";
 import { appendLearnedNote, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
 import { formatReviewCommit, formatReviewFindings, readStandards, type ReviewCommit } from "./prompts.js";
+import { assessTaskResources, resourceConflict, taskCanRunInWave, taskRuntimeEnv } from "./resources.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
 import { type RunOptions } from "./startrun.js";
@@ -61,6 +63,8 @@ export interface TaskRunnerCtx {
   runCost: CostTally;
   /** the run's money ceiling, 0 = none. Read once at startup and never re-read. */
   maxCostUsd: number;
+  /** stable ID for this run, used to derive per-task test resources */
+  runId: string;
 
   /** REPLACED mid-run by the config menu — never destructure these two */
   cfg: Config;
@@ -457,7 +461,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     try {
       let result: RunTaskResult = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
       try {
-        result = await runTask(task, prd, ctx.cfg, taskWorkspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
+        const runTaskArgs: Parameters<typeof runTask> = [task, prd, ctx.cfg, taskWorkspace, progress, signal, reviewRetryFeedback, taskReviewBase, (plan, planKey) => {
           // Read-modify-write of prd.json, and it fires MID-task while siblings
           // are running. It must stay SYNCHRONOUS end to end — an await between
           // the reload and the save is exactly what lets a stale copy clobber a
@@ -479,7 +483,9 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
               savePRD(prdPath, currentPrd);
             }
           }
-        }, handoff);
+        }, handoff];
+        runTaskArgs.push(taskRuntimeEnv(ctx.runId, task.id));
+        result = await runTask(...runTaskArgs);
       } catch (e) {
         log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
         result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
@@ -800,11 +806,26 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     // No repo (or no commit yet) means no worktrees, and a wave without them
     // would put N executors in one checkout — the thing config load refuses.
     if (cap <= 1 || !headCommit(workspace)) return ready.slice(0, 1);
+    if (agentDef(ctx.cfg.executor.cli)?.sdk) {
+      return ready.slice(0, 1);
+    }
     const wave: Task[] = [];
-    for (const tk of ready.slice(0, cap)) {
-      if (tk.scope?.length) wave.push(tk);
-      else if (wave.length === 0) return [tk];
-      else break;
+    for (const tk of ready) {
+      if (wave.length >= cap) break;
+      if (!tk.scope?.length || !taskCanRunInWave(tk)) {
+        if (wave.length === 0) {
+          const reason = !tk.scope?.length ? "no declared file scope" : assessTaskResources(tk).reasons.join(", ");
+          log(progress, t("loop.log.parallelSerial", { id: tk.id, reason: reason || "external resource is not isolated" }));
+          return [tk];
+        }
+        continue;
+      }
+      const conflict = wave.map((other) => resourceConflict(other, tk)).find(Boolean);
+      if (!conflict) wave.push(tk);
+      else {
+        log(progress, t("loop.log.parallelSerial", { id: tk.id, reason: conflict }));
+        continue;
+      }
     }
     return wave;
   };
@@ -852,7 +873,14 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     try {
       for (const cmd of commands) {
         if (gateSignal?.aborted) return true; // abandoned, not broken
-        const { passed } = await runVerifyCommand(cmd, t("loop.label.wave"), workspace, progress, gateSignal);
+        const { passed } = await runVerifyCommand(
+          cmd,
+          t("loop.label.wave"),
+          workspace,
+          progress,
+          gateSignal,
+          taskRuntimeEnv(ctx.runId, "__ralphrun_integration__"),
+        );
         // Checked AGAIN, after the await: an abort that lands mid-command kills
         // it and settles as `passed: false`, which is right for a gate that
         // never finished and wrong as an answer to "did this wave break the

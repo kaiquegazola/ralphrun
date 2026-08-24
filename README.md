@@ -296,6 +296,28 @@ tail -f ralph.out
 - **Worktrees isolate the filesystem, not the machine.** Ports, dev databases
   and code generators are shared no matter what this setting says.
 
+- **External resources have an explicit concurrency contract.** A task may set
+  `parallel: "safe"` only when its implementation and `verify` are safe beside
+  another task, and may describe `resources.database`, `resources.cache`,
+  `resources.ports`, and `resources.services`. Database/cache access is one of
+  `isolated`, `read`, `write`, or `reset`; two mutable users are serialized.
+  Missing metadata is treated as exclusive, and the runtime also downgrades a
+  falsely-safe task when its verify visibly runs migrations, resets/truncates,
+  touches Redis/queues, or uses Docker/cluster services; fixed ports are tracked
+  and equal port claims are kept out of the same wave.
+
+- **Per-task test identity is exported to child processes.** In a wave,
+  `RALPHRUN_RUN_ID`, `RALPHRUN_TASK_ID`, `RALPHRUN_TEST_RUN_ID`, `TEST_RUN_ID`,
+  and `TEST_DB_SUFFIX` identify the task. A project's test setup can use those
+  values to create a database per task and namespace Redis/queues, as xolotl
+  does. ralphrun cannot create an arbitrary project's database itself, so a
+  task must declare `resources.database: "isolated"` only when that setup really exists.
+  The in-process Cursor SDK backend is kept serial because its API has no
+  per-command environment hook; CLI executors and verify commands receive the
+  task identity directly. The post-wave integration gate uses a dedicated
+  `__ralphrun_integration__` identity, so its project setup must create that
+  namespace on demand.
+
 - `max_parallel_tasks` is how many tasks may execute at once. It is `1` by
   default — the serial loop, unchanged — and clamped to `[1, 8]`, because the
   binding constraint is agent spend and provider rate limits, not cores. Above
@@ -780,6 +802,14 @@ parallelized later. Where parallel branches converge, add an integration task
 whose `verify` runs the whole suite: N tasks each passing their own isolated
 gate can still be broken together.
 
+`parallel` is the external-resource contract. Use `"safe"` only when the task
+can execute alongside another; use `"exclusive"` for shared mutable state or
+uncertain cases. `resources` can declare `database` and `cache` as
+`isolated|read|write|reset`, plus named `ports` and `services`. A missing
+contract is conservative and runs serially when parallelism is enabled. The
+pre-run advisor is instructed to audit these risks, but the scheduler remains
+the final enforcement point.
+
 ```json
 {
   "id": "T2-data-model",
@@ -789,6 +819,8 @@ gate can still be broken together.
   "description": "Define the core entities and schema.",
   "acceptance": ["schema/migration files present", "migration runs clean"],
   "scope": ["src/db/**", "migrations/**"],
+  "parallel": "exclusive",
+  "resources": {"database": "reset"},
   "verify": "npm run typecheck && npm run test -- tests/data-model.test.ts && npm run migrate"
 }
 ```

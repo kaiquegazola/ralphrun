@@ -117,9 +117,10 @@ export async function runAdvisorCli(
   signal?: AbortSignal,
   /** where retry notices are recorded; callers without one just stay silent */
   progress?: string,
+  runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<string | null> {
   for (let attempt = 1; ; attempt++) {
-    const { answer, tail } = await runAdvisorCliAttempt(advis, prompt, cfg, workspace, taskId, source, signal);
+    const { answer, tail } = await runAdvisorCliAttempt(advis, prompt, cfg, workspace, taskId, source, signal, runtimeEnv);
     // An aborted call settled null because the USER skipped it — never a blip,
     // so no wait and no second spawn after the skip. Same for every null whose
     // pipes carry no network marker.
@@ -151,6 +152,7 @@ async function runAdvisorCliAttempt(
   taskId: string,
   source: "advisor" | "review",
   signal?: AbortSignal,
+  runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<{ answer: string | null; tail: string }> {
   // An in-process backend has no command line, and its RunResult IS the stdout
   // the spawn path below accumulates — same contract, same return type. The
@@ -198,7 +200,7 @@ async function runAdvisorCliAttempt(
         stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
         // merged OVER process.env, never replacing it: the cli's auth, model
         // config and PATH all have to survive the grant
-        ...(env ? { env: { ...process.env, ...env } } : {}),
+        ...((env || runtimeEnv) ? { env: { ...process.env, ...runtimeEnv, ...env } } : {}),
       });
       if (viaStdin) writePrompt(proc, prompt);
 
@@ -329,7 +331,7 @@ export async function advisorReview(
   // expensive has to say so in the durable log, not only in the config file.
   if (runs) log(progress, t("advisor.reviewExec", { id: task.id, s: cfg.review_timeout ?? cfg.advisor_timeout }));
   const prompt = reviewPrompt(task, prd, standards, diff, verification, runs, context);
-  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal, progress);
+  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal, progress, context?.runtimeEnv);
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the
     // executor nothing to fix. run.ts retries the reviewer with the same evidence

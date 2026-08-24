@@ -143,6 +143,8 @@ describe("advisorPrompt", () => {
     expect(advisorPrompt(task, prd, "STD")).toContain("Project standards");
     expect(advisorPrompt(task, prd)).not.toContain("Project standards");
     expect(advisorPrompt(task, prd)).toContain("a1; a2");
+    expect(advisorPrompt(task, prd)).toContain("Concurrency preflight");
+    expect(advisorPrompt(task, prd)).toContain("Treat missing isolation evidence as unsafe");
   });
 });
 

@@ -173,6 +173,8 @@ it("instructs the planner to declare deps only for consumed artifacts, and to sc
   expect(prompt).toContain("would this task FAIL if it ran first?");
   expect(prompt).toContain("do not manufacture parallelism");
   expect(prompt).toContain("must not declare overlapping scope");
+  expect(prompt).toContain("parallel: set safe only when");
+  expect(prompt).toContain("resources: when relevant");
   expect(prompt).toContain("acceptance item as a CHECKABLE statement");
   expect(prompt).toContain("add an integration task whose verify");
   expect(prompt).toContain("scope[]"); // the field is in the announced json shape

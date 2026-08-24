@@ -101,6 +101,21 @@ describe("prompt delivery", () => {
     expect(await p).toBe(true);
   });
 
+  it("passes per-task resource identity to the executor child", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runExecutor(execu, "THE PROMPT", cfg(), "ws", "prog", task, [], undefined, undefined, undefined, {
+      RALPHRUN_TASK_ID: "T2",
+    });
+    expect(spawnMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ env: expect.objectContaining({ RALPHRUN_TASK_ID: "T2" }) }),
+    );
+    closeProc(proc, 0);
+    expect(await p).toBe(true);
+  });
+
   // a cli that dies before reading (bad flags, no auth) closes the pipe under us;
   // an unhandled EPIPE on a child stream takes the whole process down
   it("survives a cli that exits before reading the piped prompt", async () => {

@@ -560,7 +560,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
     expect(mParseAgent).toHaveBeenCalled();
     expect(mMount).not.toHaveBeenCalled(); // non-TTY: no dashboard
-    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree", expect.any(Function), undefined);
+    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), undefined, undefined, "base-tree", expect.any(Function), undefined, expect.objectContaining({ RALPHRUN_TASK_ID: "T1" }));
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "init");
     // scoped to the task's own paths, so a file the user already had dirty is
     // never swept into a commit named after this task
@@ -1386,7 +1386,7 @@ describe("runLoop TTY dashboard", () => {
     // reporter routed into the TUI as an event carrying the current task id
     expect(handle.update).toHaveBeenCalledWith({ taskId: "T1", line: "mid", lineSource: "system" });
     // per-task abort signal came from the handle
-    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), SIG, undefined, "base-tree", expect.any(Function), undefined);
+    expect(mRunTask).toHaveBeenCalledWith(TASK, expect.anything(), expect.anything(), expect.any(String), expect.any(String), SIG, undefined, "base-tree", expect.any(Function), undefined, expect.objectContaining({ RALPHRUN_TASK_ID: "T1" }));
     expect(handle.control.takeSkip).toHaveBeenCalled();
     expect(handle.unmount).toHaveBeenCalled();
   });
@@ -1583,6 +1583,7 @@ describe("runLoop parallel waves", () => {
     retries: 0,
     description: "d",
     acceptance: [],
+    parallel: "safe",
     ...(scope ? { scope } : {}),
   });
 
@@ -1666,7 +1667,14 @@ describe("runLoop parallel waves", () => {
       // the 5th arg is the gate's OWN abort signal: every cell ended its own on the
       // way out, so without one this is the last thing a run does that a skip
       // cannot reach
-      expect(mVerifyCmd).toHaveBeenCalledWith("npm test", expect.any(String), resolve("."), expect.any(String), undefined);
+      expect(mVerifyCmd).toHaveBeenCalledWith(
+        "npm test",
+        "wave",
+        resolve("."),
+        expect.any(String),
+        undefined,
+        expect.objectContaining({ RALPHRUN_TASK_ID: "__ralphrun_integration__" }),
+      );
     });
 
     // Every cell ended its own signal on the way out, so without one of its own
@@ -1682,7 +1690,14 @@ describe("runLoop parallel waves", () => {
 
       await runLoop({ prd: "prd.json" });
 
-      expect(mVerifyCmd).toHaveBeenCalledWith("npm test", expect.any(String), expect.any(String), expect.any(String), SIG);
+      expect(mVerifyCmd).toHaveBeenCalledWith(
+        "npm test",
+        "wave",
+        expect.any(String),
+        expect.any(String),
+        SIG,
+        expect.objectContaining({ RALPHRUN_TASK_ID: "__ralphrun_integration__" }),
+      );
       // a settled phase must stop being one a keypress has to abort
       expect(handle.control.endTask).toHaveBeenCalledWith(SIG);
     });

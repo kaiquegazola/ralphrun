@@ -65,6 +65,8 @@ export async function runTask(
   onPlanGenerated?: (plan: string, planKey: string) => void,
   /** the previous attempt's closing account, if there was one */
   handoff?: string,
+  /** per-run/task IDs for project-specific test/database isolation */
+  runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<RunTaskResult> {
   const execu = cfg.executor;
   const advis = cfg.advisor;
@@ -88,6 +90,10 @@ export async function runTask(
     lastHandoff = undefined;
     return runExecutor(...args);
   };
+  const verify = (currentTask: Task, currentSignal?: AbortSignal): ReturnType<typeof runVerify> =>
+    runtimeEnv
+      ? runVerify(currentTask, workspace, progress, currentSignal, runtimeEnv)
+      : runVerify(currentTask, workspace, progress, currentSignal);
 
   // No verify command and no reviewer: "done" here means nothing more than "the
   // executor exited 0". That is a legitimate setup, but it is silent, and a PRD
@@ -101,9 +107,9 @@ export async function runTask(
     log(progress, t("run.log.native", { id: task.id, cli: execu.cli, model: execu.model, advisorModel: advis.model }));
     emit({ taskId: task.id, subphase: "executing", attempt });
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
-    const ok = await execute(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal);
+    const ok = await execute(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal, runtimeEnv);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
-    const passed = ok && (await runVerify(task, workspace, progress, signal)).passed;
+    const passed = ok && (await verify(task, signal)).passed;
     return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
   }
 
@@ -148,7 +154,7 @@ export async function runTask(
   if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
-  let ok = await execute(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
+  let ok = await execute(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal, runtimeEnv);
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -177,7 +183,7 @@ export async function runTask(
     // this is what stops the next round from starting at all.
     if (signal?.aborted) break;
     emit({ taskId: task.id, subphase: "verifying", round: { n: rnd, max: maxReviewCycles } });
-    const { passed: testOk, output: testOut } = await runVerify(task, workspace, progress, signal);
+    const { passed: testOk, output: testOut } = await verify(task, signal);
     lastVerificationPassed = testOk;
     emit({ taskId: task.id, subphase: "reviewing" });
     // The verify verdict goes WITH the diff: these two gates judge the same
@@ -192,6 +198,7 @@ export async function runTask(
       previousFindings: priorFindings,
       previousHandoff: lastHandoff,
       executionReport: parseExecutionReport(lastHandoff),
+      ...(runtimeEnv ? { runtimeEnv } : {}),
       previousVerification: rnd > 1 ? { passed: previousVerificationPassed, output: previousVerificationOutput } : undefined,
       previousDiff,
     };
@@ -271,7 +278,7 @@ export async function runTask(
     );
     fixPrompt += "\n\n" + feedback;
     emit({ taskId: task.id, subphase: "fixing" });
-    ok = await execute(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal);
+    ok = await execute(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal, runtimeEnv);
   }
 
   log(progress, t("run.log.exhausted", { id: task.id }));
@@ -300,7 +307,7 @@ export async function runTask(
   // with review off the loop above breaks on the abort with lastApproved
   // vacuously true, so the skip lands here — straight into a gate that would
   // otherwise run the suite for its full 600s after the user abandoned the task.
-  const passed = ok && (await runVerify(task, workspace, progress, signal)).passed;
+  const passed = ok && (await verify(task, signal)).passed;
   return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
 }
 

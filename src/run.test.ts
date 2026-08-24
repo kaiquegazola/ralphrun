@@ -82,7 +82,7 @@ describe("runTask NATIVE", () => {
     expect(result.ok).toBe(true);
     expect(mExec).toHaveBeenCalledWith(
       c.executor, "PROMPT", c, "/ws", "/prog", task, ["--advisor", "fable"], undefined,
-      expect.any(Function), expect.any(Function),
+      expect.any(Function), expect.any(Function), undefined,
     );
   });
 
@@ -195,7 +195,7 @@ describe("runTask CROSS", () => {
   it("injects reviewer feedback into a human-requested retry prompt", async () => {
     const result = await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", undefined, "fix the missing gate");
     expect(result.ok).toBe(true);
-    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function), expect.any(Function));
+    expect(mExec).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("fix the missing gate"), expect.anything(), "/ws", "/prog", expect.anything(), [], undefined, expect.any(Function), expect.any(Function), undefined);
   });
 
   it("reuses plan if task.plan is already set", async () => {

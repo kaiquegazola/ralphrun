@@ -2,6 +2,15 @@
 
 export type TaskStatus = "todo" | "doing" | "done" | "blocked";
 
+export type ResourceAccess = "isolated" | "read" | "write" | "reset";
+
+export interface TaskResources {
+  database?: ResourceAccess;
+  cache?: ResourceAccess;
+  ports?: string[];
+  services?: string[];
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -19,6 +28,10 @@ export interface Task {
   // of an LLM judgement call. An empty scope declares nothing and so gates
   // nothing (nor does a workspace with no git baseline to diff against).
   scope?: string[];
+  /** Explicit concurrency contract. Missing means conservative serial execution. */
+  parallel?: "safe" | "exclusive";
+  /** External resources the task's verify or implementation may touch. */
+  resources?: TaskResources;
   verify?: string;
   plan?: string;
   planKey?: string;

@@ -4,6 +4,7 @@
 // commit — lives in taskrun.ts, along with pickWave and the integration gate.
 
 import { writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { type Config } from "./config.js";
 import { t } from "./i18n.js";
@@ -78,6 +79,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     // menu is reachable mid-run and rewrites ralph.config.json, so a re-read per
     // iteration would let a run raise its own budget from the inside.
     maxCostUsd: Math.max(0, cfg.max_cost_usd ?? 0),
+    runId: randomUUID(),
     cfg,
     tui,
     curTaskId: "",

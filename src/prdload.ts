@@ -10,9 +10,10 @@ import { readFileSync } from "node:fs";
 
 // aliased: per-task loop vars below are named `t` and would shadow t()
 import { t as msg } from "./i18n.js";
-import type { PRD } from "./prd.js";
+import type { PRD, ResourceAccess, TaskResources } from "./prd.js";
 
 const STATUSES = new Set(["todo", "doing", "done", "blocked"]);
+const RESOURCE_ACCESS = new Set<ResourceAccess>(["isolated", "read", "write", "reset"]);
 
 // SAFE coercions only, superset of the old normalizeDraft + recoverAndNormalize:
 // invalid/missing status → enum-coerced (case-insensitive) else "todo"; then
@@ -317,6 +318,20 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
       if (!Array.isArray(t.scope)) errors.push(msg("prd.err.scope", { i }));
       else if (t.scope.some((s) => typeof s !== "string")) errors.push(msg("prd.err.scopeItem", { i }));
     }
+    if (t.parallel !== undefined && t.parallel !== "safe" && t.parallel !== "exclusive")
+      errors.push(msg("prd.err.parallel", { i }));
+    if (t.resources !== undefined) {
+      const r = t.resources as Record<string, unknown>;
+      if (!r || typeof r !== "object" || Array.isArray(r)) errors.push(msg("prd.err.resources", { i }));
+      else {
+        for (const key of ["database", "cache"] as const)
+          if (r[key] !== undefined && !RESOURCE_ACCESS.has(r[key] as ResourceAccess))
+            errors.push(msg("prd.err.resourceAccess", { i, key }));
+        for (const key of ["ports", "services"] as const)
+          if (r[key] !== undefined && (!Array.isArray(r[key]) || r[key].some((x) => typeof x !== "string")))
+            errors.push(msg("prd.err.resourceList", { i, key }));
+      }
+    }
     if (t.verify !== undefined && typeof t.verify !== "string") errors.push(msg("prd.err.verify", { i }));
     if (t.plan !== undefined && typeof t.plan !== "string") errors.push(msg("prd.err.plan", { i }));
     if (t.planKey !== undefined && typeof t.planKey !== "string") errors.push(msg("prd.err.planKey", { i }));
@@ -363,6 +378,20 @@ function seedSafe(obj: object): PRD {
     if (!Array.isArray(t.acceptance)) t.acceptance = [];
     t.acceptance = (t.acceptance as unknown[]).map(String); // React can't render object children
     if (t.verify !== undefined && typeof t.verify !== "string") delete t.verify;
+    if (t.parallel !== undefined && t.parallel !== "safe" && t.parallel !== "exclusive") delete t.parallel;
+    if (t.resources !== undefined) {
+      const r = t.resources as Record<string, unknown>;
+      if (!r || typeof r !== "object" || Array.isArray(r)) delete t.resources;
+      else {
+        const safe: TaskResources = {};
+        for (const key of ["database", "cache"] as const)
+          if (RESOURCE_ACCESS.has(r[key] as ResourceAccess)) safe[key] = r[key] as ResourceAccess;
+        for (const key of ["ports", "services"] as const)
+          if (Array.isArray(r[key]) && r[key].every((x) => typeof x === "string")) safe[key] = r[key] as string[];
+        if (Object.keys(safe).length) t.resources = safe;
+        else delete t.resources;
+      }
+    }
     if (t.plan !== undefined && typeof t.plan !== "string") delete t.plan;
     if (t.planKey !== undefined && typeof t.planKey !== "string") delete t.planKey;
   }

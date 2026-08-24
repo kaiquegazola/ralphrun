@@ -26,10 +26,11 @@ export function runVerify(
   workspace: string,
   progress: string,
   signal?: AbortSignal,
+  runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<{ passed: boolean; output: string }> {
   const cmd = task.verify;
   if (!cmd) return Promise.resolve({ passed: true, output: "" });
-  return runVerifyCommand(cmd, task.id, workspace, progress, signal);
+  return runVerifyCommand(cmd, task.id, workspace, progress, signal, runtimeEnv);
 }
 
 /**
@@ -52,13 +53,19 @@ export function runVerifyCommand(
   workspace: string,
   progress: string,
   signal?: AbortSignal,
+  runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<{ passed: boolean; output: string }> {
   return new Promise((resolve) => {
     // never start one after the abort: the caller is already unwinding
     if (signal?.aborted) return resolve({ passed: false, output: "" });
     let proc;
     try {
-      proc = spawn(cmd, [], { cwd: workspace, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+      proc = spawn(cmd, [], {
+        cwd: workspace,
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: runtimeEnv ? { ...process.env, ...runtimeEnv } : undefined,
+      });
     } catch (e) {
       log(progress, t("verify.crashed", { id: label, msg: e instanceof Error ? e.message : String(e) }));
       return resolve({ passed: false, output: String(e) });

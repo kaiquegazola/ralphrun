@@ -57,6 +57,19 @@ describe("runVerify", () => {
     expect(await p).toEqual({ passed: true, output: "" });
   });
 
+  it("passes per-task resource identity to the verify child", async () => {
+    const proc = makeProc();
+    spawnMock.mockReturnValue(proc);
+    const p = runVerify(task(), "/w", "prog", undefined, { RALPHRUN_TASK_ID: "T2", TEST_DB_SUFFIX: "run-T2" });
+    expect(spawnMock).toHaveBeenCalledWith(
+      "npm test",
+      [],
+      expect.objectContaining({ env: expect.objectContaining({ RALPHRUN_TASK_ID: "T2", TEST_DB_SUFFIX: "run-T2" }) }),
+    );
+    proc.emit("close", 0);
+    await p;
+  });
+
   it("merges stdout and stderr into the feedback output", async () => {
     const proc = makeProc();
     spawnMock.mockReturnValue(proc);

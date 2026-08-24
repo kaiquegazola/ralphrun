@@ -14,6 +14,7 @@ import {
   parseReview,
   reviewPrompt,
   type ReviewContext,
+  type ReviewCommit,
   type ReviewFinding,
   type VerificationEvidence,
 } from "./prompts.js";
@@ -81,6 +82,9 @@ export interface AdvisorReviewResult {
   changes: string;
   diff: string;
   findings?: ReviewFinding[];
+  /** No actionable verdict arrived; retry the reviewer before asking the executor to change code. */
+  reviewRetryable?: boolean;
+  commit?: ReviewCommit;
   /**
    * A durable fact for the architecture notes, when the reviewer judged this
    * task taught one. Rides on the review call the task already makes, so it
@@ -321,10 +325,10 @@ export async function advisorReview(
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal, progress);
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the
-    // executor nothing to fix, so the fix loop breaks out (run.ts) and the task
-    // blocks for a human rather than burning rounds re-running a dead reviewer.
+    // executor nothing to fix. run.ts retries the reviewer with the same evidence
+    // instead of sending the executor into a blind fix round.
     log(progress, t("advisor.reviewFailed", { id: task.id }));
-    return { approved: false, changes: "", diff };
+    return { approved: false, changes: "", diff, reviewRetryable: true };
   }
   const parsed = parseReview(out);
   // Neither APPROVE nor CHANGES. Same empty-`changes` reasoning as above, but the
@@ -338,7 +342,7 @@ export async function advisorReview(
     line: parsed.approved ? "APPROVE" : compactLine(parsed.changes || out),
     lineSource: "review",
   });
-  return { ...parsed, diff };
+  return { ...parsed, diff, ...(!parsed.approved && !parsed.changes ? { reviewRetryable: true } : {}) };
 }
 
 function compactLine(value: string, max = 500): string {

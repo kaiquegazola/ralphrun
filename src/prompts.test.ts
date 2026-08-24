@@ -351,6 +351,32 @@ describe("parseReview", () => {
   it("parses structured approval and does not carry findings", () => {
     expect(parseReview('{"verdict":"APPROVE","findings":[]}')).toEqual({ approved: true, changes: "", findings: [] });
   });
+  it("parses a valid Conventional Commit proposal only on approval", () => {
+    expect(
+      parseReview(
+        '{"verdict":"APPROVE","findings":[],"commit":{"type":"feat","scope":"review-loop","subject":"make review handoff adaptive"}}',
+      ),
+    ).toEqual({
+      approved: true,
+      changes: "",
+      findings: [],
+      commit: { type: "feat", scope: "review-loop", subject: "make review handoff adaptive" },
+    });
+  });
+  it("drops malformed commit metadata and keeps the approval", () => {
+    const r = parseReview('{"verdict":"APPROVE","findings":[],"commit":{"type":"wat","subject":"bad"}}');
+    expect(r).toEqual({ approved: true, changes: "", findings: [] });
+  });
+  it("drops commit metadata containing control characters", () => {
+    const r = parseReview(
+      '{"verdict":"APPROVE","findings":[],"commit":{"type":"fix","scope":"review\\u0000","subject":"safe"}}',
+    );
+    expect(r).toEqual({ approved: true, changes: "", findings: [] });
+  });
+  it("does not accept commit metadata on CHANGES", () => {
+    const r = parseReview('{"verdict":"CHANGES","findings":[],"commit":{"type":"fix","subject":"fix it"}}');
+    expect(r).toEqual({ approved: false, changes: "", findings: [] });
+  });
 });
 
 // A retry starts a brand-new session in a workspace whose previous attempt may

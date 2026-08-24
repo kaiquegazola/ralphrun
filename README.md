@@ -686,11 +686,21 @@ need the log in English; the samples below are the `en` rendering.
   log rather than losing the task's work. That commit *can* sweep in unrelated
   dirty files. Committing beats dropping the work; in worktree mode the sweep is
   confined to the cell anyway.
+- **Reviewer-proposed commit messages**: a structured `APPROVE` may include
+  `commit: { type, scope?, subject }`. The loop validates it and formats a
+  Conventional Commit such as `fix(review): handle rejected input`; it is used
+  only after the executor, verification and review gates pass. Missing or
+  invalid metadata, legacy approvals and manual approvals fall back to
+  `commit_message_template`. The reviewer never runs git.
 - **The review gate fails closed**: a reviewer that timed out or crashed, and an
   answer that is neither `APPROVE` nor `CHANGES`, both count as *not approved*.
   Each used to pass as an approval, which let a task reach `done` with nothing
   having judged it. A task blocked this way is offered for manual approval in
   the TUI (only if its tests passed) and the reason is in `progress.md`.
+  If executor and tests already pass but the reviewer gives no actionable
+  verdict, the loop retries the reviewer with the same evidence; it does not
+  ask the executor to make a blind fix. These retries consume the configured
+  review-cycle budget, capped by the absolute 20-cycle ceiling.
 - **An empty diff is the reviewer's call**: when the executor changes nothing,
   the review still runs — it is told there is no diff and decides whether this
   task's acceptance can hold without one. A task that only asks to confirm

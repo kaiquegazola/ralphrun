@@ -19,7 +19,7 @@ import { log } from "./log.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readyTasks, type PRD, type Task } from "./prd.js";
 import { appendLearnedNote, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
-import { formatReviewFindings, readStandards } from "./prompts.js";
+import { formatReviewCommit, formatReviewFindings, readStandards, type ReviewCommit } from "./prompts.js";
 import { runTask, type RunTaskResult } from "./run.js";
 import { formatCost, mergeCost, type CostTally } from "./stream.js";
 import { type RunOptions } from "./startrun.js";
@@ -142,11 +142,14 @@ function logTaskCommit(
   title: string,
   cfg: Config,
   base?: string | null,
+  reviewCommit?: ReviewCommit,
 ): boolean {
   const before = headCommit(workspace);
   // function replacers: a literal id/title is used verbatim (a "$&"/"$1" in a
   // task title must not be interpreted as a replacement pattern).
-  const msg = (cfg.commit_message_template || "{id}: {title}").replace(/{id}/g, () => id).replace(/{title}/g, () => title);
+  const msg =
+    formatReviewCommit(reviewCommit) ??
+    (cfg.commit_message_template || "{id}: {title}").replace(/{id}/g, () => id).replace(/{title}/g, () => title);
   // Stage only what THIS task moved. `git add -A` also swept up whatever the
   // user happened to have uncommitted when the run started, putting their
   // unrelated work in a commit named after a task that never touched it — and
@@ -413,9 +416,17 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     // "someone already said, with a sha, what happened to this worktree's work" —
     // so the discard notice below does not repeat a line the merge already wrote.
     let worktreeAccounted = false;
-    const landWorktreeWork = (): LandResult => {
+    const landWorktreeWork = (reviewCommit?: ReviewCommit): LandResult => {
       if (!wt) return "ok";
-      const committed = logTaskCommit(taskWorkspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id));
+      const committed = logTaskCommit(
+        taskWorkspace,
+        progress,
+        task.id,
+        task.title,
+        ctx.cfg,
+        taskBaselines.get(task.id),
+        reviewCommit,
+      );
       const m = mergeBackTaskWork(workspace, wt, taskStartCommit);
       // "nothing to pick" is legitimate only when there was nothing to commit.
       // With a commit git refused — a pre-commit hook, an unset identity — the
@@ -585,7 +596,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       // Worktree mode lands the work BEFORE the status write: a task whose
       // commits cannot be cherry-picked back must never be recorded as done
       // with nothing in the main workspace to show for it. No-op serially.
-      const landed = !skipped && result.ok ? landWorktreeWork() : "ok";
+      const landed = !skipped && result.ok ? landWorktreeWork(result.commit) : "ok";
 
       if (skipped) {
         taskBaselines.delete(task.id);
@@ -607,7 +618,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         // landWorktreeWork already committed, because there the commit is the
         // only way the work gets out.
         if (ctx.cfg.commit_per_task && !wt) {
-          logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id));
+          logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id), result.commit);
         }
         taskBaselines.delete(task.id);
       } else if (landed === "dirty" || landed === "uncommitted") {

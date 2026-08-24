@@ -99,6 +99,13 @@ describe("runTask CROSS", () => {
     expect(mInject).toHaveBeenCalled();
   });
 
+  it("returns the reviewer commit proposal only after an approved round", async () => {
+    const commit = { type: "fix" as const, scope: "review", subject: "handle rejected input" };
+    mReview.mockResolvedValue({ approved: true, changes: "", diff: "D", commit });
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result).toMatchObject({ ok: true, commit });
+  });
+
   it("reviews against the baseline captured by the loop", async () => {
     const c = cfg({ advisor: { cli: "grok", model: "g" } });
     await runTask(task, prd, c, "/ws", "/prog", undefined, undefined, "task-start");
@@ -395,16 +402,15 @@ describe("runTask CROSS", () => {
     expect(result.ok).toBe(true);
   });
 
-  // A reviewer that could not answer gives the executor nothing to fix, so the
-  // fix loop must stop on the spot rather than re-running a dead reviewer for
-  // every remaining round — and the task must NOT come back done.
-  it("a not-approved review with no actionable changes fails fast, without more rounds", async () => {
-    mReview.mockResolvedValue({ approved: false, changes: "", diff: "d" });
-    mFeedback.mockReturnValue(""); // exec ok + tests ok + nothing to say about the review
+  // A reviewer that could not answer gives the executor nothing to fix. Retry
+  // the reviewer with the same evidence, but never send the executor into a
+  // blind fix round; the task still must NOT come back done if all retries fail.
+  it("retries a not-approved review with no actionable changes", async () => {
+    mReview.mockResolvedValue({ approved: false, changes: "", diff: "d", reviewRetryable: true });
     const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
     expect(result).toMatchObject({ ok: false, reason: "review_exhausted" });
-    expect(mExec).toHaveBeenCalledTimes(1); // no fix round was attempted
-    expect(mReview).toHaveBeenCalledTimes(1);
+    expect(mExec).toHaveBeenCalledTimes(1); // no blind fix round was attempted
+    expect(mReview).toHaveBeenCalledTimes(3); // configured soft limit, below the absolute 20-cycle ceiling
   });
 });
 

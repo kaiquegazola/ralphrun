@@ -202,11 +202,32 @@ export interface ReviewContext {
   previousDiff?: string;
 }
 
+/** Conventional Commit metadata proposed by the reviewer after approval. */
+export type ConventionalCommitType =
+  | "feat"
+  | "fix"
+  | "build"
+  | "chore"
+  | "ci"
+  | "docs"
+  | "perf"
+  | "refactor"
+  | "revert"
+  | "style"
+  | "test";
+
+export interface ReviewCommit {
+  type: ConventionalCommitType;
+  scope?: string;
+  subject: string;
+}
+
 export interface ParsedReview {
   approved: boolean;
   changes: string;
   findings?: ReviewFinding[];
   note?: string;
+  commit?: ReviewCommit;
 }
 
 /**
@@ -362,7 +383,7 @@ Judge whether the diff meets the acceptance AND the project standards.
 
 Reply with EXACTLY one of:
   VERDICT: APPROVE
-  {"verdict":"APPROVE","findings":[]}
+  {"verdict":"APPROVE","findings":[],"commit":{"type":"feat","scope":"review-loop","subject":"make review handoff adaptive"}}
   VERDICT: CHANGES
   {"verdict":"CHANGES","findings":[{"id":"R1","severity":"blocker|major|minor","criterion":"AC-1","location":"path:line","problem":"...","fix":"...","evidence":"..."}]}
 
@@ -371,6 +392,12 @@ blocker/major findings should be returned with CHANGES; minor observations belon
 the gate nor the required fixes. Every blocking finding needs a concrete fix and evidence
 (acceptance criterion, file/line, test output, or an observed behavior). Do not return a
 finding merely because a different implementation would be nicer.
+
+In the structured APPROVE response, include the optional commit object only when you can
+describe the accepted change clearly. It is metadata, not an instruction to run git. Use a
+Conventional Commit type (feat, fix, build, chore, ci, docs, perf, refactor, revert, style,
+or test), an optional short scope, and an imperative single-line subject of at most 72
+characters. Do not include commit metadata on CHANGES.
 
 After APPROVE only, you MAY add one more line:
   NOTE: <one line a LATER task would waste an agent run without>
@@ -466,7 +493,7 @@ function parseStructuredReview(verdict: string): ParsedReview | undefined {
     try {
       const raw: unknown = JSON.parse(candidate);
       if (!raw || typeof raw !== "object") continue;
-      const value = raw as { verdict?: unknown; findings?: unknown; note?: unknown };
+      const value = raw as { verdict?: unknown; findings?: unknown; note?: unknown; commit?: unknown };
       const verdictValue = typeof value.verdict === "string" ? value.verdict.toUpperCase() : "";
       if (verdictValue !== "APPROVE" && verdictValue !== "CHANGES") continue;
       const findings = Array.isArray(value.findings)
@@ -481,12 +508,53 @@ function parseStructuredReview(verdict: string): ParsedReview | undefined {
       if (approved && typeof value.note === "string" && value.note.trim()) {
         result.note = value.note.trim().slice(0, MAX_NOTE_CHARS);
       }
+      if (approved) {
+        const commit = normalizeReviewCommit(value.commit);
+        if (commit) result.commit = commit;
+      }
       return result;
     } catch {
       // A malformed structured answer falls through to the fail-closed legacy parser.
     }
   }
   return undefined;
+}
+
+const CONVENTIONAL_COMMIT_TYPES = new Set<ConventionalCommitType>([
+  "feat",
+  "fix",
+  "build",
+  "chore",
+  "ci",
+  "docs",
+  "perf",
+  "refactor",
+  "revert",
+  "style",
+  "test",
+]);
+
+function normalizeReviewCommit(raw: unknown): ReviewCommit | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const type = typeof value.type === "string" ? value.type.trim().toLowerCase() : "";
+  const subject = typeof value.subject === "string" ? value.subject.trim() : "";
+  const scope = typeof value.scope === "string" ? value.scope.trim() : undefined;
+  if (!CONVENTIONAL_COMMIT_TYPES.has(type as ConventionalCommitType)) return undefined;
+  if (!subject || subject.length > 72 || /[\u0000-\u001F\u007F]/.test(subject)) return undefined;
+  if (scope !== undefined && (!scope || scope.length > 40 || /[()\u0000-\u001F\u007F]/.test(scope))) return undefined;
+  return {
+    type: type as ConventionalCommitType,
+    ...(scope ? { scope } : {}),
+    subject,
+  };
+}
+
+/** Format trusted reviewer metadata, returning undefined for unsafe/malformed input. */
+export function formatReviewCommit(commit?: ReviewCommit): string | undefined {
+  const normalized = normalizeReviewCommit(commit);
+  if (!normalized) return undefined;
+  return `${normalized.type}${normalized.scope ? `(${normalized.scope})` : ""}: ${normalized.subject}`;
 }
 
 function normalizeFinding(raw: unknown): ReviewFinding | undefined {

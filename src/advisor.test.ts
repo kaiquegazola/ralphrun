@@ -443,7 +443,7 @@ describe("advisorReview", () => {
     const ac = new AbortController();
     ac.abort();
     const p = advisorReview(task, prd, { cli: "opencode", model: "m" }, cfg, "ws", "prog", "std", undefined, undefined, ac.signal);
-    expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
+    expect(await p).toEqual({ approved: false, changes: "", diff: "some diff", reviewRetryable: true });
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
@@ -457,6 +457,7 @@ describe("advisorReview", () => {
       approved: false,
       changes: "",
       diff: "some diff",
+      reviewRetryable: true,
     });
   });
 
@@ -473,6 +474,7 @@ describe("advisorReview", () => {
       approved: false,
       changes: "",
       diff: "some diff",
+      reviewRetryable: true,
     });
     expect(spawnMock).not.toHaveBeenCalled();
   });
@@ -487,8 +489,8 @@ describe("advisorReview", () => {
   });
 
   // A reviewer that never answered has judged nothing, so it cannot approve.
-  // `changes` stays empty: there is nothing for the executor to fix, which is
-  // what makes run.ts break out of the fix loop instead of spinning on it.
+  // `changes` stays empty: there is nothing for the executor to fix, so run.ts
+  // retries the reviewer instead of sending the executor into a blind fix.
   it("does NOT approve and logs when review CLI throws synchronously", async () => {
     diffMock.mockReturnValue("some diff");
     spawnMock.mockImplementationOnce(() => {
@@ -498,6 +500,7 @@ describe("advisorReview", () => {
       approved: false,
       changes: "",
       diff: "some diff",
+      reviewRetryable: true,
     });
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("NOT approving"));
   });
@@ -510,6 +513,7 @@ describe("advisorReview", () => {
       approved: false,
       changes: "",
       diff: "some diff",
+      reviewRetryable: true,
     });
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("NOT approving"));
   });
@@ -522,7 +526,7 @@ describe("advisorReview", () => {
     const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
     mockChild.stdout.end("I would rather not judge this\n");
     finishSpawn(0);
-    expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
+    expect(await p).toEqual({ approved: false, changes: "", diff: "some diff", reviewRetryable: true });
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("I would rather not judge this"));
   });
 });
@@ -600,7 +604,7 @@ describe("network-blip retry", () => {
           await flush();
         }
       }
-      expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
+      expect(await p).toEqual({ approved: false, changes: "", diff: "some diff", reviewRetryable: true });
       expect(spawnMock).toHaveBeenCalledTimes(NETWORK_RETRY_DELAYS_MS.length + 1);
       expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("review failed to answer"));
     } finally {

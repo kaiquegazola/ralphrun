@@ -580,6 +580,17 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], "T1: Task one");
   });
 
+  it("uses a valid reviewer commit proposal for an automatic commit", async () => {
+    fastTimers();
+    mRunTask.mockResolvedValueOnce({
+      ok: true,
+      cost: NO_COST,
+      commit: { type: "fix", scope: "review", subject: "handle rejected input" },
+    });
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "grok:g" });
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], "fix(review): handle rejected input");
+  });
+
   it("skips the commit entirely when the task moved nothing", async () => {
     fastTimers();
     mTaskChangedPaths.mockReturnValue([]);

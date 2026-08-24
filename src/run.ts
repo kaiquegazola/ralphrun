@@ -13,6 +13,7 @@ import {
   injectHandoff,
   injectReviewContext,
   readStandards,
+  type ReviewCommit,
   type ReviewFinding,
 } from "./prompts.js";
 import { runExecutor } from "./executor.js";
@@ -31,6 +32,8 @@ export interface RunTaskResult {
   reason?: RunTaskFailureReason;
   reviewChanges?: string;
   reviewFindings?: ReviewFinding[];
+  /** Conventional Commit metadata proposed by the reviewer on APPROVE. */
+  commit?: ReviewCommit;
   verificationPassed?: boolean;
   /** every executor call this attempt made, including the fix rounds */
   cost: CostTally;
@@ -184,7 +187,7 @@ export async function runTask(
       previousVerification: rnd > 1 ? { passed: previousVerificationPassed, output: previousVerificationOutput } : undefined,
       previousDiff,
     };
-    const { approved, changes, diff = "", note, findings = [] } =
+    const { approved, changes, diff = "", note, commit, findings = [], reviewRetryable = false } =
       reviewOn && advis
         ? await advisorReview(
             task,
@@ -206,11 +209,21 @@ export async function runTask(
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
     if (ok && testOk && approved) {
       log(progress, t("run.log.pass", { id: task.id, n: rnd }));
-      return { ok: true, cost, handoff: lastHandoff, note };
+      return { ok: true, cost, handoff: lastHandoff, note, commit };
     }
-    if (ok && testOk && !approved) {
+    if (ok && testOk && !approved && !reviewRetryable) {
       log(progress, t("run.log.reviewChanges", { id: task.id, n: rnd }));
       if (changes.trim()) log(progress, t("run.log.reviewFeedback", { id: task.id, changes: compactReviewChanges(changes, 1000) }));
+    }
+    if (ok && testOk && !approved && reviewRetryable) {
+      previousDiff = diff;
+      previousVerificationOutput = testOut;
+      previousVerificationPassed = testOk;
+      if (rnd < maxReviewCycles) {
+        log(progress, t("run.log.reviewRetrying", { id: task.id, n: rnd }));
+        continue;
+      }
+      break;
     }
     const reviewFeedback = changes.trim() || (findings.length ? formatReviewFindings(findings) : "");
     const feedback = assembleFeedback(ok, testOk, testOut, approved, reviewFeedback);

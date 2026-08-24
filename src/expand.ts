@@ -80,7 +80,7 @@ export async function expandSkeletonTask(
   signal?: AbortSignal,
 ): Promise<TaskPatch | null> {
   log(progress, t("expand.log.start", { id: task.id }));
-  const out = await runAdvisorCli(advis, taskExpandPrompt(task, prd), cfg, workspace, task.id, "advisor", signal);
+  const out = await runAdvisorCli(advis, taskExpandPrompt(task, prd), cfg, workspace, task.id, "advisor", signal, progress);
   const patch = parseTaskPatch(lastJsonObject(out ?? ""), task.id);
   if (!patch) {
     log(progress, t("expand.log.failed", { id: task.id }));

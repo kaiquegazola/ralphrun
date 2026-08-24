@@ -158,6 +158,7 @@ const en = {
   "advisor.reviewNoDiff": "  {id}: executor changed nothing — asking the reviewer whether this task needed a change",
   "advisor.reviewUnparsed": "  {id}: review answered neither APPROVE nor CHANGES — NOT approving. It said: {out}",
   "advisor.reviewExec": "  {id}: reviewer is running its own checks (up to {s}s, costs a full agent turn)",
+  "advisor.networkRetry": "  {id}: {src} died on a network error — retrying in {s}s ({n}/{max})",
 
   // wizard.ts
   "wizard.nontty.exists":
@@ -508,6 +509,7 @@ const ptBr: Record<MsgKey, string> = {
   "advisor.reviewNoDiff": "  {id}: executor não mudou nada — perguntando ao reviewer se esta task exigia mudança",
   "advisor.reviewUnparsed": "  {id}: review não respondeu nem APPROVE nem CHANGES — NÃO aprovando. Ele disse: {out}",
   "advisor.reviewExec": "  {id}: reviewer está rodando as próprias verificações (até {s}s, custa um turno inteiro de agente)",
+  "advisor.networkRetry": "  {id}: {src} caiu por erro de rede — tentando de novo em {s}s ({n}/{max})",
 
   "wizard.nontty.exists":
     "ralphrun init: prd.json / ralph.config.json já existem — rode de novo com --force para sobrescrever.",

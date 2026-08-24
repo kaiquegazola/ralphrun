@@ -18,6 +18,57 @@ import { emit } from "./tui/events.js";
 // 'close' may never arrive. Settle on our own after this.
 const KILL_GRACE_MS = 5_000;
 
+// A provider blip — finish_reason: network_error, a reset socket, a 5xx — kills
+// the cli call before it says a word, and every null below reads as "not
+// approved". That is how one flaky minute used to burn a review round and block
+// a task whose code was fine: infrastructure no executor fix could address.
+// The tail of what the child printed (BOTH pipes — some clis announce provider
+// errors on stdout) is matched against these markers; every other way of
+// settling null (timeout, abort, empty answer) keeps the old behaviour.
+const NETWORK_BLIP_MARKERS = [
+  "network_error",
+  "network error",
+  "econnreset",
+  "econnrefused",
+  "econnaborted",
+  "etimedout",
+  "enotfound",
+  "eai_again",
+  "fetch failed",
+  "socket hang up",
+  "rate limit",
+  "overloaded",
+  "bad gateway",
+  "service unavailable",
+];
+// Five escalating shots — a dead Wi-Fi minute, an ISP blip or a provider
+// incident all outlast one short wait, and burning a whole task round (plus its
+// executor re-run) costs far more than ~4 minutes of patient backoff ever will.
+// Exported for the tests, which walk the whole ladder.
+export const NETWORK_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000];
+
+function looksLikeNetworkBlip(tail: string): boolean {
+  const hay = tail.toLowerCase();
+  return NETWORK_BLIP_MARKERS.some((m) => hay.includes(m));
+}
+
+/** resolves true when the wait elapsed; false when the abort cut it short */
+function delayMs(ms: number, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(false);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export interface AdvisorReviewResult {
   approved: boolean;
   changes: string;
@@ -44,7 +95,7 @@ function reviewerRuns(advis: AgentSpec, cfg: Config): boolean {
 
 // exported for expand.ts: the JIT expansion rides the same spawn/parse path as
 // guidance and review — one cli call, text back, no event stream.
-export function runAdvisorCli(
+export async function runAdvisorCli(
   advis: AgentSpec,
   prompt: string,
   cfg: Config,
@@ -52,12 +103,51 @@ export function runAdvisorCli(
   taskId: string,
   source: "advisor" | "review",
   signal?: AbortSignal,
+  /** where retry notices are recorded; callers without one just stay silent */
+  progress?: string,
 ): Promise<string | null> {
+  for (let attempt = 1; ; attempt++) {
+    const { answer, tail } = await runAdvisorCliAttempt(advis, prompt, cfg, workspace, taskId, source, signal);
+    // An aborted call settled null because the USER skipped it — never a blip,
+    // so no wait and no second spawn after the skip. Same for every null whose
+    // pipes carry no network marker.
+    if (answer !== null || signal?.aborted || attempt > NETWORK_RETRY_DELAYS_MS.length || !looksLikeNetworkBlip(tail)) {
+      return answer;
+    }
+    if (progress) {
+      const waitMs = NETWORK_RETRY_DELAYS_MS[attempt - 1];
+      log(
+        progress,
+        t("advisor.networkRetry", {
+          id: taskId,
+          src: source,
+          s: Math.round(waitMs / 1000),
+          n: attempt,
+          max: NETWORK_RETRY_DELAYS_MS.length,
+        }),
+      );
+    }
+    if (!(await delayMs(NETWORK_RETRY_DELAYS_MS[attempt - 1], signal))) return null;
+  }
+}
+
+async function runAdvisorCliAttempt(
+  advis: AgentSpec,
+  prompt: string,
+  cfg: Config,
+  workspace: string,
+  taskId: string,
+  source: "advisor" | "review",
+  signal?: AbortSignal,
+): Promise<{ answer: string | null; tail: string }> {
   // An in-process backend has no command line, and its RunResult IS the stdout
   // the spawn path below accumulates — same contract, same return type. The
   // signal goes with it: a control honoured on the spawn reviewer and not on the
   // sdk one is the same one-backend wiring the handoff already got wrong once.
-  if (agentDef(advis.cli)?.sdk) return runCursorSdkText(advis, prompt, cfg, workspace, taskId, source, undefined, signal);
+  // ponytail: KNOWN CEILING — the sdk runner keeps its error text to itself, so
+  // its failures never match the markers and never retry.
+  if (agentDef(advis.cli)?.sdk)
+    return { answer: await runCursorSdkText(advis, prompt, cfg, workspace, taskId, source, undefined, signal), tail: "" };
   // autoApprove stays FALSE on both calls — the advisor must not be able to write.
   // The review additionally asks for the cli's read-only tools: the diff it judges
   // is cut at 12k chars and can be empty, and a reviewer with no way to open a file
@@ -73,10 +163,10 @@ export function runAdvisorCli(
   let granted: ReturnType<NonNullable<AgentDef["reviewEnv"]>> | undefined;
   try {
     granted = source === "review" ? agentDef(advis.cli)?.reviewEnv?.(exec ? "exec" : "read", workspace) : undefined;
-  } catch {
+  } catch (e) {
     // a grant that cannot even be written must fail the review — NEVER fall
     // through to an unscoped reviewer running on the cli's permissive defaults
-    return Promise.resolve(null);
+    return { answer: null, tail: String(e) };
   }
   const env = granted?.env;
   // Only the executing reviewer gets the longer budget: it is running a suite,
@@ -87,7 +177,7 @@ export function runAdvisorCli(
     // never start one after the abort: the caller is already unwinding
     if (signal?.aborted) {
       granted?.cleanup();
-      return resolve(null);
+      return resolve({ answer: null, tail: "" });
     }
     try {
       const viaStdin = promptViaStdin(advis.cli);
@@ -105,13 +195,21 @@ export function runAdvisorCli(
       // enter `out`, or diagnostic noise could corrupt the parsed advice or flip
       // a review verdict.
       let out = "";
+      let tail = ""; // bounded last-4k of both pipes — the network-blip evidence
+      const keep = (chunk: string): void => {
+        out += chunk + "\n";
+        tail = (tail + chunk + "\n").slice(-4000);
+      };
       const outRl = createInterface({ input: proc.stdout });
       outRl.on("line", (line) => {
-        out += line + "\n";
+        keep(line);
         emit({ taskId, line, lineSource: source });
       });
       const errRl = createInterface({ input: proc.stderr });
-      errRl.on("line", (line) => emit({ taskId, line, lineSource: source }));
+      errRl.on("line", (line) => {
+        tail = (tail + line + "\n").slice(-4000);
+        emit({ taskId, line, lineSource: source });
+      });
 
       let settled = false;
       let grace: NodeJS.Timeout | undefined;
@@ -124,7 +222,7 @@ export function runAdvisorCli(
         outRl.close();
         errRl.close();
         granted?.cleanup();
-        resolve(v);
+        resolve({ answer: v, tail });
       };
 
       // The skip/quit key, on the phase that owns the longest budget in the
@@ -153,10 +251,13 @@ export function runAdvisorCli(
       }, timeoutSecs * 1000);
 
       proc.on("close", () => finish(out.trim() || null));
-      proc.on("error", () => finish(null));
-    } catch {
+      proc.on("error", (e) => {
+        tail = (tail + String(e) + "\n").slice(-4000);
+        finish(null);
+      });
+    } catch (e) {
       granted?.cleanup();
-      resolve(null);
+      resolve({ answer: null, tail: String(e) });
     }
   });
 }
@@ -172,7 +273,7 @@ export async function getAdvice(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const prompt = advisorPrompt(task, prd, standards);
-  const advice = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "advisor", signal);
+  const advice = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "advisor", signal, progress);
   if (advice === null) {
     log(progress, t("advisor.failed", { id: task.id }));
     return null;
@@ -208,7 +309,7 @@ export async function advisorReview(
   // expensive has to say so in the durable log, not only in the config file.
   if (runs) log(progress, t("advisor.reviewExec", { id: task.id, s: cfg.review_timeout ?? cfg.advisor_timeout }));
   const prompt = reviewPrompt(task, prd, standards, diff, verification, runs);
-  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal);
+  const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal, progress);
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the
     // executor nothing to fix, so the fix loop breaks out (run.ts) and the task

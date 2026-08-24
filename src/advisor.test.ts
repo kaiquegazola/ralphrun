@@ -43,7 +43,7 @@ import { log } from "./log.js";
 import { captureDiff } from "./git.js";
 import { parseReview, reviewPrompt } from "./prompts.js";
 import { runCursorSdkText } from "./cursor-sdk.js";
-import { getAdvice, advisorReview } from "./advisor.js";
+import { getAdvice, advisorReview, NETWORK_RETRY_DELAYS_MS } from "./advisor.js";
 import { emit } from "./tui/events.js";
 import type { AgentSpec, Config } from "./config.js";
 import type { PRD, Task } from "./prd.js";
@@ -524,5 +524,87 @@ describe("advisorReview", () => {
     finishSpawn(0);
     expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("I would rather not judge this"));
+  });
+});
+
+// A provider blip (finish_reason: network_error and friends) used to settle the
+// call as a silent null — which advisorReview reads as NOT approved, burning a
+// review round on infrastructure no executor fix could address. These pin the
+// retry ladder: marker-matched only, abort-aware, finite.
+describe("network-blip retry", () => {
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+  const resetStreams = (): void => {
+    mockChild.stdout = new PassThrough();
+    mockChild.stderr = new PassThrough();
+    mockChild.on.mockReset();
+  };
+
+  it("retries once on a provider network error and returns the second answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+      mockChild.stderr.end("Error: Provider finish_reason: network_error\n");
+      finishSpawn(0); // attempt 1 settles null with blip evidence
+      await flush(); // let the wrapper reach its backoff wait
+      expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("retrying in 5s"));
+      vi.advanceTimersByTime(5_000);
+      resetStreams();
+      await flush(); // attempt 2 spawns
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      mockChild.stdout.end("advice two\n");
+      finishSpawn(0);
+      expect(await p).toBe("advice two");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry an empty answer that carries no network marker", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("   \n");
+    finishSpawn(0);
+    expect(await p).toBeNull();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a skip during the backoff stops the retry ladder", async () => {
+    const ac = new AbortController();
+    vi.useFakeTimers();
+    try {
+      const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std", ac.signal);
+      mockChild.stderr.end("fetch failed\n");
+      finishSpawn(0);
+      await flush();
+      ac.abort();
+      expect(await p).toBeNull();
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up after the ladder — every retry dead, then the old NOT-approved path", async () => {
+    vi.useFakeTimers();
+    try {
+      diffMock.mockReturnValue("some diff");
+      const p = advisorReview(task, prd, advis, cfg, "ws", "prog", "std");
+      for (let i = 0; i < NETWORK_RETRY_DELAYS_MS.length + 1; i++) {
+        mockChild.stderr.end("Error: Provider finish_reason: network_error\n");
+        finishSpawn(0);
+        await flush();
+        if (i < NETWORK_RETRY_DELAYS_MS.length) {
+          vi.advanceTimersByTime(NETWORK_RETRY_DELAYS_MS[i]);
+          resetStreams();
+          await flush();
+        }
+      }
+      expect(await p).toEqual({ approved: false, changes: "", diff: "some diff" });
+      expect(spawnMock).toHaveBeenCalledTimes(NETWORK_RETRY_DELAYS_MS.length + 1);
+      expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("review failed to answer"));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

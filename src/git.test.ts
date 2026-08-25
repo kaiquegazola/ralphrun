@@ -180,6 +180,33 @@ describe("git", () => {
     );
   });
 
+  it("taskChangedPaths excludes runner control files when requested", () => {
+    mockExists.mockReturnValue(true);
+    mockSpawn
+      .mockReturnValueOnce({ stdout: "" } as any) // read-tree HEAD
+      .mockReturnValueOnce({ stdout: "" } as any) // add -A in private index
+      .mockReturnValueOnce({ status: 0, stdout: "src/a.ts\0" } as any);
+
+    expect(taskChangedPaths("/ws", "base-tree", ["/ws/prd.json", "progress.md"])).toEqual(["src/a.ts"]);
+    expect(mockSpawn).toHaveBeenNthCalledWith(
+      3,
+      "git",
+      [
+        "diff",
+        "--cached",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        "base-tree",
+        "--",
+        ".",
+        ":(exclude)prd.json",
+        ":(exclude)progress.md",
+      ],
+      indexOptions,
+    );
+  });
+
   // null is "cannot scope", NOT "nothing changed" — the caller stages everything
   // on null and would skip the commit entirely on []
   it("taskChangedPaths returns null without a baseline, without a repo, or when git fails", () => {

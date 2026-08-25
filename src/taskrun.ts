@@ -147,6 +147,7 @@ function logTaskCommit(
   cfg: Config,
   base?: string | null,
   reviewCommit?: ReviewCommit,
+  ignoredPaths: string[] = [],
 ): boolean {
   const before = headCommit(workspace);
   // function replacers: a literal id/title is used verbatim (a "$&"/"$1" in a
@@ -158,7 +159,7 @@ function logTaskCommit(
   // user happened to have uncommitted when the run started, putting their
   // unrelated work in a commit named after a task that never touched it — and
   // the review that approved this commit never saw those files either.
-  const paths = taskChangedPaths(workspace, base);
+  const paths = taskChangedPaths(workspace, base, ignoredPaths);
   if (paths?.length === 0) return true; // nothing moved: no empty commit, nothing to log
   if (!paths || !commitPaths(workspace, paths, msg)) {
     // null = no baseline to scope against (no repo yet). A FAILED scoped stage is
@@ -187,6 +188,9 @@ function shortHash(hash: string): string {
 export function createTaskRunner(ctx: TaskRunnerCtx) {
   const { opts, prdPath, workspace, progress, reload, savePRD, done } = ctx;
   const { elapsedTracker, trackers, pendingReviewFeedback, pendingHandoff, taskBaselines, taskCost, runCost, maxCostUsd } = ctx;
+  // ralphrun writes these files while a task is executing. They are runner
+  // state, not task work, so they must not trip scope or enter task commits.
+  const runnerControlPaths = [prdPath, progress];
 
   /**
    * One task, from START to a settled status in prd.json. "stop" means the whole
@@ -430,6 +434,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         ctx.cfg,
         taskBaselines.get(task.id),
         reviewCommit,
+        runnerControlPaths,
       );
       const m = mergeBackTaskWork(workspace, wt, taskStartCommit);
       // "nothing to pick" is legitimate only when there was nothing to commit.
@@ -534,7 +539,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       // keeps every backlog written before `scope` existed running as before.
       const declaredScope = task.scope ?? [];
       if (!skipped && result.ok && declaredScope.length > 0) {
-        const moved = taskChangedPaths(taskWorkspace, taskBaselines.get(task.id)) ?? [];
+        const moved = taskChangedPaths(taskWorkspace, taskBaselines.get(task.id), runnerControlPaths) ?? [];
         const escaped = pathsOutsideScope(moved, declaredScope);
         if (escaped.length > 0) {
           const sample = escaped.slice(0, 3).join(", ") + (escaped.length > 3 ? ", …" : "");

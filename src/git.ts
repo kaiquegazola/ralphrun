@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
 const MAX_REVIEW_DIFF_CHARS = 12_000;
@@ -93,14 +93,35 @@ export function captureDiff(workspace: string, base?: string | null): string {
  * --no-renames on purpose: rename detection reports only the new path, so the
  * old path's deletion would never make it into the commit.
  */
-export function taskChangedPaths(workspace: string, base?: string | null): string[] | null {
+export function taskChangedPaths(workspace: string, base?: string | null, ignoredPaths: string[] = []): string[] | null {
   if (!base || !existsSync(workspace + "/.git")) return null;
   return withTemporaryIndex(workspace, (index) => {
     stageWorktree(workspace, index);
-    const res = runWithIndex(workspace, index, ["diff", "--cached", "--name-only", "--no-renames", "-z", base, "--", "."]);
+    const res = runWithIndex(workspace, index, [
+      "diff",
+      "--cached",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      base,
+      "--",
+      ".",
+      ...ignoredPathspec(workspace, ignoredPaths),
+    ]);
     if (res.status !== 0 || typeof res.stdout !== "string") return null;
     return res.stdout.split("\0").filter((p) => p !== "");
   });
+}
+
+function ignoredPathspec(workspace: string, paths: string[]): string[] {
+  return paths
+    .map((path) => {
+      const absolute = isAbsolute(path) ? path : resolve(workspace, path);
+      const relativePath = relative(workspace, absolute).split(sep).join("/");
+      if (!relativePath || relativePath.startsWith("../") || relativePath === "..") return null;
+      return `:(exclude)${relativePath}`;
+    })
+    .filter((path): path is string => path !== null);
 }
 
 /**

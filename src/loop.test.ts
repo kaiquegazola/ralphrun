@@ -564,7 +564,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mGit).toHaveBeenCalledWith(expect.any(String), "init");
     // scoped to the task's own paths, so a file the user already had dirty is
     // never swept into a commit named after this task
-    expect(mTaskChangedPaths).toHaveBeenCalledWith(expect.any(String), "base-tree");
+    expect(mTaskChangedPaths).toHaveBeenCalledWith(expect.any(String), "base-tree", expect.any(Array));
     expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["src/a.ts"], expect.stringContaining("T1"));
     expect(mGit).not.toHaveBeenCalledWith(expect.any(String), "add", "-A");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));

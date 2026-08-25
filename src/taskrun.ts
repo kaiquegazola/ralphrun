@@ -397,6 +397,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     const taskStartCommit = headCommit(taskWorkspace);
     const planBeforeRun = task.plan;
     const planKeyBeforeRun = task.planKey;
+    const verifyBeforeRun = task.verify;
 
     // In worktree mode the commit is the TRANSPORT: it is how the work leaves
     // the cell, so both it and the cherry-pick have to succeed before the task
@@ -584,6 +585,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         ct.retries = freshTask.retries;
         ct.plan = freshTask.plan;
         ct.planKey = freshTask.planKey;
+        if (task.verify !== verifyBeforeRun) ct.verify = task.verify;
         // A project-level field, written inside the same synchronous
         // read-modify-write as the task's own status — the prd.json rule covers
         // the whole file, not one task's slice of it. Only ever on a DONE task,

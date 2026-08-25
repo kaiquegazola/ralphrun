@@ -2,7 +2,7 @@
 // CROSS (planner-before → executor → unified fix loop with verify + review).
 
 import { nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
-import type { Config } from "./config.js";
+import { ABSOLUTE_REVIEW_CYCLES, type Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
@@ -12,6 +12,7 @@ import {
   injectAdvice,
   injectHandoff,
   injectReviewContext,
+  isSafeVerifyReplacement,
   parseExecutionReport,
   readStandards,
   type ReviewCommit,
@@ -26,7 +27,7 @@ import { advisorPlanKey, routeAdvisorPlan } from "./plan-cache.js";
 import { addCost, type CostTally } from "./stream.js";
 
 export type RunTaskFailureReason = "failed" | "review_exhausted" | "review_stalled";
-export const MAX_REVIEW_CYCLES = 20;
+export const MAX_REVIEW_CYCLES = ABSOLUTE_REVIEW_CYCLES;
 
 export interface RunTaskResult {
   ok: boolean;
@@ -170,10 +171,10 @@ export async function runTask(
   let previousVerificationPassed = false;
   let failureReason: RunTaskFailureReason = "failed";
   const maxStalledRounds = Math.max(0, cfg.max_stalled_review_rounds ?? 2);
-  // max_review_rounds is now the configurable soft budget, capped by the
-  // absolute safety ceiling. The default is 20; the adaptive gate below stops
-  // earlier when there is no actionable progress.
-  const maxReviewCycles = Math.min(MAX_REVIEW_CYCLES, Math.max(1, cfg.max_review_rounds ?? MAX_REVIEW_CYCLES));
+  // max_review_rounds is retained for config compatibility, but the autonomous
+  // loop always gets the full absolute budget. The adaptive gate below still
+  // stops earlier when there is no actionable progress.
+  const maxReviewCycles = MAX_REVIEW_CYCLES;
 
   for (let rnd = 1; rnd <= maxReviewCycles; rnd++) {
     // A skip or quit kills the child, but runExecutor still RETURNS — and a
@@ -202,7 +203,7 @@ export async function runTask(
       previousVerification: rnd > 1 ? { passed: previousVerificationPassed, output: previousVerificationOutput } : undefined,
       previousDiff,
     };
-    const { approved, changes, diff = "", note, commit, findings = [], reviewRetryable = false } =
+    const { approved, changes, diff = "", note, commit, verify: proposedVerify, findings = [], reviewRetryable = false } =
       reviewOn && advis
         ? await advisorReview(
             task,
@@ -217,11 +218,36 @@ export async function runTask(
             signal,
             reviewContext,
           )
-        : { approved: true, changes: "", diff: "" };
+        : { approved: true, changes: "", diff: "", verify: undefined };
     lastApproved = approved;
     if (changes.trim()) lastReviewChanges = changes;
     lastReviewFindings = findings;
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
+    // A reviewer may identify a contract defect even when the old command exits
+    // 0 (for example, it never loaded the required environment). The replacement
+    // is safe because isSafeVerifyReplacement independently constrains it to an
+    // env-file-only change; do not make the old exit status hide that finding.
+    if (
+      !approved &&
+      proposedVerify &&
+      proposedVerify !== task.verify &&
+      isSafeVerifyReplacement(task.verify, proposedVerify)
+    ) {
+      task.verify = proposedVerify;
+      log(progress, t("run.log.verifyChanged", { id: task.id, cmd: proposedVerify }));
+      previousDiff = diff;
+      previousVerificationOutput = testOut;
+      previousVerificationPassed = testOk;
+      if (rnd < maxReviewCycles) continue;
+      // The absolute ceiling forbids a 21st reviewer call, but it must never
+      // let a replacement inherit the old command's green result. Execute the
+      // replacement once and expose that result to the blocked-task policy.
+      const replacementResult = await verify(task, signal);
+      lastVerificationPassed = replacementResult.passed;
+      previousVerificationOutput = replacementResult.output;
+      previousVerificationPassed = replacementResult.passed;
+      break;
+    }
     if (ok && testOk && approved) {
       log(progress, t("run.log.pass", { id: task.id, n: rnd }));
       return { ok: true, cost, handoff: lastHandoff, note, commit };

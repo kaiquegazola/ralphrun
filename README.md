@@ -192,11 +192,12 @@ tail -f ralph.out
   `progress.md`, since that log is the only audit trail a run nobody watched
   leaves behind.
 
-- **`max_review_rounds` is a soft budget, capped at 20 cycles.** The loop normally
-  stops earlier when the reviewer approves, there is no actionable feedback, or
-  the same finding/test/diff repeats without progress. `max_stalled_review_rounds`
-  remains the repeated-state circuit breaker. Set this value lower when a project
-  wants a tighter budget; values above 20 are capped.
+- **Review loops have an absolute ceiling of 20 cycles.** The loop normally stops
+  earlier when the reviewer approves, there is no actionable feedback, or the same
+  finding/test/diff repeats without progress. `max_review_rounds` is retained for
+  compatibility with older configs, but values below 20 are promoted to 20 and
+  values above 20 are capped. `max_stalled_review_rounds` remains the repeated-state
+  circuit breaker.
 
 - **`review_runs_commands` multiplies what every round costs.** It is `false` by
   default and it should stay that way unless you want it. Off, a review round is

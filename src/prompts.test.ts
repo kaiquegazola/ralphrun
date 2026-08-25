@@ -11,6 +11,7 @@ import {
   reviewPrompt,
   parseExecutionReport,
   parseReview,
+  isSafeVerifyReplacement,
 } from "./prompts.js";
 import type { PRD, Task } from "./prd.js";
 
@@ -209,6 +210,8 @@ describe("reviewPrompt", () => {
     expect(out).toContain("Command: npm test");
     expect(out).toContain("Result: FAILED");
     expect(out).toContain("expected 2 got 3");
+    expect(out).toContain("top-level");
+    expect(out).toContain("exact replacement command");
     // the loop already feeds a failing run back to the executor — the reviewer
     // restating it burns a round on feedback nobody needed
     expect(out).toContain("do not spend your verdict");
@@ -397,6 +400,46 @@ describe("parseReview", () => {
       },
     ]);
     expect(r.changes).toContain("R1");
+  });
+  it("parses a verify replacement only on CHANGES", () => {
+    expect(
+      parseReview(
+        '{"verdict":"CHANGES","verify":"bun --env-file=.env.local test ./apps/api/src/modules/auth","findings":[]}',
+      ),
+    ).toMatchObject({ approved: false, verify: "bun --env-file=.env.local test ./apps/api/src/modules/auth" });
+    expect(parseReview('{"verdict":"APPROVE","verify":"rm -rf /","findings":[]}')).not.toHaveProperty("verify");
+  });
+  it("rejects unsafe or oversized verify replacements", () => {
+    expect(parseReview('{"verdict":"CHANGES","verify":"bun test\\nrm -rf /","findings":[]}')).not.toHaveProperty("verify");
+    for (const verify of ["bun test && rm -rf /", "bun test; rm -rf /", "bun test | tee out", "bun test > out", "bun test $(touch pwned)"]) {
+      expect(parseReview(JSON.stringify({ verdict: "CHANGES", verify, findings: [] }))).not.toHaveProperty("verify");
+    }
+    expect(parseReview(JSON.stringify({ verdict: "CHANGES", verify: "x".repeat(2001), findings: [] }))).not.toHaveProperty("verify");
+  });
+  it("keeps an automatic verify repair in the original command family", () => {
+    expect(isSafeVerifyReplacement("bun test ./apps/api", "bun --env-file=.env.local test ./apps/api")).toBe(true);
+    expect(isSafeVerifyReplacement("bun test ./apps/api", "true")).toBe(false);
+    expect(isSafeVerifyReplacement("bun test ./apps/api", "rm -rf .")).toBe(false);
+    expect(isSafeVerifyReplacement("bun test ./apps/api", "bun -e 'rm -rf .'" )).toBe(false);
+    expect(isSafeVerifyReplacement("node test.js", "node --eval=process.exitCode=1 test.js")).toBe(false);
+    expect(isSafeVerifyReplacement("node test.js", "node --require=/tmp/pwn.js test.js")).toBe(false);
+    expect(isSafeVerifyReplacement("npm test", "PATH=/tmp npm test")).toBe(false);
+    expect(isSafeVerifyReplacement("npm test", "/tmp/npm test")).toBe(false);
+    expect(isSafeVerifyReplacement("npm test", "npm --prefix /tmp test")).toBe(false);
+    expect(isSafeVerifyReplacement("bun test", "bun --env-file=.env.local test")).toBe(true);
+    expect(isSafeVerifyReplacement("bun test", "bun --env-file .env.local test")).toBe(true);
+    expect(isSafeVerifyReplacement("bun test", "bun --env-file=/tmp/pwn test")).toBe(false);
+    expect(isSafeVerifyReplacement("bun --env-file=.env test", "bun test")).toBe(false);
+    expect(isSafeVerifyReplacement("bun --env-file=/tmp/.env test", "bun --env-file=.env test")).toBe(true);
+    expect(isSafeVerifyReplacement("bun test", "bun --env-file=%TEMP%\\secret.env test")).toBe(false);
+    expect(isSafeVerifyReplacement("bun test", 'bun --env-file="/tmp/pwn" test')).toBe(false);
+    expect(isSafeVerifyReplacement("bun test", "bun --env-file=C:secret.env test")).toBe(false);
+    expect(isSafeVerifyReplacement('bun test "#"', "bun --env-file=.env test #")).toBe(false);
+    expect(isSafeVerifyReplacement("npm test", "npm install test")).toBe(false);
+    expect(isSafeVerifyReplacement("npm test", "npm uninstall test")).toBe(false);
+    expect(isSafeVerifyReplacement("bun test ./apps/api", "bun test ./apps/other")).toBe(false);
+    expect(isSafeVerifyReplacement("git status", "git clean -fd")).toBe(false);
+    expect(isSafeVerifyReplacement("bun test ./apps/api", "npm test ./apps/api")).toBe(false);
   });
   it("parses structured approval and does not carry findings", () => {
     expect(parseReview('{"verdict":"APPROVE","findings":[]}')).toEqual({ approved: true, changes: "", findings: [] });

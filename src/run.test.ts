@@ -10,6 +10,7 @@ vi.mock("./prompts.js", () => ({
   injectAdvice: vi.fn(() => "PROMPT+ADVICE"),
   injectHandoff: vi.fn((p: string) => p),
   injectReviewContext: vi.fn((p: string) => p),
+  isSafeVerifyReplacement: vi.fn(() => true),
   parseExecutionReport: vi.fn(() => undefined),
   readStandards: vi.fn(() => "STD"),
 }));
@@ -113,7 +114,7 @@ describe("runTask CROSS", () => {
     await runTask(task, prd, c, "/ws", "/prog", undefined, undefined, "task-start");
     expect(mReview).toHaveBeenCalledWith(
       task, prd, c.advisor, c, "/ws", "/prog", "STD", "task-start", { passed: true, output: "out" }, undefined,
-      expect.objectContaining({ cycle: 1, maxCycles: 3 }),
+      expect.objectContaining({ cycle: 1, maxCycles: 20 }),
     );
   });
 
@@ -123,12 +124,12 @@ describe("runTask CROSS", () => {
   it("hands the reviewer the verify verdict and output of this very round", async () => {
     mVerify.mockResolvedValue({ passed: false, output: "1 failing: expected 2 got 3" });
     mReview.mockResolvedValue({ approved: false, changes: "fix it", diff: "D" });
-    const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1 });
+    const c = cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1, max_stalled_review_rounds: 1 });
     await runTask(task, prd, c, "/ws", "/prog");
     expect(mReview).toHaveBeenCalledWith(
       task, prd, c.advisor, c, "/ws", "/prog", "STD", "base-tree",
       { passed: false, output: "1 failing: expected 2 got 3" }, undefined,
-      expect.objectContaining({ cycle: 1, maxCycles: 1 }),
+      expect.objectContaining({ cycle: 1, maxCycles: 20 }),
     );
   });
 
@@ -149,7 +150,7 @@ describe("runTask CROSS", () => {
   it("no advisor never injects a leftover plan into a fix round", async () => {
     const t = { ...task, plan: "stale-plan", planKey: "stale-key" };
     mVerify.mockResolvedValue({ passed: false, output: "failed" });
-    await runTask(t, prd, cfg({ advisor: null, max_review_rounds: 1 }), "/ws", "/prog");
+    await runTask(t, prd, cfg({ advisor: null, max_review_rounds: 1, max_stalled_review_rounds: 1 }), "/ws", "/prog");
     expect(mExec).toHaveBeenCalledTimes(2);
     expect(mInject).not.toHaveBeenCalled();
   });
@@ -178,6 +179,54 @@ describe("runTask CROSS", () => {
     expect(verdicts.every((v) => v.passed)).toBe(true);
     expect(mReview).toHaveBeenCalledTimes(2);
     expect(mExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets the reviewer repair the verify command before asking the executor to change code", async () => {
+    const t: Task = { ...task, verify: "bun test ./apps/api/src/modules/auth" };
+    const seenVerify: string[] = [];
+    mVerify.mockImplementation(async (current) => ({
+      passed: (seenVerify.push(current.verify ?? ""), current.verify === "bun --env-file=.env.local test ./apps/api/src/modules/auth"),
+      output: current.verify === "bun --env-file=.env.local test ./apps/api/src/modules/auth" ? "3 passed" : "missing env",
+    }));
+    mReview
+      .mockResolvedValueOnce({
+        approved: false,
+        changes: "the command bypasses the env-loading script",
+        verify: "bun --env-file=.env.local test ./apps/api/src/modules/auth",
+        diff: "D",
+      })
+      .mockResolvedValueOnce({ approved: true, changes: "", diff: "D" });
+
+    const result = await runTask(t, prd, cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 3 }), "/ws", "/prog");
+
+    expect(result.ok).toBe(true);
+    expect(mExec).toHaveBeenCalledTimes(1);
+    expect(mVerify).toHaveBeenCalledTimes(2);
+    expect(seenVerify).toEqual([
+      "bun test ./apps/api/src/modules/auth",
+      "bun --env-file=.env.local test ./apps/api/src/modules/auth",
+    ]);
+    expect(t.verify).toBe("bun --env-file=.env.local test ./apps/api/src/modules/auth");
+  });
+
+  it("lets the reviewer repair a passing but incomplete verify command", async () => {
+    const t: Task = { ...task, verify: "bun test ./apps/api" };
+    mVerify.mockResolvedValue({ passed: true, output: "0 tests" });
+    mReview
+      .mockResolvedValueOnce({
+        approved: false,
+        changes: "the passing command does not load the required env",
+        verify: "bun --env-file=.env.local test ./apps/api",
+        diff: "D",
+      })
+      .mockResolvedValueOnce({ approved: true, changes: "", diff: "D" });
+
+    const result = await runTask(t, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+
+    expect(result.ok).toBe(true);
+    expect(mExec).toHaveBeenCalledTimes(1);
+    expect(mVerify).toHaveBeenCalledTimes(2);
+    expect(t.verify).toBe("bun --env-file=.env.local test ./apps/api");
   });
 
   // One tally for the whole attempt, fix rounds included: a per-round figure
@@ -353,7 +402,7 @@ describe("runTask CROSS", () => {
     });
     mReview.mockResolvedValue({ approved: false, changes: "not yet", diff: "D" });
     mFeedback.mockReturnValue("FEEDBACK");
-    const r = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1 }), "/ws", "/prog");
+    const r = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" }, max_review_rounds: 1, max_stalled_review_rounds: 0 }), "/ws", "/prog");
     expect(r.reason).toBe("review_exhausted");
     expect(r.handoff).toBe("tried the cache layer first");
   });
@@ -412,7 +461,7 @@ describe("runTask CROSS", () => {
     const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
     expect(result).toMatchObject({ ok: false, reason: "review_exhausted" });
     expect(mExec).toHaveBeenCalledTimes(1); // no blind fix round was attempted
-    expect(mReview).toHaveBeenCalledTimes(3); // configured soft limit, below the absolute 20-cycle ceiling
+    expect(mReview).toHaveBeenCalledTimes(20); // absolute ceiling; low legacy setting is ignored
   });
 
   it("does not carry an old already-satisfied report into a silent fix round", async () => {
@@ -502,7 +551,7 @@ describe("runTask RunEvents (spy the bus)", () => {
     expect(seq).toEqual([
       { taskId: "T1", subphase: "advising" },
       { taskId: "T1", subphase: "executing", attempt },
-      { taskId: "T1", subphase: "verifying", round: { n: 1, max: 3 } },
+      { taskId: "T1", subphase: "verifying", round: { n: 1, max: 20 } },
       { taskId: "T1", subphase: "reviewing" },
       { taskId: "T1", gates: { exec: true, tests: true, review: true } },
     ]);

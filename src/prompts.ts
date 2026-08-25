@@ -302,6 +302,8 @@ export interface ParsedReview {
   approved: boolean;
   changes: string;
   findings?: ReviewFinding[];
+  /** A reviewer-proposed replacement for the task's objective verify command. */
+  verify?: string;
   note?: string;
   commit?: ReviewCommit;
 }
@@ -469,6 +471,17 @@ the gate nor the required fixes. Every blocking finding needs a concrete fix and
 (acceptance criterion, file/line, test output, or an observed behavior). Do not return a
 finding merely because a different implementation would be nicer.
 
+If the task's Verify command itself is wrong for this repository (wrong package entry point,
+missing required env loading, or it does not exercise the stated acceptance), return a top-level
+\`verify\` string in the CHANGES JSON with the exact replacement command. Use this only when the
+command contract is the problem, not to hide a failing implementation. It must be one command
+with the same executable, and the only permitted automatic repair is adding or changing a
+relative \`--env-file\` flag; every other token must remain identical. Do not chain commands,
+redirect output, use command substitution, change the package/target, or use eval/execute flags.
+For broader command-contract changes, report CHANGES and let the executor update the task.
+The runner will persist that single field and execute the replacement before asking you to judge
+again. Never include \`verify\` in APPROVE.
+
 In the structured APPROVE response, include the optional commit object only when you can
 describe the accepted change clearly. It is metadata, not an instruction to run git. Use a
 Conventional Commit type (feat, fix, build, chore, ci, docs, perf, refactor, revert, style,
@@ -590,7 +603,7 @@ function parseStructuredReview(verdict: string): ParsedReview | undefined {
     try {
       const raw: unknown = JSON.parse(candidate);
       if (!raw || typeof raw !== "object") continue;
-      const value = raw as { verdict?: unknown; findings?: unknown; note?: unknown; commit?: unknown };
+      const value = raw as { verdict?: unknown; findings?: unknown; verify?: unknown; note?: unknown; commit?: unknown };
       const verdictValue = typeof value.verdict === "string" ? value.verdict.toUpperCase() : "";
       if (verdictValue !== "APPROVE" && verdictValue !== "CHANGES") continue;
       const findings = Array.isArray(value.findings)
@@ -602,6 +615,10 @@ function parseStructuredReview(verdict: string): ParsedReview | undefined {
         changes: approved ? "" : findingsToChanges(findings),
         findings,
       };
+      if (!approved) {
+        const verify = normalizeVerifyCommand(value.verify);
+        if (verify) result.verify = verify;
+      }
       if (approved && typeof value.note === "string" && value.note.trim()) {
         result.note = value.note.trim().slice(0, MAX_NOTE_CHARS);
       }
@@ -615,6 +632,190 @@ function parseStructuredReview(verdict: string): ParsedReview | undefined {
     }
   }
   return undefined;
+}
+
+const MAX_VERIFY_COMMAND_CHARS = 2_000;
+// Reviewer output is untrusted input. The normal task.verify contract is a
+// shell command for backwards compatibility, but an automatically proposed
+// replacement must not gain a second command, redirection, or expansion while
+// it is being persisted and executed by the runner.
+const UNSAFE_VERIFY_SHELL_SYNTAX = /[;&|<>`$]/;
+const UNSAFE_VERIFY_FLAGS = [
+  "-c",
+  "-e",
+  "-p",
+  "--command",
+  "--eval",
+  "--exec",
+  "--execute",
+  "--require",
+  "--import",
+  "--loader",
+  "--experimental-loader",
+  "--preload",
+  "--print",
+];
+const UNSAFE_VERIFY_PATH_FLAGS = [
+  "-C",
+  "--config",
+  "--cwd",
+  "--directory",
+  "--prefix",
+  "--project-dir",
+  "--project-directory",
+  "--root",
+  "--userconfig",
+  "--workdir",
+  "--working-directory",
+];
+const UNSAFE_VERIFY_EXECUTABLES = new Set([
+  ":",
+  "true",
+  "false",
+  "echo",
+  "printf",
+  "pwd",
+  "ls",
+  "dir",
+  "exit",
+  "return",
+  "rm",
+  "rmdir",
+  "del",
+  "erase",
+  "format",
+  "mkfs",
+  "dd",
+  "shred",
+  "shutdown",
+  "reboot",
+  "poweroff",
+  "kill",
+  "pkill",
+]);
+
+function verifyTokens(command: string): string[] {
+  // Keep the raw quote characters: the command is later run by a shell, so
+  // comparing only dequoted values would let `"#"` become a shell comment.
+  return command.match(/"[^"\n]*"|'[^'\n]*'|[^\s]+/g) ?? [];
+}
+
+function tokenValue(token: string): string {
+  return token.replace(/^(['"])(.*)\1$/, "$2");
+}
+
+function executableIndex(tokens: string[]): number {
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokenValue(tokens[i]))) i += 1;
+  if (tokenValue(tokens[i] ?? "") === "env") {
+    i += 1;
+    while (i < tokens.length && (tokenValue(tokens[i]).startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokenValue(tokens[i])))) i += 1;
+  }
+  return i;
+}
+
+function executableName(token: string): string {
+  return tokenValue(token).split(/[\\/]/).pop()?.toLowerCase() ?? "";
+}
+
+function unsafeVerifyFlag(token: string): boolean {
+  const flag = tokenValue(token).toLowerCase();
+  return UNSAFE_VERIFY_FLAGS.some((unsafe) =>
+    flag === unsafe ||
+    flag.startsWith(`${unsafe}=`) ||
+    (unsafe.length === 2 && flag.startsWith(unsafe) && flag.length > unsafe.length),
+  );
+}
+
+function hasFlag(token: string, flag: string): boolean {
+  const value = tokenValue(token).toLowerCase();
+  const wanted = flag.toLowerCase();
+  return value === wanted || value.startsWith(`${wanted}=`) || (wanted.length === 2 && value.startsWith(wanted) && value.length > wanted.length);
+}
+
+function unsafeVerifyPathFlag(token: string): boolean {
+  return UNSAFE_VERIFY_PATH_FLAGS.some((flag) => hasFlag(token, flag));
+}
+
+function unsafeEnvFilePath(value: string): boolean {
+  return (
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    value.startsWith("~") ||
+    /^[A-Za-z]:/.test(value) ||
+    value.split(/[\\/]/).includes("..") ||
+    /[%!^]/.test(value)
+  );
+}
+
+function withoutEnvFile(tokens: string[], validatePath: boolean): string[] | undefined {
+  const result: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    const value = tokenValue(token);
+    if (value === "--env-file") {
+      if (!tokens[i + 1] || (validatePath && unsafeEnvFilePath(tokenValue(tokens[i + 1])))) return undefined;
+      i += 1;
+      continue;
+    }
+    if (value.startsWith("--env-file=")) {
+      if (validatePath && unsafeEnvFilePath(tokenValue(value.slice("--env-file=".length)))) return undefined;
+      continue;
+    }
+    result.push(token);
+  }
+  return result;
+}
+
+function envFileCount(tokens: string[]): number {
+  let count = 0;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const value = tokenValue(tokens[i]);
+    if (value === "--env-file") {
+      count += 1;
+      i += 1;
+    } else if (value.startsWith("--env-file=")) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * Reviewer output is untrusted. The automatic repair is intentionally narrow:
+ * it may only add/change a relative env file while preserving every other
+ * command token. A user/planner-authored task.verify remains the compatibility
+ * escape hatch for commands that need a broader shell contract.
+ */
+export function isSafeVerifyReplacement(previous: string | undefined, replacement: string): boolean {
+  if (!previous) return false;
+  const oldTokens = verifyTokens(previous);
+  const newTokens = verifyTokens(replacement);
+  const oldIndex = executableIndex(oldTokens);
+  const newIndex = executableIndex(newTokens);
+  const oldExecutable = oldTokens[oldIndex];
+  const newExecutable = newTokens[newIndex];
+  // No env assignments/wrappers and no basename-only matching: otherwise a
+  // reviewer could redirect PATH or replace `npm` with `/tmp/npm`.
+  if (oldIndex !== 0 || newIndex !== 0 || !oldExecutable || !newExecutable || oldExecutable !== newExecutable) return false;
+  if (UNSAFE_VERIFY_EXECUTABLES.has(executableName(newExecutable))) return false;
+  if (newTokens.some(unsafeVerifyFlag) || newTokens.some(unsafeVerifyPathFlag)) return false;
+  const oldArgs = oldTokens.slice(oldIndex + 1);
+  const newArgs = newTokens.slice(newIndex + 1);
+  if (envFileCount(oldArgs) > 0 && envFileCount(newArgs) === 0) return false;
+  // The old value may be absolute because it was authored by the user. Only
+  // the new value is constrained to a relative workspace-local path.
+  const oldContract = withoutEnvFile(oldArgs, false);
+  const newContract = withoutEnvFile(newArgs, true);
+  return !!oldContract && !!newContract && JSON.stringify(oldContract) === JSON.stringify(newContract);
+}
+
+function normalizeVerifyCommand(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const command = raw.trim();
+  if (!command || command.length > MAX_VERIFY_COMMAND_CHARS || /[\u0000-\u001F\u007F]/.test(command)) return undefined;
+  if (UNSAFE_VERIFY_SHELL_SYNTAX.test(command)) return undefined;
+  return command;
 }
 
 const CONVENTIONAL_COMMIT_TYPES = new Set<ConventionalCommitType>([

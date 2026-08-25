@@ -81,6 +81,8 @@ export interface AdvisorReviewResult {
   approved: boolean;
   changes: string;
   diff: string;
+  /** A constrained replacement for task.verify proposed by the reviewer. */
+  verify?: string;
   findings?: ReviewFinding[];
   /** No actionable verdict arrived; retry the reviewer before asking the executor to change code. */
   reviewRetryable?: boolean;

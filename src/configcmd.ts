@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as p from "@clack/prompts";
 
-import { DEFAULTS, parseAgent, type Config } from "./config.js";
+import { ABSOLUTE_REVIEW_CYCLES, DEFAULTS, parseAgent, type Config } from "./config.js";
 import { t } from "./i18n.js";
 import { configPath, loadUserConfig, resetUserConfig, userConfigExists } from "./userconfig.js";
 
@@ -56,6 +56,7 @@ export async function showConfig(opts: ConfigOpts): Promise<void> {
     process.stderr.write(t("config.showMissing", { path: cfgPath }) + "\n");
     cfg = structuredClone(DEFAULTS);
   }
+  cfg.max_review_rounds = ABSOLUTE_REVIEW_CYCLES;
   console.log(JSON.stringify(cfg, null, 2));
 }
 
@@ -96,7 +97,8 @@ export async function editConfig(opts: ConfigOpts): Promise<void> {
 
   cfg.task_timeout = await numOrKeep(t("config.edit.taskTimeout"), cfg.task_timeout);
   cfg.max_retries_per_task = await numOrKeep(t("config.edit.maxRetries"), cfg.max_retries_per_task);
-  cfg.max_review_rounds = await numOrKeep(t("config.edit.maxReviewRounds"), cfg.max_review_rounds);
+  await numOrKeep(t("config.edit.maxReviewRounds"), cfg.max_review_rounds);
+  cfg.max_review_rounds = ABSOLUTE_REVIEW_CYCLES;
   cfg.max_stalled_review_rounds = await numOrKeep(
     t("config.edit.maxStalledReviewRounds"),
     cfg.max_stalled_review_rounds,

@@ -191,7 +191,7 @@ describe("loadConfig global-user-config layering", () => {
     });
     const cfg = loadConfig("/x/prd.json", undefined, {});
     expect(cfg.review_after).toBe(false);
-    expect(cfg.max_review_rounds).toBe(9);
+      expect(cfg.max_review_rounds).toBe(20);
     expect(cfg.max_stalled_review_rounds).toBe(4);
     expect(cfg.max_retries_per_task).toBe(7);
     expect(cfg.commit_per_task).toBe(false);
@@ -215,7 +215,7 @@ describe("loadConfig global-user-config layering", () => {
     user({ review_after: false, max_review_rounds: 9 });
     const cfg = loadConfig("/x/prd.json", undefined, {});
     expect(cfg.review_after).toBe(true);
-    expect(cfg.max_review_rounds).toBe(2);
+    expect(cfg.max_review_rounds).toBe(20);
   });
 
   it("flags win over global and project; --advisor none applies null", () => {

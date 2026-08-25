@@ -145,7 +145,7 @@ describe("editConfig", () => {
     expect(written.advisor).toEqual({ cli: "grok", model: "grok-4.5" });
     expect(written.task_timeout).toBe(120);
     expect(written.max_retries_per_task).toBe(4);
-    expect(written.max_review_rounds).toBe(2);
+    expect(written.max_review_rounds).toBe(20);
     expect(written.max_stalled_review_rounds).toBe(1);
     expect(written.review_after).toBe(true);
     expect(written.commit_per_task).toBe(false);
@@ -164,7 +164,7 @@ describe("editConfig", () => {
     expect(written.advisor).toBeNull();
     expect(written.task_timeout).toBe(1800); // numOrKeep isCancel -> current
     expect(written.max_retries_per_task).toBe(3); // NaN -> current
-    expect(written.max_review_rounds).toBe(5);
+    expect(written.max_review_rounds).toBe(20);
     expect(written.max_stalled_review_rounds).toBe(2); // cancel -> current
     expect(written.review_after).toBe(true); // confirm cancelled -> kept default
     expect(written.commit_per_task).toBe(true);

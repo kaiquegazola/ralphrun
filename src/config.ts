@@ -19,6 +19,9 @@ export interface AgentSpec {
  */
 export type ReviewBlockedPolicy = "block" | "accept";
 
+/** The hard review-cycle ceiling. Legacy lower settings are promoted to this. */
+export const ABSOLUTE_REVIEW_CYCLES = 20;
+
 export interface Config {
   executor: AgentSpec;
   advisor: AgentSpec | null;
@@ -26,7 +29,7 @@ export interface Config {
   advisor_timeout: number;
   max_retries_per_task: number;
   review_after: boolean;
-  /** Soft review-cycle budget; run.ts caps it at the absolute 20-cycle ceiling. */
+  /** Legacy review-cycle setting; effective runs always get the absolute 20-cycle budget. */
   max_review_rounds: number;
   max_stalled_review_rounds: number;
   /**
@@ -132,7 +135,7 @@ export const DEFAULTS: Config = {
   // Adaptive review loops stop on lack of actionable progress. This remains
   // the configurable soft budget, while run.ts caps it at 20 as an absolute
   // circuit breaker.
-  max_review_rounds: 20,
+  max_review_rounds: ABSOLUTE_REVIEW_CYCLES,
   max_stalled_review_rounds: 2,
   advisor_plan_threshold: DEFAULT_ADVISOR_PLAN_THRESHOLD,
   heartbeat_secs: 30,
@@ -205,6 +208,11 @@ export function loadConfig(
     Object.assign(cfg, file); // JSON.parse never yields undefined values
   }
   mergeDefined(cfg, overrides);
+  // Older configs commonly set this to 3. A short review budget turns a valid
+  // reviewer finding into a manual block before the executor can converge.
+  // Keep the field for compatibility, but never let it lower the absolute
+  // autonomous budget.
+  cfg.max_review_rounds = ABSOLUTE_REVIEW_CYCLES;
   // The commit is the TRANSPORT out of a worktree — with commits off, nothing a
   // task does would ever leave it. Fail at load, where the user can see it, not
   // once per task at runtime.

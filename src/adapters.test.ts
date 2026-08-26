@@ -43,13 +43,15 @@ describe("buildCmd", () => {
       "--dangerously-bypass-hook-trust",
     ]);
   });
-  it("opencode uses run with --model, --auto and the prompt last", () => {
+  // No "P" in either: opencode reads its prompt from stdin, and keeping it out
+  // of the argv is what stops a cmd.exe shim refusing the command outright.
+  it("opencode uses run with --model and --auto, prompt piped not passed", () => {
     expect(buildCmd("opencode", "P", "opencode/big-pickle", "/w", true)).toEqual([
-      "opencode", "run", "--model", "opencode/big-pickle", "--auto", "P",
+      "opencode", "run", "--model", "opencode/big-pickle", "--auto",
     ]);
   });
   it("opencode without model, no autoApprove", () => {
-    expect(buildCmd("opencode", "P", "", "/w", false)).toEqual(["opencode", "run", "P"]);
+    expect(buildCmd("opencode", "P", "", "/w", false)).toEqual(["opencode", "run"]);
   });
   // The reviewer judges a diff cut at 12k chars that can also be empty; the
   // allowlist is what lets it open the files that view left out. It is an
@@ -116,15 +118,16 @@ describe("promptViaStdin", () => {
   it("is true exactly for the clis observed reading stdin", () => {
     expect(promptViaStdin("claude")).toBe(true);
     expect(promptViaStdin("codex")).toBe(true);
+    expect(promptViaStdin("opencode")).toBe(true);
   });
   it("is false for clis that only take a positional prompt", () => {
-    for (const cli of ["grok", "cursor", "cursorsdk", "opencode", "agy"]) expect(promptViaStdin(cli)).toBe(false);
+    for (const cli of ["grok", "cursor", "cursorsdk", "agy"]) expect(promptViaStdin(cli)).toBe(false);
   });
   it("is false for an unknown cli", () => {
     expect(promptViaStdin("nope")).toBe(false);
   });
   it("leaves a non-stdin cli's prompt in the argv", () => {
-    expect(buildCmd("opencode", "P", "", "/w", false)).toContain("P");
+    expect(buildCmd("grok", "P", "", "/w", false)).toContain("P");
   });
 });
 

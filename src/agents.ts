@@ -820,27 +820,39 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
     // credentials (`/connect` → API key, per https://opencode.ai/docs/providers).
     // Any other provider/model the user has configured can be typed via flags,
     // config, or the "custom" picker.
+    // Synced against `opencode models` on 2026-08-26. These ids CHURN: the Zen
+    // and Go catalogues gain and retire models between releases, and a retired
+    // id is not a soft failure — the server answers an unknown model with
+    // "UnknownError: Unexpected server error", which reads like an outage
+    // rather than a typo. `opencode-go/ox-alpha-free` was exactly that: a
+    // stealth alias that shipped as `opencode-go/glm-5.3-flash`, taking every
+    // run configured against it down with it.
     models: [
       { value: "opencode/big-pickle", label: "Big Pickle (free)" },
       { value: "opencode/hy3-free", label: "Hy3 (free)" },
       { value: "opencode/mimo-v2.5-free", label: "MiMo V2.5 (free)" },
+      { value: "opencode/muse-spark-1.2-contributor-free", label: "Muse Spark 1.2 Contributor (free)" },
       { value: "opencode/nemotron-3-ultra-free", label: "Nemotron 3 Ultra (free)" },
       { value: "opencode/nemotron-3.5-lightning-free", label: "Nemotron 3.5 Lightning (free)" },
       { value: "opencode-go/deepseek-v4-flash", label: "Go · DeepSeek V4 Flash" },
+      { value: "opencode-go/deepseek-v4-flash-vision-exp", label: "Go · DeepSeek V4 Flash Vision (exp)" },
       { value: "opencode-go/deepseek-v4-pro", label: "Go · DeepSeek V4 Pro" },
       { value: "opencode-go/glm-5.1", label: "Go · GLM 5.1" },
       { value: "opencode-go/glm-5.2", label: "Go · GLM 5.2" },
       { value: "opencode-go/glm-5.3", label: "Go · GLM 5.3" },
+      { value: "opencode-go/glm-5.3-flash", label: "Go · GLM 5.3 Flash" },
       { value: "opencode-go/gpt-5.6-luna", label: "Go · GPT-5.6 Luna" },
-      { value: "opencode-go/grok-4.5", label: "Go · Grok 4.5" },
+      { value: "opencode-go/grok-4.6", label: "Go · Grok 4.6" },
+      { value: "opencode-go/hy3", label: "Go · Hy3" },
       { value: "opencode-go/kimi-k2.6", label: "Go · Kimi K2.6" },
       { value: "opencode-go/kimi-k2.7-code", label: "Go · Kimi K2.7 Code" },
       { value: "opencode-go/kimi-k3", label: "Go · Kimi K3" },
+      { value: "opencode-go/longcat-2.0", label: "Go · LongCat 2.0" },
       { value: "opencode-go/mimo-v2.5", label: "Go · MiMo V2.5" },
       { value: "opencode-go/mimo-v2.5-pro", label: "Go · MiMo V2.5 Pro" },
       { value: "opencode-go/minimax-m2.7", label: "Go · MiniMax M2.7" },
       { value: "opencode-go/minimax-m3", label: "Go · MiniMax M3" },
-      { value: "opencode-go/ox-alpha-free", label: "Go · Ox Alpha" },
+      { value: "opencode-go/muse-spark-1.2-contributor", label: "Go · Muse Spark 1.2 Contributor" },
       { value: "opencode-go/qwen3.6-plus", label: "Go · Qwen 3.6 Plus" },
       { value: "opencode-go/qwen3.7-max", label: "Go · Qwen 3.7 Max" },
       { value: "opencode-go/qwen3.7-plus", label: "Go · Qwen 3.7 Plus" },
@@ -853,11 +865,27 @@ export const AGENTS: Record<string, AgentDef> = Object.assign(Object.create(null
       executor: "opencode/big-pickle",
       advisor: "opencode/nemotron-3-ultra-free",
     },
+    // verified: `echo "<prompt>" | opencode run --model <m>` answers the piped
+    // prompt with no positional message at all.
+    //
+    // Load-bearing on Windows, not a preference. Every cli installed through
+    // npm lands on PATH as a `.cmd` shim, so cross-spawn routes it through
+    // cmd.exe and its ~8191 char command line — and an executor prompt carrying
+    // a task plus accumulated reviewer feedback passes that on the FIRST
+    // attempt, not eventually. cmd.exe refuses the whole command before
+    // opencode exists, which surfaces as `exit=1 (0s)` with no output: the run
+    // then burns its entire review budget re-reviewing a diff that no executor
+    // was ever able to produce.
+    promptVia: "stdin",
     buildCmd: ({ bin, prompt, model, autoApprove }) => {
       const cmd = [bin, "run"];
       if (model) cmd.push("--model", model);
       if (autoApprove) cmd.push("--auto");
-      cmd.push(prompt); // opencode takes the prompt LAST, after the flags
+      // UNREACHABLE while promptVia is "stdin": adapters.ts forces the argv
+      // prompt to "" one frame up, so this branch never runs. Kept identical to
+      // codex's guard so the two stdin adapters read the same, and so that
+      // turning promptVia off here needs no other edit.
+      if (prompt) cmd.push(prompt); // opencode takes the prompt LAST, after the flags
       return cmd;
     },
     // The grant rides in env, not argv (see reviewEnv): opencode has no

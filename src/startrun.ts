@@ -12,7 +12,7 @@
 // downstream re-checks any of it.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { supportsNativeAdvisor } from "./agents.js";
@@ -29,7 +29,14 @@ import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
 import { type CostTally } from "./stream.js";
 import { emit, type RunEvent } from "./tui/events.js";
 import { mount, type TuiHandle } from "./tui/mount.js";
-import { claimRunLock, ignoredDirsWouldBeShared, reapOrphanWorktrees, tasksInstallingDeps } from "./worktree.js";
+import {
+  claimRunLock,
+  ignoredDirsWouldBeShared,
+  linkedDirsPresent,
+  reapOrphanWorktrees,
+  tasksInstallingDeps,
+  verifyInstallsDeps,
+} from "./worktree.js";
 
 export interface RunOptions {
   prd: string;
@@ -223,14 +230,35 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
   // and two concurrent installs into that corrupt the user's own dependencies,
   // which discarding a worktree cannot undo. Refuse the combination at load,
   // naming the tasks, rather than discovering it as a broken node_modules.
-  const seeded = cfg.worktree_link ?? [];
+  //
+  // The names that are CONFIGURED are not the hazard; the ones the workspace
+  // actually has are. A cell gets nothing seeded for a directory that is not
+  // there, so a checkout with no node_modules and `worktree_setup: "npm ci"` —
+  // the documented Windows shape — shares nothing at all, and refusing it named
+  // a corruption that could not happen.
+  const seeded = linkedDirsPresent(workspace, cfg.worktree_link ?? []);
   if (
     !opts.dryRun &&
     cfg.worktree_per_task &&
     (cfg.max_parallel_tasks ?? 1) > 1 &&
     seeded.length > 0 &&
-    ignoredDirsWouldBeShared(workspace)
+    // the names the workspace HAS, so the probe measures the filesystems the
+    // seeding would actually clone between — a `node_modules` mounted on another
+    // volume shares even where the repo's own filesystem clones fine
+    ignoredDirsWouldBeShared(workspace, seeded)
   ) {
+    // worktree_setup FIRST, and as its own refusal rather than folded into the
+    // one below. It is the strictly worse shape of the same hazard: it runs in
+    // every cell, so an install there is not "these tasks" but all of them at
+    // once, and it fires no matter how innocent the backlog's verify commands
+    // are. It also has a different fix — the two knobs are alternatives, and
+    // naming task ids for a hazard no task caused would send the user editing
+    // the wrong file.
+    const setup = cfg.worktree_setup?.trim();
+    if (setup && verifyInstallsDeps(setup)) {
+      console.error(t("loop.err.sharedSetupInstall", { cmd: setup, links: seeded.join(", ") }));
+      process.exit(1);
+    }
     const hazard = tasksInstallingDeps(prd0.tasks);
     if (hazard.length > 0) {
       console.error(t("loop.err.sharedInstall", { ids: hazard.join(", "), links: seeded.join(", ") }));
@@ -244,7 +272,16 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
     // worktrees while its executors are still writing into them.
     const holder = claimRunLock(workspace);
     if (holder !== null) {
-      console.error(t("loop.err.alreadyRunning", { pid: String(holder), path: workspace }));
+      // "unknown" is a refusal with no pid to name: the only candidates left at
+      // that point are a record we positively judged dead and our own pid, so
+      // "wait for pid N" would mean "wait for a process that is not running" or
+      // "wait for yourself". Name the file instead, which is what the user can
+      // actually act on.
+      console.error(
+        holder === "unknown"
+          ? t("loop.err.lockUnclaimable", { path: workspace, file: join(workspace, ".ralphrun", "run.lock") })
+          : t("loop.err.alreadyRunning", { pid: String(holder), path: workspace }),
+      );
       process.exit(1);
     }
 

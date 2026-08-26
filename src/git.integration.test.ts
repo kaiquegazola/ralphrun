@@ -6,23 +6,40 @@
 // It is the only check that would catch git changing the meaning of
 // --pathspec-from-file, a stray rename detection resurrecting a deleted path, or
 // a baseline that quietly includes what was already dirty.
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { captureReviewBase, commitPaths, headCommit, taskChangedPaths } from "./git.js";
 import {
   claimRunLock,
+  claimWithoutLink,
   cloneDir,
   createTaskWorktree,
+  dropOwnClaim,
+  evictLock,
   ignoredDirsWouldBeShared,
+  linkedDirsPresent,
   mergeBackTaskWork,
+  publishClaim,
   reapOrphanWorktrees,
   releaseRunLock,
   removeTaskWorktree,
   seedIgnoredDir,
+  stampLockOnce,
   worktreeLoss,
 } from "./worktree.js";
 
@@ -377,11 +394,27 @@ describe("per-task worktrees", () => {
 // and this is what makes it true — a second run used to delete the first one's
 // cells while its executors were writing into them.
 describe("the run lock", () => {
+  const lockPath = (): string => join(ws, ".ralphrun", "run.lock");
+
+  /** write a lock by hand, the way another run would have left it */
+  function plantLock(body: string): void {
+    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+    writeFileSync(lockPath(), body);
+  }
+
+  function readLockFile(): { pid: number; stamp: number; since: number } {
+    return JSON.parse(readFileSync(lockPath(), "utf8"));
+  }
+
+  // a run that stops holding the lock must also stop stamping it: the heartbeat
+  // is module state, so a test that claimed and never released would keep
+  // re-creating the next test's lock underneath it
+  afterEach(() => releaseRunLock(ws));
+
   it("refuses a second run and names the pid holding the workspace", () => {
     // a DIFFERENT pid that is genuinely alive — our parent. Reusing our own
     // would take the idempotent path and prove nothing.
-    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
-    writeFileSync(join(ws, ".ralphrun", "run.lock"), String(process.ppid));
+    plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now() }));
     expect(claimRunLock(ws)).toBe(process.ppid);
   });
 
@@ -393,10 +426,224 @@ describe("the run lock", () => {
   it("takes over a lock whose holder is gone, without needing a manual rm", () => {
     // a crash leaves the file behind; requiring the user to delete it would make
     // every crash need a manual step before the next run
-    mkdirSync(join(ws, ".ralphrun"), { recursive: true });
-    writeFileSync(join(ws, ".ralphrun", "run.lock"), "999999"); // no such pid
+    plantLock(JSON.stringify({ pid: 999999, stamp: Date.now() })); // no such pid
     expect(claimRunLock(ws)).toBeNull();
-    expect(readFileSync(join(ws, ".ralphrun", "run.lock"), "utf8")).toBe(String(process.pid));
+    expect(readLockFile().pid).toBe(process.pid);
+  });
+
+  // THE pid-reuse case, and the reason the stamp exists at all. A crashed run
+  // leaves its pid behind; the OS hands that number to something unrelated —
+  // on Windows within minutes — and a pid-only check then reports a live
+  // holder that never heard of ralphrun. That refuses every future run in the
+  // workspace until someone deletes the file by hand.
+  it("takes over a live pid that stopped stamping (a recycled pid)", () => {
+    plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now() - 10 * 60_000 }));
+    expect(claimRunLock(ws)).toBeNull();
+    expect(readLockFile().pid).toBe(process.pid);
+  });
+
+  it("keeps refusing a live holder whose stamp is merely a little old", () => {
+    // the slack is deliberate: a run busy spawning agents must not have its own
+    // claim declared stale under it between two beats
+    plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now() - 30_000 }));
+    expect(claimRunLock(ws)).toBe(process.ppid);
+  });
+
+  it("refuses a live holder on a legacy bare-pid lock", () => {
+    // written by an older ralphrun: no stamp to compare, so the old pid-only
+    // answer stands. Refusing is the conservative half of that trade.
+    plantLock(String(process.ppid));
+    expect(claimRunLock(ws)).toBe(process.ppid);
+  });
+
+  it("takes over a legacy bare-pid lock whose holder is gone", () => {
+    plantLock("999999");
+    expect(claimRunLock(ws)).toBeNull();
+    expect(readLockFile().pid).toBe(process.pid);
+  });
+
+  it("takes over a corrupt lock instead of refusing every run forever", () => {
+    // one unreadable file must not be a workspace that can never run again —
+    // that manual rm is the whole thing the lock exists to avoid
+    plantLock("{not json at all");
+    expect(claimRunLock(ws)).toBeNull();
+    expect(readLockFile().pid).toBe(process.pid);
+  });
+
+  it("takes over a JSON lock whose stamp is garbled, rather than reading it as legacy", () => {
+    // a record with a stamp we cannot read is CORRUPT, and corrupt is takeable.
+    // Falling back to the pid-only answer instead gave one garbled field the
+    // power to pin the workspace shut for as long as an unrelated process
+    // happens to hold that pid — the manual rm again, by another route.
+    plantLock(JSON.stringify({ pid: process.ppid, stamp: "soon" }));
+    expect(claimRunLock(ws)).toBeNull();
+    expect(readLockFile().pid).toBe(process.pid);
+  });
+
+  it("leaves no temp file and no half-written record behind", () => {
+    // the record is swapped in by rename, never truncated and refilled in place:
+    // a reader that catches the seam calls the file corrupt, and corrupt is
+    // takeable — so an in-place refresh invites the eviction of a live claim
+    claimRunLock(ws);
+    stampLockOnce(lockPath());
+    expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]);
+    expect(readLockFile().pid).toBe(process.pid);
+  });
+
+  // Two runs that read the SAME expired record both conclude it is theirs to
+  // take. Overwriting it told BOTH of them they had won, and each one's boot
+  // reap then force-deletes the other's live cells. So the takeover is a rename,
+  // which only one racer can win — and this is the LOSER's half, the half that
+  // used to do the damage: by the time it acts, the winner's claim is in place.
+  describe("evicting a claim to take the workspace over", () => {
+    it("puts back a claim that turned out to be live, and names its holder", () => {
+      // what the winner wrote in the window between our read and our move
+      plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: Date.now() }));
+      const winner = readLockFile();
+
+      expect(evictLock(lockPath())).toBe(process.ppid);
+      expect(readLockFile()).toEqual(winner); // untouched, byte for byte
+    });
+
+    // The move leaves the path ABSENT for an instant, and a third run can win it
+    // with `wx` in there — it has already been told it holds the workspace by
+    // the time we look again. Renaming our copy back over its record used to
+    // take that lock away from it: the file then named a run that was not the
+    // claimant while the claimant went on reaping, so the file agreed with
+    // nobody. The put-back is a LINK, which refuses an occupied path.
+    it("leaves a claim made in the window it opened standing, rather than restoring over it", () => {
+      plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: Date.now() }));
+      const third = JSON.stringify({ pid: process.ppid + 1, stamp: Date.now(), since: Date.now() });
+      // the window itself, which cannot be opened from outside
+      const take = (from: string, to: string): void => {
+        renameSync(from, to);
+        writeFileSync(from, third); // a third run claims the path we just freed
+      };
+
+      expect(evictLock(lockPath(), take)).toBe(process.ppid);
+
+      expect(readFileSync(lockPath(), "utf8")).toBe(third); // untouched, byte for byte
+      expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]); // and nothing set aside
+    });
+
+    it("frees the path when the claim really is dead", () => {
+      plantLock(JSON.stringify({ pid: 999999, stamp: 0, since: 0 }));
+      expect(evictLock(lockPath())).toBeNull();
+      expect(existsSync(lockPath())).toBe(false);
+    });
+
+    it("has nothing to move once another run evicted it first", () => {
+      expect(evictLock(lockPath())).toBeNull();
+      expect(existsSync(lockPath())).toBe(false);
+    });
+  });
+
+  // `wx` makes the directory ENTRY exclusive, not the RECORD: the file exists
+  // EMPTY between the open and the write, an empty record reads as corrupt, and
+  // corrupt is takeable — so a racing claimant evicts and deletes the very file
+  // its owner is still filling, and both runs then hold the workspace while each
+  // one's boot reap force-deletes the other's live cells.
+  describe("publishing a new claim", () => {
+    it("never makes an empty lock file visible while it is still being filled", () => {
+      mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+      let seen: string | null | undefined;
+      const put = (from: string, to: string): void => {
+        // what a racing run would read at the last instant before we publish
+        seen = existsSync(to) ? readFileSync(to, "utf8") : null;
+        linkSync(from, to);
+      };
+
+      expect(publishClaim(lockPath(), Date.now(), put)).toBe(true);
+
+      // create-then-fill left "" here, and "" is takeable
+      expect(seen).toBeNull();
+      expect(readLockFile().pid).toBe(process.pid);
+      expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]);
+    });
+
+    it("reports a taken path instead of replacing the claim standing on it", () => {
+      plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: 1 }));
+      const holder = readLockFile();
+
+      expect(publishClaim(lockPath(), Date.now())).toBe(false);
+
+      expect(readLockFile()).toEqual(holder); // untouched, byte for byte
+      expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]);
+    });
+
+    it("still claims where the filesystem cannot hard-link at all", () => {
+      // FAT32, some network shares. The seam comes back with the fallback — but
+      // so does every version before this one, and refusing to run there would
+      // be far worse than the race the link closes.
+      mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+      const noLinks = (): never => {
+        throw Object.assign(new Error("no links here"), { code: "EPERM" });
+      };
+
+      expect(publishClaim(lockPath(), Date.now(), noLinks)).toBe(true);
+
+      expect(readLockFile().pid).toBe(process.pid);
+      expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]);
+    });
+
+    // ...but the seam is real there, so the claim is CHECKED instead of assumed.
+    // A racing claimant reads our empty file as corrupt, evicts it — a rename,
+    // which moves the inode we are still filling out from under the path — and
+    // publishes its own. Reporting a claim on top of that record is what leaves
+    // two runs live, each one's boot reap force-deleting the other's cells.
+    it("refuses when a racing run won the path while the record was still empty", () => {
+      mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+      const raced = (path: string, body: string): void => {
+        writeFileSync(path, body, { flag: "wx" }); // ours lands...
+        // ...and the run that caught it empty has already taken the path
+        writeFileSync(path, JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: 1 }));
+      };
+
+      expect(claimWithoutLink(lockPath(), Date.now(), raced)).toBe(false);
+
+      // and the winner's record is left exactly as it stands
+      expect(readLockFile().pid).toBe(process.ppid);
+    });
+
+    it("claims when the record it reads back is its own", () => {
+      mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+      expect(claimWithoutLink(lockPath(), Date.now())).toBe(true);
+      expect(readLockFile().pid).toBe(process.pid);
+    });
+
+    // The same racing evict as above, one instant earlier: the racer has moved
+    // our still-empty file aside and DELETED it, so our write lands in an inode
+    // nothing points at and the path is simply gone. Reading "nothing here" as a
+    // win is the outcome this whole function exists to refuse — the racer
+    // publishes, we report a claim, and both runs hold the workspace.
+    it("refuses when the record it wrote is no longer at the path at all", () => {
+      mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+      const evicted = (path: string, body: string): void => {
+        writeFileSync(path, body, { flag: "wx" }); // ours lands...
+        rmSync(path, { force: true }); // ...and the racer took it away again
+      };
+
+      expect(claimWithoutLink(lockPath(), Date.now(), evicted)).toBe(false);
+      expect(existsSync(lockPath())).toBe(false);
+    });
+
+    it("refuses a read-back it cannot attribute, which costs a pass and not a run", () => {
+      // a torn record at our own path may be ours OR the racer's half-written
+      // one, and there is no evidence here to tell them apart. claimRunLock
+      // re-reads the path on its very next line and takes the idempotent branch
+      // when it turns out to have been ours, so refusing here is free.
+      mkdirSync(join(ws, ".ralphrun"), { recursive: true });
+      expect(claimWithoutLink(lockPath(), Date.now(), (path) => writeFileSync(path, "{torn"))).toBe(false);
+    });
+  });
+
+  it("stamps the claim it writes, so the next run can age it", () => {
+    const before = Date.now();
+    expect(claimRunLock(ws)).toBeNull();
+    const { pid, stamp } = readLockFile();
+    expect(pid).toBe(process.pid);
+    expect(stamp).toBeGreaterThanOrEqual(before);
+    expect(stamp).toBeLessThanOrEqual(Date.now());
   });
 
   it("releases only its own claim", () => {
@@ -413,6 +660,210 @@ describe("the run lock", () => {
 
   it("does not throw when there is no lock to release", () => {
     expect(() => releaseRunLock(ws)).not.toThrow();
+  });
+
+  // Reading the pid and deleting the file are two operations, and our own stamp
+  // may already be stale — so a run that judged it dead can evict our record and
+  // put ITS OWN there in the gap. Deleting that leaves a live run holding a
+  // workspace with no lock on it, and the next run walks in and reaps its cells
+  // mid-edit. Hence the rename: what we moved is re-read before it is dropped.
+  it("puts back a claim that replaced ours in the window before the delete", () => {
+    claimRunLock(ws);
+    const winner = JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: Date.now() });
+    // the window itself, which cannot be opened from outside
+    const take = (from: string, to: string): void => {
+      writeFileSync(from, winner);
+      renameSync(from, to);
+    };
+
+    dropOwnClaim(lockPath(), take);
+
+    expect(readFileSync(lockPath(), "utf8")).toBe(winner);
+    expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]); // and nothing set aside
+  });
+
+  it("leaves a claim made in the window it opened standing, rather than restoring over it", () => {
+    // the same absent window as evictLock's, and the same rule: what we hand
+    // back is only handed back into the hole we made
+    claimRunLock(ws);
+    const winner = JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: Date.now() });
+    const third = JSON.stringify({ pid: process.ppid + 1, stamp: Date.now(), since: Date.now() });
+    const take = (from: string, to: string): void => {
+      writeFileSync(from, winner); // a run overran our claim before the delete...
+      renameSync(from, to);
+      writeFileSync(from, third); // ...and a third took the path our move freed
+    };
+
+    dropOwnClaim(lockPath(), take);
+
+    expect(readFileSync(lockPath(), "utf8")).toBe(third);
+    expect(readdirSync(join(ws, ".ralphrun"))).toEqual(["run.lock"]);
+  });
+
+  // The put-back is for a claim that is FOREIGN AND STILL LIVE, which is the
+  // same rule evictLock applies. This one used to put back any foreign record at
+  // all, so a run that overran us and then died itself got its dead record
+  // re-planted on the way out — and the next run paid an extra eviction pass to
+  // clear litter we had already moved out of the way.
+  it("does not replant a foreign record that is itself dead", () => {
+    claimRunLock(ws);
+    const dead = JSON.stringify({ pid: 999999, stamp: Date.now(), since: Date.now() });
+    const take = (from: string, to: string): void => {
+      writeFileSync(from, dead);
+      renameSync(from, to);
+    };
+
+    dropOwnClaim(lockPath(), take);
+
+    expect(existsSync(lockPath())).toBe(false);
+    expect(readdirSync(join(ws, ".ralphrun"))).toEqual([]);
+  });
+
+  it("drops its own claim through that same move", () => {
+    claimRunLock(ws);
+    dropOwnClaim(lockPath());
+    expect(existsSync(lockPath())).toBe(false);
+    expect(readdirSync(join(ws, ".ralphrun"))).toEqual([]);
+  });
+
+  // A claim that is not refreshed goes stale under its own holder and invites a
+  // second run to reap its live cells, so the beat has to keep stamping. What it
+  // must NEVER do is stamp a lock it no longer owns: the earlier version stopped
+  // only on a positively-read foreign pid and re-wrote the file on every other
+  // outcome, so a lock that was GONE came back — a claim for a run whose cells
+  // no longer exist, refusing (or reaping) the next legitimate run at that path.
+  describe("the heartbeat that keeps a claim alive", () => {
+    it("re-stamps a lock that is still ours", () => {
+      // CLAIMED first, which is the production shape: a beat only ever runs
+      // inside a run that holds the lock, and a test that stamps without one
+      // exercises a state startLockHeartbeat cannot produce.
+      claimRunLock(ws);
+      const stale = Date.now() - 60_000;
+      plantLock(JSON.stringify({ pid: process.pid, stamp: stale }));
+      const before = Date.now();
+
+      expect(stampLockOnce(lockPath())).toBe("stamped");
+
+      // MOVED FORWARD, which is the whole reason a beat exists: this number is
+      // what the next run reads to decide we are still here
+      const { pid, stamp } = readLockFile();
+      expect(pid).toBe(process.pid);
+      expect(stamp).toBeGreaterThanOrEqual(before);
+    });
+
+    it("stands down instead of stamping a lock another run now holds", () => {
+      plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now() }));
+      expect(stampLockOnce(lockPath())).toBe("lost");
+      // and the overrunning run's claim is left exactly as it found it
+      expect(readLockFile().pid).toBe(process.ppid);
+    });
+
+    // A beat is read-then-write and no filesystem here makes that one operation,
+    // so a run whose event loop was blocked past the stale window can wake, read
+    // the record it wrote before it froze, be legitimately overrun in the
+    // microseconds that follow, and stamp its DEAD claim back on top of the live
+    // one. `since` is what tells the two apart: it never moves while a claim is
+    // held, so the older `since` is the older claim, whatever pid is on the file.
+    it("re-asserts when a run it replaced writes its own dead claim back on top", () => {
+      claimRunLock(ws); // we are the run that legitimately took over
+      const ours = readLockFile();
+      plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: ours.since - 60_000 }));
+
+      expect(stampLockOnce(lockPath())).toBe("stamped");
+
+      // Standing down here instead is the damage: the zombie reads its own pid
+      // and keeps beating, while the run that actually holds the workspace stops
+      // — and its live cells age into orphans the next run reaps out from under
+      // its executors.
+      expect(readLockFile().pid).toBe(process.pid);
+      expect(readLockFile().since).toBe(ours.since);
+    });
+
+    it("still stands down for a claim made after its own", () => {
+      claimRunLock(ws);
+      const ours = readLockFile();
+      plantLock(JSON.stringify({ pid: process.ppid, stamp: Date.now(), since: ours.since + 60_000 }));
+
+      expect(stampLockOnce(lockPath())).toBe("lost");
+      expect(readLockFile().pid).toBe(process.ppid);
+    });
+
+    it("does not recreate a lock file that is gone", () => {
+      // deleted by hand, or the whole workspace directory went away and came
+      // back. Either way this process owns nothing at that path any more, and
+      // re-creating the file plants a ghost claim for a run with no cells left.
+      claimRunLock(ws);
+      unlinkSync(lockPath());
+      expect(stampLockOnce(lockPath())).toBe("lost");
+      expect(existsSync(lockPath())).toBe(false);
+    });
+
+    it("does not rebuild a workspace directory that was removed under it", () => {
+      claimRunLock(ws);
+      rmSync(join(ws, ".ralphrun"), { recursive: true, force: true });
+      expect(stampLockOnce(lockPath())).toBe("lost");
+      expect(existsSync(join(ws, ".ralphrun"))).toBe(false);
+    });
+
+    it("repairs a corrupt lock at its own path rather than abandoning the claim", () => {
+      // a file that EXISTS but makes no sense is a torn write or a read we lost,
+      // not a claim someone else took — and letting it stand would age out a
+      // perfectly healthy run's lock over one bad read
+      claimRunLock(ws); // the claim this repair is FOR — the whole production shape
+      const ours = readLockFile();
+      plantLock("{not json at all");
+
+      expect(stampLockOnce(lockPath())).toBe("stamped");
+
+      expect(readLockFile().pid).toBe(process.pid);
+      // the REPAIR keeps the claim it repairs: minting a fresh `since` here
+      // would make the beat look like a newer claim than the one it belongs to,
+      // and the zombie rule reads `since` to tell those two apart
+      expect(readLockFile().since).toBe(ours.since);
+    });
+
+    it("writes nothing at all when this process holds no claim", () => {
+      // "refresh, never resurrect" from the other side: a beat that stamped a
+      // file it never claimed would mint a fresh `since` for somebody else's
+      // record. Unreachable from startLockHeartbeat, which is only ever started
+      // by a successful claim — and that is exactly why it must not be a write.
+      plantLock(JSON.stringify({ pid: process.pid, stamp: 0, since: 0 }));
+
+      expect(stampLockOnce(lockPath())).toBe("lost");
+
+      expect(readLockFile().stamp).toBe(0);
+    });
+
+    it("stops beating for good once the lock is gone, rather than resurrecting it", () => {
+      // the wiring, not just the decision: "lost" has to clear the interval, or
+      // the very next beat plants the file again ten seconds later
+      vi.useFakeTimers();
+      try {
+        claimRunLock(ws);
+        vi.advanceTimersByTime(30_000); // several beats while we legitimately hold it
+        expect(readLockFile().pid).toBe(process.pid);
+
+        unlinkSync(lockPath());
+        vi.advanceTimersByTime(120_000);
+        expect(existsSync(lockPath())).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+});
+
+// A CONFIGURED worktree_link is not a SHARED tree: seedIgnoredDir puts nothing
+// in a cell for a directory the workspace does not have, so the boot refusal has
+// to ask what is actually there — it refused the safest configuration there is
+// (no node_modules at all, every cell installing its own) for a hazard that
+// could not happen.
+describe("which of the linked directories are actually there", () => {
+  it("keeps only the names the workspace really has", () => {
+    mkdirSync(join(ws, "node_modules"), { recursive: true });
+    expect(linkedDirsPresent(ws, ["node_modules", ".venv"])).toEqual(["node_modules"]);
+    expect(linkedDirsPresent(ws, [".venv"])).toEqual([]);
+    expect(linkedDirsPresent(ws, [])).toEqual([]);
   });
 });
 
@@ -466,6 +917,18 @@ describe("seeding a cell's gitignored directories", () => {
     expect(existsSync(join(ws, "node_modules", "dep", "index.js"))).toBe(true);
   });
 
+  it("never throws when the cell cannot be deleted", () => {
+    // Windows is the case this stands for: a worktree_setup whose install was
+    // just killed leaves its process tree holding a handle in the tree, and the
+    // rm comes back EBUSY/EPERM. Every caller here is DROPPING the cell — a task
+    // that blocked, was skipped, quit, or whose setup failed — and most of them
+    // sit outside any try/finally, so a throw turns a degradation into a crashed
+    // run and leaks the very cell it was called to remove. The only removal
+    // failure a test can force on every platform is a path the runtime refuses
+    // outright, but the guard it proves is the same one.
+    expect(() => removeTaskWorktree(ws, join(ws, "cell" + String.fromCharCode(0) + "name"))).not.toThrow();
+  });
+
   it("skips a name that is absent, and never overwrites one already there", () => {
     seedRepo();
     const dir = createTaskWorktree(ws, "T1", [])!;
@@ -517,16 +980,67 @@ describe("seeding a cell's gitignored directories", () => {
 
   it("probes the real filesystem for whether cells would share, and cleans up", () => {
     seedRepo();
-    // on any dev machine this repo lives on a cloning filesystem (APFS, btrfs,
-    // xfs, ext4); the assertion that matters everywhere is that the probe leaves
-    // nothing behind, since it writes inside the user's workspace
-    ignoredDirsWouldBeShared(ws);
-    expect(existsSync(join(ws, ".ralphrun", "cow-probe"))).toBe(false);
+    // the answer depends on the filesystem under this checkout (APFS and btrfs
+    // clone, NTFS and ext4 without reflink do not), so what is asserted
+    // everywhere is that the probe leaves nothing behind — it writes inside the
+    // user's workspace AND inside their real node_modules
+    ignoredDirsWouldBeShared(ws, ["node_modules"]);
+    expect(readdirSync(join(ws, "node_modules"))).toEqual(["dep"]);
+    expect(existsSync(join(ws, ".ralphrun", "worktrees", ".ralphrun-cow-probe"))).toBe(false);
+  });
+
+  // The probe used to clone an EMPTY directory, and `cp -R --reflink=always`
+  // reflinks regular files while merely creating directories — so it copied
+  // nothing, exited 0, and reported NTFS as clone-capable. The refusal it feeds
+  // was dead on the one platform it was built for, and this test passed anyway.
+  it("clones a real file, from inside the linked directory, into where a cell lands", () => {
+    seedRepo();
+    const seen: { src: string; dst: string; files: string[] }[] = [];
+
+    ignoredDirsWouldBeShared(ws, ["node_modules"], (src, dst) => {
+      seen.push({ src, dst, files: readdirSync(src) });
+      return true;
+    });
+
+    // INSIDE node_modules, not next to .ralphrun: a reflink needs one
+    // filesystem, and node_modules is routinely a junction onto another volume
+    expect(seen[0]?.src.startsWith(join(ws, "node_modules"))).toBe(true);
+    // ...and into a cell's own parent, which is the other half of that pair
+    expect(seen[0]?.dst.startsWith(join(ws, ".ralphrun", "worktrees"))).toBe(true);
+    // the assertion that would have caught it: an empty tree proves nothing
+    expect(seen[0]?.files).not.toEqual([]);
+  });
+
+  it("asks per linked directory, and one shared tree is enough", () => {
+    seedRepo();
+    mkdirSync(join(ws, ".venv"), { recursive: true });
+    const asked: string[] = [];
+    // the second name is the one on the filesystem that cannot clone — a probe
+    // that answered once for the workspace would have missed it entirely
+    const clone = (src: string): boolean => {
+      asked.push(src);
+      return !src.includes(".venv");
+    };
+
+    expect(ignoredDirsWouldBeShared(ws, ["node_modules", ".venv"], clone)).toBe(true);
+    expect(asked).toHaveLength(2);
+    expect(ignoredDirsWouldBeShared(ws, ["node_modules"], clone)).toBe(false);
+  });
+
+  // The probe writes INSIDE the linked directory, and its mkdir is not
+  // recursive on purpose: with `recursive: true` a name the workspace does not
+  // have was created as a side effect of asking about it, and the cleanup only
+  // removed the probe directory — so asking left an empty `.venv` behind that
+  // the user never had. The name is unprobeable, so it keeps the unsafe answer.
+  it("never conjures a linked directory the workspace does not have", () => {
+    seedRepo();
+    expect(ignoredDirsWouldBeShared(ws, [".venv"])).toBe(true);
+    expect(existsSync(join(ws, ".venv"))).toBe(false);
   });
 
   it("assumes the unsafe answer when it cannot probe at all", () => {
     // no repo, no writable workspace: a probe that cannot run must not report
     // "isolated", because that is the answer that lets the hazard through
-    expect(ignoredDirsWouldBeShared(join(ws, "nope", "\0bad"))).toBe(true);
+    expect(ignoredDirsWouldBeShared(join(ws, "nope", "\0bad"), ["node_modules"])).toBe(true);
   });
 });

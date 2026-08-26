@@ -202,40 +202,24 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
    * copy of prd.json it last read.
    */
   const runOneTask = async (task: Task, prd: PRD, solo: boolean): Promise<"stop" | "next"> => {
-    // Worktree mode changes WHERE a task runs, and it is decided before anything
-    // else because a wave cannot proceed without it. null = no isolation
-    // available: for a SOLO task that degrades to the main workspace with a line
-    // rather than failing it, since infrastructure trouble is not something a
-    // retry of the task can fix.
-    const wt = ctx.cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, ctx.cfg.worktree_link ?? []) : null;
-    if (ctx.cfg.worktree_per_task && !wt) {
-      log(progress, t("loop.log.worktreeUnavailable", { id: task.id }));
-      // A wave has no such degradation: its siblings are already executing, and
-      // N executors in one checkout is precisely what loadConfig refuses
-      // (parallelNeedsWorktree) because they overwrite each other's files.
-      // pickWave proves a repo EXISTS, never that `worktree add` will succeed.
-      if (!solo) {
-        const reason = t("loop.reason.noWorktree");
-        task.status = "blocked";
-        const cur = reload({ keepDoing: true });
-        const ct = cur?.tasks.find((x) => x.id === task.id);
-        if (cur && ct) {
-          ct.status = "blocked";
-          savePRD(prdPath, cur);
-        }
-        log(progress, t("loop.log.blockedReview", { id: task.id, s: 0, reason }));
-        emit({ taskId: task.id, status: "blocked", reason });
-        return "next";
-      }
-    }
-    const taskWorkspace = wt ?? workspace;
-    // Per-task AbortController hoisted ABOVE the staged-authoring gate: a skip/
-    // quit during a long advisor expansion has to abort THAT call, and the cell
-    // created below has to be discarded like any other early exit.
+    // Per-task AbortController, created BEFORE anything a keypress might need to
+    // interrupt — which now means before the cell itself, not just before the
+    // staged-authoring gate. beginTask() hands out a FRESH, never-aborted
+    // controller, so every await that happens BEFORE this call is a stretch of
+    // the run in which a skip or quit is simply invisible — settleIfAborted only
+    // reads `signal.aborted`, and shouldQuit/takeSkip are consulted nowhere else
+    // on the way to a non-skeleton task. worktree_setup can be an install that
+    // runs for minutes, so leaving it above meant quit still launched an
+    // executor and skip still ran the very task it was pressed to skip.
     const signal = ctx.tui ? ctx.tui.control.beginTask() : undefined;
+    // Declared here, assigned below, because the two helpers that follow close
+    // over it and both run at points where a cell may or may not exist yet.
+    let wt: string | null = null;
+    /** whether `wt` is null because worktree_setup failed, rather than because no cell could be made */
+    let setupFailed = false;
     // Shared by every PRE-RUN block: the same persistence/teardown the
     // try/finally below would have done, minus a task that never started.
-    const blockPreRun = (reason: string, honorStopOnBlocked = true): "stop" | "next" => {
+    const blockPreRun = (reason: string, honorStopOnBlocked = true, honorTargetedRun = true): "stop" | "next" => {
       task.status = "blocked";
       const cur = reload({ keepDoing: true });
       const ct = cur?.tasks.find((x) => x.id === task.id);
@@ -249,8 +233,10 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       if (signal) ctx.tui?.control.endTask(signal);
       // a TARGETED run would re-select this same blocked task forever
       // ("next" only exits when nothing is runnable); stopping is the honest
-      // end for the one task the user asked for.
-      if (opts.task) {
+      // end for the one task the user asked for. The wave's own no-cell block
+      // opts out: its contract is "block this one task and keep the wave
+      // going", and its siblings are already executing.
+      if (honorTargetedRun && opts.task) {
         done();
         return "stop";
       }
@@ -263,9 +249,9 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       }
       return "next";
     };
-    // Abort triage shared by every pre-run await (advisor expansion, browser
-    // probe): quit / skip / pure teardown each get exactly the treatment the
-    // post-runTask path would have given them.
+    // Abort triage shared by every pre-run await (cell setup, advisor expansion,
+    // browser probe): quit / skip / pure teardown each get exactly the treatment
+    // the post-runTask path would have given them.
     const settleIfAborted = (): "stop" | "next" | null => {
       if (!signal?.aborted) return null;
       const quit = !!ctx.tui?.control.shouldQuit();
@@ -286,6 +272,76 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       log(progress, t("loop.log.quit"));
       return "stop";
     };
+    // Worktree mode changes WHERE a task runs, and it is decided before anything
+    // else because a wave cannot proceed without it. null = no isolation
+    // available: for a SOLO task that degrades to the main workspace with a line
+    // rather than failing it, since infrastructure trouble is not something a
+    // retry of the task can fix.
+    wt = ctx.cfg.worktree_per_task ? createTaskWorktree(workspace, task.id, ctx.cfg.worktree_link ?? []) : null;
+    // The cell's own dependency install (see worktree_setup). It runs here, and
+    // not in the verify gate, because the EXECUTOR works in this cell too — a
+    // gate-only install would hand the agent a tree it cannot build.
+    //
+    // A setup that fails leaves a cell with no dependencies, which is not a
+    // slower cell but an unusable one, so the cell is discarded and the task
+    // takes the no-worktree path below — the same treatment a failed `worktree
+    // add` already gets, for the same reason: infrastructure trouble is not
+    // something a retry of the task can fix.
+    const setup = ctx.cfg.worktree_setup?.trim();
+    if (wt && setup) {
+      // Labelled, not silent: runVerifyCommand's own failure line carries the
+      // install's output tail, which is the part worth reading when it breaks.
+      // The signal goes THROUGH: an install is the longest thing that happens
+      // before the executor exists, so a control that cannot kill it promises a
+      // "takes effect now" it does not deliver.
+      // The task's own environment, exactly as the executor and the verify gate
+      // get it. A setup command is where a project's install hooks run, and a
+      // lifecycle script that reads TEST_DB_SUFFIX or TEST_RUN_ID to name a
+      // scratch database would otherwise name the SAME one from every cell in a
+      // wave — the isolation those variables exist to provide, dropped at the
+      // one step that runs before the task has any other way to ask for it.
+      const env = taskRuntimeEnv(ctx.runId, task.id);
+      const { passed } = await runVerifyCommand(setup, `${task.id} worktree_setup`, wt, progress, signal, env);
+      // BEFORE the !passed branch, and that order is the whole point: an aborted
+      // command resolves `passed: false`, so triaging the failure first would
+      // report the user's own keypress as "worktree_setup failed" and discard a
+      // cell over it — then carry on into a task they asked to abandon.
+      const aborted = settleIfAborted();
+      if (aborted) return aborted;
+      if (!passed) {
+        log(progress, t("loop.log.worktreeSetupFailed", { id: task.id, cmd: setup }));
+        removeTaskWorktree(workspace, wt);
+        wt = null;
+        // WHY the cell is gone, carried to the two places that report it. Both
+        // used to name a cause that is definitely false here — the degradation
+        // line said "no repo, or no commit yet" and the wave's block reason said
+        // "no worktree available" — when the cell and the repo both existed a
+        // moment ago and it was the install inside them that failed. The block
+        // reason is what the log line and the TUI event carry, so getting it
+        // wrong is the whole record a user has of why the task stopped.
+        setupFailed = true;
+      }
+    }
+    if (ctx.cfg.worktree_per_task && !wt) {
+      // A wave has no degradation to offer: its siblings are already executing,
+      // and N executors in one checkout is precisely what loadConfig refuses
+      // (parallelNeedsWorktree) because they overwrite each other's files.
+      // pickWave proves a repo EXISTS, never that `worktree add` will succeed.
+      //
+      // Neither opt-in of blockPreRun's applies: this must not stop a targeted
+      // run or honour stop_on_blocked, because the contract here is "block this
+      // one task and keep the wave going".
+      if (!solo) {
+        const reason = setupFailed ? t("loop.reason.setupFailed", { cmd: setup ?? "" }) : t("loop.reason.noWorktree");
+        return blockPreRun(reason, false, false);
+      }
+      // Solo degrades to the main workspace. The line says which cause it was:
+      // worktreeSetupFailed has already named the install and discarded the
+      // cell, so repeating "no repo, or no commit yet" after it would flatly
+      // contradict the line above.
+      log(progress, t(setupFailed ? "loop.log.worktreeSetupDegraded" : "loop.log.worktreeUnavailable", { id: task.id }));
+    }
+    const taskWorkspace = wt ?? workspace;
     // STAGED AUTHORING GATE — runs BEFORE the task is marked doing:
     // a skeletal task gets ONE best-effort JIT expansion (fill-only), and then
     // must be RUNNABLE or it blocks here. "Runnable" means it has a verify
@@ -371,8 +427,9 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     }
     emit({ taskId: task.id, title: task.title, status: "doing" });
 
-    // (the per-task AbortController is created above the staged-authoring gate,
-    // so a TUI skip can abort even the pre-run advisor expansion)
+    // (the per-task AbortController is created at the very top of this function,
+    // so a TUI skip can abort even the cell's setup install and the pre-run
+    // advisor expansion — everything that happens before a task is "doing")
     const reviewRetryFeedback = pendingReviewFeedback.get(task.id);
     pendingReviewFeedback.delete(task.id);
     // consumed the same way: what the last attempt said is stale the moment this

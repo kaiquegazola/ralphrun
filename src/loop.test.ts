@@ -47,7 +47,14 @@ vi.mock("./worktree.js", () => ({
   worktreeLoss: vi.fn(() => ({ head: null, dirty: false })),
   // false = this filesystem clones, so cells are isolated and there is no hazard
   ignoredDirsWouldBeShared: vi.fn(() => false),
+  // by default every configured link exists in the workspace — the filter is
+  // exercised on its own below, and in the real thing by git.integration.test.ts
+  linkedDirsPresent: vi.fn((_ws: string, links: string[]) => links),
   tasksInstallingDeps: vi.fn(() => []),
+  // the same detector, asked about worktree_setup instead of a task's verify.
+  // What counts as an install is tested for real in prd.test.ts; here it is a
+  // seam, so the refusal can be driven without re-stating the tokeniser.
+  verifyInstallsDeps: vi.fn(() => false),
   // null = the workspace was free
   claimRunLock: vi.fn(() => null),
   releaseRunLock: vi.fn(),
@@ -85,11 +92,13 @@ import {
   claimRunLock,
   createTaskWorktree,
   ignoredDirsWouldBeShared,
+  linkedDirsPresent,
   mergeBackTaskWork,
   reapOrphanWorktrees,
   releaseRunLock,
   removeTaskWorktree,
   tasksInstallingDeps,
+  verifyInstallsDeps,
   worktreeLoss,
 } from "./worktree.js";
 import { runTask } from "./run.js";
@@ -134,9 +143,11 @@ const mReapWorktrees = vi.mocked(reapOrphanWorktrees);
 const mRemoveWorktree = vi.mocked(removeTaskWorktree);
 const mWorktreeLoss = vi.mocked(worktreeLoss);
 const mDepsShared = vi.mocked(ignoredDirsWouldBeShared);
+const mLinksPresent = vi.mocked(linkedDirsPresent);
 const mClaimLock = vi.mocked(claimRunLock);
 const mReleaseLock = vi.mocked(releaseRunLock);
 const mTasksInstalling = vi.mocked(tasksInstallingDeps);
+const mSetupInstalls = vi.mocked(verifyInstallsDeps);
 const mRunTask = vi.mocked(runTask);
 const mVerifyCmd = vi.mocked(runVerifyCommand);
 const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
@@ -257,7 +268,9 @@ beforeEach(() => {
   mReapWorktrees.mockReturnValue(0);
   mWorktreeLoss.mockReturnValue({ head: null, dirty: false });
   mDepsShared.mockReturnValue(false);
+  mLinksPresent.mockImplementation((_ws: string, links: string[]) => links);
   mTasksInstalling.mockReturnValue([]);
+  mSetupInstalls.mockReturnValue(false);
   mVerifyCmd.mockResolvedValue({ passed: true, output: "" });
   mClaimLock.mockReturnValue(null);
   mMount.mockReturnValue(makeHandle());
@@ -886,6 +899,20 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mRunTask).not.toHaveBeenCalled();
   });
 
+  // Three passes and no claim is a refusal with NO pid to name: the candidates
+  // left are a record the loop positively judged dead and its own pid, so the
+  // "another ralphrun (pid N) is already running" line told the user to wait for
+  // a process that is not running, or to wait for themselves. Neither is
+  // actionable; the file is.
+  it("names the lock file, not a fabricated pid, when the lock cannot be claimed at all", async () => {
+    mClaimLock.mockReturnValue("unknown");
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("run.lock"));
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining(String(process.pid)));
+    expect(mReapWorktrees).not.toHaveBeenCalled();
+    expect(mRunTask).not.toHaveBeenCalled();
+  });
+
   it("releases the workspace even when the run did nothing", async () => {
     mNextTask.mockReset();
     mNextTask.mockReturnValue(null);
@@ -1063,6 +1090,96 @@ describe("runLoop real run (non-TTY fallback)", () => {
       await runLoop({ prd: "prd.json" });
       expect(mDepsShared).not.toHaveBeenCalled();
     });
+
+    // CONFIGURED is not SHARED. A cell gets nothing seeded for a directory the
+    // workspace does not have, so on a checkout with no node_modules every cell
+    // installs a tree of its very own — and refusing on the configured list
+    // alone rejected exactly the shape Windows users are told to adopt.
+    it("starts when the configured links are not in the workspace yet", async () => {
+      mLoadConfig.mockReturnValue(cfg({ ...parallelCfg(), worktree_setup: "npm ci" }));
+      mLinksPresent.mockReturnValue([]);
+      mSetupInstalls.mockReturnValue(true);
+      mTasksInstalling.mockReturnValue(["T1"]);
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mDepsShared).not.toHaveBeenCalled(); // nothing to share: not even worth probing
+      expect(mRunTask).toHaveBeenCalled();
+    });
+
+    it("still refuses over the linked directory that IS there, and names only that one", async () => {
+      mLoadConfig.mockReturnValue(
+        cfg({ worktree_per_task: true, max_parallel_tasks: 2, worktree_link: ["node_modules", ".venv"] }),
+      );
+      mLinksPresent.mockReturnValue([".venv"]); // the Python case, on a checkout that never ran npm
+      mDepsShared.mockReturnValue(true);
+      mTasksInstalling.mockReturnValue(["T1"]);
+
+      await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+
+      const msg = String(errSpy.mock.calls.at(-1)?.[0]);
+      expect(msg).toContain(".venv");
+      // naming a directory that is not even there sends the user emptying the
+      // wrong half of worktree_link and hitting the same refusal again
+      expect(msg).not.toContain("node_modules");
+    });
+
+    // worktree_setup is the STRICTLY WORSE shape of the same hazard: it runs in
+    // every cell, so leaving worktree_link populated alongside it means an
+    // install into the one shared tree from every task at once — with a backlog
+    // whose verify is a blameless `npm test`. Inspecting task verify commands
+    // alone sailed straight past it.
+    it("refuses when worktree_setup installs into the shared tree, however innocent the tasks are", async () => {
+      mLoadConfig.mockReturnValue(cfg({ ...parallelCfg(), worktree_setup: "npm ci" }));
+      mDepsShared.mockReturnValue(true);
+      mTasksInstalling.mockReturnValue([]); // every verify is "npm test"
+      mSetupInstalls.mockReturnValue(true);
+
+      await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+
+      expect(mSetupInstalls).toHaveBeenCalledWith("npm ci");
+      const msg = String(errSpy.mock.calls.at(-1)?.[0]);
+      // it names the knob and the fix, not a list of task ids — the hazard is
+      // not any task's doing, and pointing at ids sends the user editing prd.json
+      expect(msg).toContain("worktree_setup");
+      expect(msg).toContain("npm ci");
+      expect(msg).toContain("worktree_link");
+      expect(mRunTask).not.toHaveBeenCalled();
+    });
+
+    it("starts when worktree_setup is set but installs nothing", async () => {
+      mLoadConfig.mockReturnValue(cfg({ ...parallelCfg(), worktree_setup: "npm run codegen" }));
+      mDepsShared.mockReturnValue(true);
+      mSetupInstalls.mockReturnValue(false);
+      await runLoop({ prd: "prd.json" });
+      expect(mRunTask).toHaveBeenCalled();
+    });
+
+    it("is fine with an installing worktree_setup once worktree_link is empty", async () => {
+      // the documented way OUT of the refusal, and on Windows the only one:
+      // nothing is seeded, so each cell installs a tree of its very own and
+      // there is nothing shared left to corrupt
+      mLoadConfig.mockReturnValue(
+        cfg({ worktree_per_task: true, max_parallel_tasks: 2, worktree_link: [], worktree_setup: "npm ci" }),
+      );
+      mDepsShared.mockReturnValue(true);
+      mSetupInstalls.mockReturnValue(true);
+      await runLoop({ prd: "prd.json" });
+      expect(mRunTask).toHaveBeenCalled();
+    });
+
+    it("still names the tasks when it is their verify that installs, not the setup", async () => {
+      // the pre-existing refusal has to keep its own message: the two hazards
+      // have different fixes, so one merged error would misdirect half of them
+      mLoadConfig.mockReturnValue(cfg({ ...parallelCfg(), worktree_setup: "npm run codegen" }));
+      mDepsShared.mockReturnValue(true);
+      mSetupInstalls.mockReturnValue(false);
+      mTasksInstalling.mockReturnValue(["T1", "T4"]);
+
+      await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("T1, T4"));
+    });
   });
 
   it("runs the task inside its worktree and cherry-picks the result back", async () => {
@@ -1092,6 +1209,136 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mMergeBack).not.toHaveBeenCalled();
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("no worktree available"));
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
+  });
+  describe("worktree_setup", () => {
+    const setupCfg = (cmd: string) => cfg({ worktree_per_task: true, worktree_setup: cmd });
+
+    it("runs the setup command inside the cell, before the executor starts", async () => {
+      mLoadConfig.mockReturnValue(setupCfg("bun install"));
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mVerifyCmd).toHaveBeenCalledWith(
+        "bun install",
+        expect.stringContaining("T1"),
+        "/ws/.ralphrun/worktrees/T1", // the CELL, never the workspace
+        expect.any(String),
+        undefined, // no TTY here, so there is no control to pass through
+        // the TASK's environment, exactly as the executor and the verify gate
+        // get it: a lifecycle script that names a scratch database from
+        // TEST_DB_SUFFIX must not name the same one from every cell in a wave
+        expect.objectContaining({ RALPHRUN_TASK_ID: "T1", TEST_DB_SUFFIX: expect.stringContaining("T1") }),
+      );
+      // ORDER is the point, not just the call: the executor works in this cell
+      // too, so a setup that ran after it would hand the agent a tree with no
+      // dependencies — it could not build the project it was asked to change.
+      expect(mVerifyCmd.mock.invocationCallOrder[0]).toBeLessThan(mRunTask.mock.invocationCallOrder[0]);
+      expect(mRunTask.mock.calls[0][3]).toBe("/ws/.ralphrun/worktrees/T1");
+    });
+
+    it("runs nothing when it is unset", async () => {
+      mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
+      await runLoop({ prd: "prd.json" });
+      expect(mVerifyCmd).not.toHaveBeenCalled();
+    });
+
+    it("treats a whitespace-only command as off rather than shelling it", async () => {
+      mLoadConfig.mockReturnValue(setupCfg("   "));
+      await runLoop({ prd: "prd.json" });
+      expect(mVerifyCmd).not.toHaveBeenCalled();
+    });
+
+    it("discards the cell and degrades when the setup fails", async () => {
+      // a cell whose install failed has NO dependencies, so every verify in it
+      // fails — using it anyway would burn the task's whole retry budget on
+      // something no retry of the task can fix
+      mLoadConfig.mockReturnValue(setupCfg("bun install"));
+      mVerifyCmd.mockResolvedValue({ passed: false, output: "ENOTFOUND registry.npmjs.org" });
+
+      await runLoop({ prd: "prd.json" });
+
+      expect(mRemoveWorktree).toHaveBeenCalledWith(resolve("."), "/ws/.ralphrun/worktrees/T1");
+      expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("worktree_setup failed"));
+      // and the task still RUNS — in the main workspace, which has the deps
+      expect(mRunTask.mock.calls[0][3]).toBe(resolve("."));
+      expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("DONE T1"));
+    });
+
+    // The setup install is the LONGEST thing that happens before a task is even
+    // "doing" — minutes of `npm ci` — and it used to be awaited before the task
+    // had an AbortController at all. beginTask() hands out a fresh, never-aborted
+    // signal, so a keypress landing in that window was invisible to every check
+    // downstream: quit still launched an executor, skip still ran the task.
+    describe("a control pressed while the setup is still installing", () => {
+      /**
+       * A TTY whose control is pressed WHILE the install is running — not
+       * before it, which the loop's own pre-task checks would already catch.
+       * That timing is the entire bug: the window opens after the task is
+       * dispatched and closes before anything downstream looks at the control.
+       */
+      function pressDuringSetup(press?: "skip" | "quit"): { handle: Handle; ac: AbortController } {
+        setTTY(true);
+        const ac = new AbortController();
+        const handle = makeHandle();
+        let pressed = false;
+        handle.control.beginTask = vi.fn(() => ac.signal);
+        handle.control.shouldQuit = vi.fn(() => pressed && press === "quit");
+        handle.control.takeSkip = vi.fn(() => pressed && press === "skip");
+        mMount.mockReturnValue(handle);
+        mLoadConfig.mockReturnValue(setupCfg("npm ci"));
+        mVerifyCmd.mockImplementation(async () => {
+          pressed = true;
+          ac.abort(); // the keypress lands mid-install, and the install is killed
+          return { passed: false, output: "" }; // which is how an aborted command settles
+        });
+        return { handle, ac };
+      }
+
+      it("hands the abort signal to the install so it is actually killable", async () => {
+        const { ac } = pressDuringSetup();
+        await runLoop({ prd: "prd.json" });
+        expect(mVerifyCmd).toHaveBeenCalledWith(
+          "npm ci",
+          expect.stringContaining("T1"),
+          "/ws/.ralphrun/worktrees/T1",
+          expect.any(String),
+          ac.signal,
+          expect.objectContaining({ RALPHRUN_TASK_ID: "T1" }),
+        );
+      });
+
+      it("skips the task instead of running the one the user just skipped", async () => {
+        const { handle, ac } = pressDuringSetup("skip");
+
+        await runLoop({ prd: "prd.json" });
+
+        expect(mRunTask).not.toHaveBeenCalled();
+        expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("skipped by user"));
+        expect(mRemoveWorktree).toHaveBeenCalledWith(resolve("."), "/ws/.ralphrun/worktrees/T1");
+        expect(handle.control.endTask).toHaveBeenCalledWith(ac.signal);
+      });
+
+      it("stops the run on quit rather than launching an executor anyway", async () => {
+        const { handle, ac } = pressDuringSetup("quit");
+
+        await runLoop({ prd: "prd.json" });
+
+        expect(mRunTask).not.toHaveBeenCalled();
+        expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("quit by user"));
+        expect(handle.control.endTask).toHaveBeenCalledWith(ac.signal);
+      });
+
+      it("does not blame the user's keypress on the setup command", async () => {
+        // an aborted command settles `passed: false` exactly like a broken one,
+        // so triaging the failure first would log a setup failure that never
+        // happened — and then carry on into a task the user abandoned
+        pressDuringSetup("skip");
+
+        await runLoop({ prd: "prd.json" });
+
+        expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("worktree_setup failed"));
+      });
+    });
   });
 
   it("routes a merge-back conflict into the existing retry ladder", async () => {
@@ -1646,6 +1893,48 @@ describe("runLoop parallel waves", () => {
     expect(read().A.status).toBe("done");
     expect(read().B.status).toBe("done");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE of 2"));
+  });
+  it("blocks a wave task whose worktree_setup fails rather than sharing one checkout", async () => {
+    // solo degrades to the main workspace; a wave cannot — N executors in one
+    // checkout is precisely what loadConfig refuses, so blocked is the honest end
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, max_parallel_tasks: 2, worktree_setup: "bun install" }));
+    mVerifyCmd.mockResolvedValue({ passed: false, output: "ENOTFOUND registry.npmjs.org" });
+    const read = livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(read().A.status).toBe("blocked");
+    expect(read().B.status).toBe("blocked");
+    expect(mRunTask).not.toHaveBeenCalled();
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("worktree_setup failed"));
+    // WHY, not just that: the block reason is what the log line and the TUI
+    // event carry, and it used to say "no worktree available, and a parallel
+    // wave cannot share one checkout" — a cause that is flatly false here, since
+    // the cell existed until the install failed inside it.
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/BLOCKED A .*worktree_setup failed/));
+    // ...and the false one, which named a repo that was demonstrably there
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("no repo, or no commit yet"));
+  });
+
+  it("gives back the abort controller of a wave task it blocks for want of a cell", async () => {
+    // this branch settles the task without ever reaching the try/finally, so it
+    // is the one exit that has to hand the controller back by hand. Leaking it
+    // grows the TUI's acs map for the rest of the run and leaves a settled task
+    // among the ones a later keypress would abort.
+    setTTY(true);
+    const handle = makeHandle();
+    mMount.mockReturnValue(handle);
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, max_parallel_tasks: 2 }));
+    mCreateWorktree.mockReturnValue(null); // no cell for either task
+    livePrd([wtTask("A", ["src/a/**"]), wtTask("B", ["src/b/**"])]);
+    dispatchOnce();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask).not.toHaveBeenCalled();
+    expect(handle.control.beginTask).toHaveBeenCalledTimes(2);
+    expect(handle.control.endTask).toHaveBeenCalledTimes(2);
   });
 
   // Each cell verified against the trunk it was CUT from, so N tasks can each

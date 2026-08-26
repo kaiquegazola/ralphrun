@@ -113,6 +113,29 @@ export interface Config {
    */
   worktree_link?: string[];
   /**
+   * A command run once inside each fresh worktree — after `git worktree add`
+   * and after worktree_link is seeded, before the executor starts.
+   *
+   * This is what makes an EMPTY worktree_link affordable. Seeding relies on a
+   * copy-on-write clone, and where the filesystem cannot clone (NTFS, and so
+   * every Windows filesystem in practice) the fallback shares the workspace's
+   * REAL node_modules by symlink — so two parallel installs corrupt the user's
+   * own dependency tree, which is why startrun refuses that combination
+   * outright. Naming the install here instead (`bun install`, `npm ci`, `uv
+   * sync`) gives every cell dependencies of its own, with nothing shared left
+   * to corrupt.
+   *
+   * It runs before the EXECUTOR, not only before the gate: the executor works
+   * in the cell too, and one that starts in a tree with no dependencies cannot
+   * run the project it was asked to change.
+   *
+   * A cell whose setup fails is DISCARDED rather than used — an empty tree
+   * fails every verify and would burn the task's whole retry budget on
+   * something no retry of the task can fix. Empty (the default) = off, so no
+   * existing setup starts running a command it never asked for.
+   */
+  worktree_setup?: string;
+  /**
    * How many tasks may execute at the same time. Clamped to [1, 8] — the
    * binding constraint is agent spend and provider rate limits, not cores.
    *
@@ -149,6 +172,7 @@ export const DEFAULTS: Config = {
   review_timeout: 900,
   worktree_per_task: false,
   worktree_link: ["node_modules"],
+  worktree_setup: "",
   max_parallel_tasks: 1,
   extra_executor_args: [],
 };
@@ -217,6 +241,14 @@ export function loadConfig(
   // task does would ever leave it. Fail at load, where the user can see it, not
   // once per task at runtime.
   if (cfg.worktree_per_task && !cfg.commit_per_task) throw new Error(t("loop.err.worktreeNeedsCommit"));
+  // A hand-edited config file is assigned over the defaults verbatim, and this
+  // knob is a STRING that gets trimmed and shelled once per cell. An array or a
+  // number reaches that trim as a TypeError thrown mid-task — after the cell
+  // exists, so the user gets a stack trace instead of the line naming the knob,
+  // and the run dies at the first task rather than at load where it belongs.
+  if (cfg.worktree_setup !== undefined && typeof cfg.worktree_setup !== "string") {
+    throw new Error(t("loop.err.badWorktreeSetup"));
+  }
   // `|| 1` also absorbs 0 and a non-numeric value from a hand-edited config
   cfg.max_parallel_tasks = Math.min(8, Math.max(1, Math.trunc(Number(cfg.max_parallel_tasks)) || 1));
   // Same reason as above, one step harder: without a worktree per task, two

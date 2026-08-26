@@ -124,6 +124,25 @@ describe("loadConfig", () => {
     expect(cfg.worktree_per_task).toBe(false);
     expect(cfg.worktree_link).toEqual(["node_modules"]);
   });
+  it("runs no per-cell setup command by default", () => {
+    // empty = off: a knob that shells a command nobody configured would run an
+    // install in every cell of every existing worktree setup
+    vi.mocked(existsSync).mockReturnValue(false);
+    expect(loadConfig("/x/prd.json", undefined, {}).worktree_setup).toBe("");
+  });
+
+  it.each([["an array", ["bun", "install"]], ["a number", 3], ["an object", { cmd: "bun install" }]])(
+    "refuses %s in worktree_setup at load, where the user can see it",
+    (_shape, value) => {
+      // the config file is assigned over the defaults verbatim, and this knob is
+      // trimmed and shelled once per cell — a non-string reaches that trim as a
+      // TypeError thrown mid-task, after the cell exists and outside its
+      // cleanup, so the user gets a stack instead of the line naming the knob
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ worktree_setup: value }) as unknown as string);
+      expect(() => loadConfig("/x/prd.json", undefined, {})).toThrow("worktree_setup");
+    },
+  );
 
   it("runs one task at a time by default", () => {
     // parallelism has to be opted into TWICE (worktrees, then a cap), so no

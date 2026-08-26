@@ -189,7 +189,11 @@ describe("killTree kills a real grandchild on every platform", () => {
     const dir = mkdtempSync(join(tmpdir(), "ralphrun-tree-"));
     const pidFile = join(dir, "gc.pid");
     // grandchild: record my pid, then stay alive well past the test
-    const script = `require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);`;
+    // cmd.exe sees the `>` in an unquoted arrow function as output redirection
+    // and creates `{}` in its cwd before node gets the script. Keep this child
+    // payload free of shell metacharacters: the process-tree assertion needs
+    // cmd.exe, but not a second command hidden inside its argument.
+    const script = `require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(function () {}, 60000);`;
     const node = process.execPath;
 
     const proc =

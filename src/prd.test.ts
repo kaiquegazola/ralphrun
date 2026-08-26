@@ -108,6 +108,70 @@ describe("verifyInstallsDeps", () => {
     "npm run build && npm ci && npm test", // not the first segment
     "npm test; npm install",
     "npm test\nnpm ci", // a multi-line verify
+    // NOT node-only, because worktree_link is not: `.venv` is the documented
+    // Python case and README names `uv sync` in the same breath as `npm ci`, so
+    // a detector that knew only the JavaScript managers let the exact
+    // combination this refusal exists for through
+    "uv sync",
+    "uv sync --frozen",
+    "uv add httpx",
+    "uv pip install -r requirements.txt",
+    "uv pip sync requirements.txt",
+    "poetry install",
+    "poetry add httpx",
+    "pip install -r requirements.txt",
+    "pip3 install -e .",
+    // The MODULE form, which pip's own docs recommend over bare `pip` because it
+    // pins which environment gets written — the one worktree_link shares. The
+    // first token is the interpreter, so a detector keyed on it alone let every
+    // one of these install into the user's real `.venv` from every cell at once.
+    "python -m pip install -r requirements.txt",
+    "python3 -m pip install httpx",
+    "py -m pip install -e .", // the Windows launcher
+    "python3.12 -m pip install httpx", // a version suffix names the build, not another command
+    "python.exe -m pip install httpx",
+    "python -m pip install --upgrade pip && pytest", // not the only segment
+    "bundle install",
+    "npm.cmd ci", // the Windows shim's real name is the same install
+    // A global flag sits LEFT of the verb, so the verb is not tokens[1]. Reading
+    // it as tokens[1] called every one of these a non-install and let the
+    // concurrent-install corruption run in every cell at once.
+    "npm --prefix . install",
+    "npm --silent ci", // a boolean flag, so the verb is one token further right
+    "npm --loglevel error ci", // ...and this one carries a value, so it is two
+    "npm --loglevel=error ci", // the `=` form carries its own value
+    "pnpm -C packages/app install",
+    // ...and a flag that carries a value for ONE manager must not swallow the
+    // verb for another: `-w` is npm's `--workspace <name>` and pnpm's boolean
+    // `--workspace-root`, so one flat option table read `add` as `-w`'s value
+    // and reported the install as none at all.
+    "pnpm -w add lodash",
+    "pnpm -w install",
+    "pnpm --filter app install", // and pnpm's --filter really does take one
+    "npm --workspace pkg install", // as does npm's --workspace
+    "yarn --cwd app install",
+    "yarn --frozen-lockfile", // classic yarn installs with options and no verb
+    "uv --directory svc sync",
+    "uv --directory svc pip install -r requirements.txt", // a nested verb, two flags in
+    "pip --quiet install -r requirements.txt",
+    // The shell consumes all of this BEFORE the command runs, so the manager is
+    // not the first token — and every one of these installs just the same. Read
+    // as written, the segment's head is an assignment, a wrapper or punctuation,
+    // which is in no table, so the segment was passed over entirely.
+    "CI=1 npm ci",
+    "NODE_ENV=production FOO=bar npm install",
+    "env CI=1 npm ci",
+    "set CI=1 & npm ci", // the Windows spelling, and a single `&` still separates
+    "npm run build & npm ci",
+    "(npm ci)", // a subshell
+    "{ npm ci; }", // ...and a group
+    'sh -c "npm ci"',
+    "bash -lc 'uv sync'",
+    'cmd /c "npm ci"',
+    'powershell -Command "npm ci"',
+    'sh -c "npm test && npm ci"', // the wrapper's command has segments of its own
+    "NPM.CMD ci", // cmd.exe resolves the shim case-insensitively; so must this
+    "PIP install -r requirements.txt",
   ])("detects %j as an install", (cmd) => {
     expect(verifyInstallsDeps(cmd)).toBe(true);
   });
@@ -126,6 +190,36 @@ describe("verifyInstallsDeps", () => {
     "npm", // a manager with no sub-command installs nothing...
     "pnpm",
     "bun",
+    "uv run pytest", // `run` makes the next token a command, not a verb
+    "uv pip list", // reads the environment, never writes it
+    "uv pip show httpx",
+    "poetry run pytest",
+    "pip list",
+    "bundle exec rspec",
+    // the flag-skipping must not degrade into "does the word appear anywhere":
+    // the verb still has to be in the verb's POSITION
+    "npm --silent run install-check",
+    "npm test -- --grep install", // everything right of `--` is the sub-command's
+    "uv --directory svc run pytest",
+    // the interpreter is only an install when `pip install` is what follows it:
+    // folding `python` into the tables must not make every python command one
+    "python -m pip list",
+    "python -m pytest",
+    "python -m build",
+    "python manage.py migrate",
+    "py -m venv .venv", // makes an environment, never writes into a shared one
+    // peeling the shell's prefixes must not degrade into "the word appears
+    // somewhere": a false positive here refuses a backlog that was fine
+    "CI=1 npm test",
+    "env CI=1 npm run install-check",
+    'sh -c "echo npm ci"', // named inside the wrapper, still not run
+    "sh ./install.sh", // a SCRIPT this detector cannot read, so it must not guess
+    "bash scripts/ci.sh",
+    "(npm test)",
+    // the separators only separate where the SHELL separates: inside a quoted
+    // word they are text, and cutting there invents segments nobody runs
+    "npm test -- --grep 'a&b'",
+    'echo "a; npm ci"',
     "",
     "   ",
   ])("does not flag %j", (cmd) => {

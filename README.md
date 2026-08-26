@@ -121,6 +121,7 @@ tail -f ralph.out
   "review_timeout": 900,
   "worktree_per_task": false,
   "worktree_link": ["node_modules"],
+  "worktree_setup": "",
   "max_parallel_tasks": 1,
   "extra_executor_args": []
 }
@@ -258,9 +259,45 @@ tail -f ralph.out
   On a filesystem that cannot clone, seeding falls back to a **symlink at the
   real directory**, which is shared. That is fine serially — it is what you would
   have run by hand — but with `max_parallel_tasks > 1` two installs at once
-  corrupt the tree, and discarding a worktree cannot undo it. ralphrun probes the
-  filesystem at startup and **refuses the run** when all three hold at once
+  corrupt the tree, and discarding a worktree cannot undo it. At startup
+  ralphrun probes each linked directory where it actually lives — a
+  `node_modules` mounted or junctioned onto another volume is shared even when
+  the repo's own filesystem clones fine — and **refuses the run** when all three
+  hold at once
   (shared tree, parallel tasks, and a `verify` that installs), naming the tasks.
+- **`worktree_setup` is the way out of that refusal**, and on Windows it is the
+  only one that keeps parallelism. No Windows filesystem reflinks in practice —
+  NTFS cannot at all, and while ReFS does support block cloning, the `cp
+  --reflink=always` this probe uses is a Linux ioctl that no `cp` on Windows can
+  issue — so on Windows the shared-tree half of that test is *always* true, and
+  the refusal reduces to the other two: parallel tasks, plus a `verify` (or a
+  `worktree_setup`) that installs, with one of the linked directories actually
+  present in the workspace. With `max_parallel_tasks: 1`, or with nothing that
+  installs, a present `node_modules` is never refused.
+
+  Name your install command here instead — `bun install`, `npm ci`, `uv sync` —
+  and empty `worktree_link`. It runs once per cell, after `git worktree add` and
+  after `worktree_link` is seeded, before the executor starts — so every task
+  gets dependencies of its own and there is nothing shared left to corrupt. This is affordable in practice because modern installers are
+  link-based against a global cache: `bun install` hardlinks (the default
+  backend on Linux and Windows alike) and `pnpm` does the same, so a per-cell
+  tree costs almost no disk and almost no time — provided that cache sits on the
+  **same volume** as the worktrees, since a hard link cannot cross one.
+
+  It runs before the **executor**, not only before the gate: the agent works in
+  the cell too, and one that starts in a tree with no dependencies cannot build
+  the project it was asked to change. A cell whose setup **fails** is discarded
+  rather than used — an empty tree fails every `verify`, which would burn the
+  task's whole retry budget on something no retry can fix. A solo task then
+  degrades to the main workspace; a task in a wave is blocked, because N
+  executors in one checkout is the thing worktrees exist to prevent.
+
+  Note the two knobs are alternatives, not a pair, and that is **enforced**, not
+  just advised. Leaving `worktree_link` populated *and* giving `worktree_setup`
+  an install means installing into the shared tree from every cell at once —
+  worse than the case above, since it needs no installing `verify` to happen and
+  spares no task. The same startup probe refuses it, naming the knob rather than
+  a list of task ids, because no task caused it and none of them can fix it.
 
 - **The wave integration gate.** Every cell verifies against the trunk it was
   *cut from*, so two tasks can each pass alone and be broken the moment they land

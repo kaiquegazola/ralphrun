@@ -47,10 +47,16 @@ const en = {
     "worktree_per_task requires commit_per_task: the commit is how a task's work leaves its worktree.",
   "loop.err.parallelNeedsWorktree":
     "max_parallel_tasks > 1 requires worktree_per_task: two executors in one checkout overwrite each other.",
+  "loop.err.badWorktreeSetup":
+    'worktree_setup must be a string: it is the shell command run once inside each fresh worktree (e.g. "bun install"). Use "" to turn it off.',
   "loop.err.sharedInstall":
     "This filesystem cannot copy-on-write clone, so worktree_link ({links}) is shared between parallel tasks by symlink — and these tasks install into it: {ids}. Two installs at once corrupt your real dependency tree, which discarding a worktree cannot undo. Set max_parallel_tasks to 1, drop the installing command from those verify gates, or empty worktree_link and let each task install its own.",
+  "loop.err.sharedSetupInstall":
+    "This filesystem cannot copy-on-write clone, so worktree_link ({links}) is shared between parallel tasks by symlink — and worktree_setup installs into that one shared tree from every task at once: {cmd}. Concurrent installs corrupt your real dependency tree, which discarding a worktree cannot undo. worktree_link and worktree_setup are alternatives, not a pair: empty worktree_link so each task installs its own dependencies, or drop the install from worktree_setup.",
   "loop.err.alreadyRunning":
     "another ralphrun (pid {pid}) is already running in {path}. Two runs in one workspace delete each other's task worktrees mid-edit. Wait for it, or stop it first.",
+  "loop.err.lockUnclaimable":
+    "could not claim {path} for this run: the lock at {file} can be neither read nor moved, or another run keeps taking it. If no other ralphrun is running here, delete that file and try again.",
   "loop.label.wave": "wave",
   "loop.log.waveVerify": "  verifying the merged result of {n} landed tasks ({ids})",
   "loop.log.waveBroken":
@@ -94,6 +100,8 @@ const en = {
   "loop.log.learnedDropped": "  {id}: the reviewer wrote a note but the architecture_notes budget is full or already had it",
   "loop.log.scopeEscape": "  {id}: FAILED — edited {n} path(s) outside its declared scope: {paths}",
   "loop.log.worktreeUnavailable": "  {id}: no worktree available (no repo, or no commit yet) — running in the main workspace",
+  "loop.log.worktreeSetupFailed": "  {id}: worktree_setup failed ({cmd}) — discarding the cell, its dependencies never installed",
+  "loop.log.worktreeSetupDegraded": "  {id}: running in the main workspace instead, which has the dependencies",
   "loop.log.worktreeConflict": "  {id}: its work conflicts with what already landed — retrying on top of it (recoverable at {hash})",
   "loop.log.worktreeDirty": "  {id}: merge-back refused — the main workspace has staged or uncommitted changes that it would overwrite; commit or stash them (recoverable at {hash})",
   "loop.log.commitRefused": "  {id}: git refused the commit (hook, identity, or signing key) — its work never left the worktree",
@@ -118,6 +126,7 @@ const en = {
   "loop.reason.mergeDirty": "merge-back refused by staged or uncommitted changes in the workspace",
   "loop.reason.commitRefused": "git refused the task's commit, so nothing could be merged back",
   "loop.reason.noWorktree": "no worktree available, and a parallel wave cannot share one checkout",
+  "loop.reason.setupFailed": "worktree_setup failed ({cmd}), and a parallel wave cannot share one checkout",
   "loop.reason.mergeConflict": "merge-back conflicted with work that landed first",
   "loop.reason.maxRetries": "max retries exhausted",
   "loop.reason.reviewStalled": "review loop stalled",
@@ -409,10 +418,16 @@ const ptBr: Record<MsgKey, string> = {
     "worktree_per_task exige commit_per_task: o commit é como o trabalho de uma task sai da worktree dela.",
   "loop.err.parallelNeedsWorktree":
     "max_parallel_tasks > 1 exige worktree_per_task: dois executores no mesmo checkout se sobrescrevem.",
+  "loop.err.badWorktreeSetup":
+    'worktree_setup precisa ser uma string: é o comando de shell rodado uma vez dentro de cada worktree nova (ex.: "bun install"). Use "" para desligar.',
   "loop.err.sharedInstall":
     "Este filesystem não faz clone copy-on-write, então worktree_link ({links}) fica compartilhado entre tasks paralelas por symlink — e estas tasks instalam nele: {ids}. Dois installs ao mesmo tempo corrompem a sua árvore de dependências real, e descartar uma worktree não desfaz isso. Ponha max_parallel_tasks em 1, tire o comando de install desses verify, ou esvazie worktree_link e deixe cada task instalar a sua.",
+  "loop.err.sharedSetupInstall":
+    "Este filesystem não faz clone copy-on-write, então worktree_link ({links}) fica compartilhado entre tasks paralelas por symlink — e o worktree_setup instala nessa única árvore compartilhada a partir de todas as tasks ao mesmo tempo: {cmd}. Installs concorrentes corrompem a sua árvore de dependências real, e descartar uma worktree não desfaz isso. worktree_link e worktree_setup são alternativas, não um par: esvazie worktree_link para cada task instalar as suas dependências, ou tire o install do worktree_setup.",
   "loop.err.alreadyRunning":
     "outro ralphrun (pid {pid}) já está rodando em {path}. Dois runs no mesmo workspace apagam as worktrees de task um do outro no meio da edição. Espere ele terminar, ou pare-o antes.",
+  "loop.err.lockUnclaimable":
+    "não foi possível reservar {path} para esta execução: o lock em {file} não pode ser lido nem movido, ou outra execução fica tomando ele. Se nenhum outro ralphrun estiver rodando aqui, apague esse arquivo e tente de novo.",
   "loop.label.wave": "onda",
   "loop.log.waveVerify": "  verificando o resultado merged de {n} tasks que aterrissaram ({ids})",
   "loop.log.waveBroken":
@@ -452,6 +467,8 @@ const ptBr: Record<MsgKey, string> = {
   "loop.log.learnedDropped": "  {id}: o reviewer escreveu uma nota mas o orçamento do architecture_notes está cheio ou já a continha",
   "loop.log.scopeEscape": "  {id}: FALHOU — editou {n} caminho(s) fora do scope declarado: {paths}",
   "loop.log.worktreeUnavailable": "  {id}: nenhuma worktree disponível (sem repo, ou sem commit ainda) — rodando no workspace principal",
+  "loop.log.worktreeSetupFailed": "  {id}: worktree_setup falhou ({cmd}) — descartando a cell, as dependências dela não foram instaladas",
+  "loop.log.worktreeSetupDegraded": "  {id}: rodando no workspace principal em vez disso, que tem as dependências",
   "loop.log.worktreeConflict": "  {id}: o trabalho conflita com o que já entrou — tentando de novo em cima dele (recuperável em {hash})",
   "loop.log.worktreeDirty": "  {id}: merge de volta recusado — o workspace principal tem mudanças staged ou não commitadas que ele sobrescreveria; commite ou faça stash (recuperável em {hash})",
   "loop.log.commitRefused": "  {id}: o git recusou o commit (hook, identidade ou chave de assinatura) — o trabalho nunca saiu da worktree",
@@ -477,6 +494,7 @@ const ptBr: Record<MsgKey, string> = {
   "loop.reason.mergeDirty": "merge de volta recusado por mudanças staged ou não commitadas no workspace",
   "loop.reason.commitRefused": "o git recusou o commit da task, então nada pôde ser mergeado de volta",
   "loop.reason.noWorktree": "nenhuma worktree disponível, e uma leva paralela não pode compartilhar um checkout",
+  "loop.reason.setupFailed": "worktree_setup falhou ({cmd}), e uma leva paralela não pode compartilhar um checkout",
   "loop.reason.mergeConflict": "merge de volta conflitou com o trabalho que entrou primeiro",
   "loop.reason.maxRetries": "máximo de tentativas esgotado",
   "loop.reason.reviewStalled": "loop de review travou",

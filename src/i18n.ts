@@ -57,6 +57,8 @@ const en = {
     "another ralphrun (pid {pid}) is already running in {path}. Two runs in one workspace delete each other's task worktrees mid-edit. Wait for it, or stop it first.",
   "loop.err.lockUnclaimable":
     "could not claim {path} for this run: the lock at {file} can be neither read nor moved, or another run keeps taking it. If no other ralphrun is running here, delete that file and try again.",
+  "loop.err.scopeMissing":
+    "refusing to start: runnable task scope prefix does not exist: {items}. The scope must name an existing parent directory; fix prd.json or run the prerequisite first.",
   "loop.label.wave": "wave",
   "loop.log.waveVerify": "  verifying the merged result of {n} landed tasks ({ids})",
   "loop.log.waveBroken":
@@ -116,6 +118,7 @@ const en = {
   "loop.log.retry": "  {id} failed ({s}s) — retry {n}",
   "loop.log.planInvalidated": "  {id}: plan discarded after the review stalled — the next attempt re-advises",
   "loop.log.stopBlocked": "stopping on blocked task",
+  "loop.log.blockedRepeated": "BLOCKED {id} ({s}s) - repeated failure signature: {reason}",
   "loop.log.stopWorkspace": "stopping the run — that failure is the workspace's, not the task's, so every remaining task would pay for the same one",
   "loop.log.cost": "  {id}: cost {cost} (run total {total})",
   "loop.log.stopBudget": "stopping on cost budget — spent {spent} of the ${max} ceiling",
@@ -132,6 +135,8 @@ const en = {
   "loop.reason.reviewStalled": "review loop stalled",
   "loop.reason.reviewExhausted": "review not approved",
   "loop.reason.policyBlock": "review_blocked_policy=block",
+  "loop.reason.repeatedFailure": "same failure as the previous attempt ({signature})",
+  "loop.reason.planInvalid": "PLAN problem: the reviewer requires paths outside the declared scope ({paths}); fix prd.json before retrying",
   "loop.reason.policyNeedsVerify": "review_blocked_policy=accept, but no verify command ran or it did not pass",
   "run.log.native": "  {id}: NATIVE {cli} {model} + advisor {advisorModel}",
   "run.log.cross": "  {id}: CROSS executor {executor}",
@@ -171,6 +176,8 @@ const en = {
   "advisor.reviewAlreadySatisfied": "  {id}: executor reports the task is already satisfied — reviewer is validating the current workspace",
   "advisor.reviewUnparsed": "  {id}: review answered neither APPROVE nor CHANGES — NOT approving. It said: {out}",
   "advisor.reviewExec": "  {id}: reviewer is running its own checks (up to {s}s, costs a full agent turn)",
+  "advisor.reviewScopeFiltered": "  {id}: filtered {n} reviewer finding(s) outside the declared scope: {paths}",
+  "advisor.reviewScopePlan": "  {id}: PLAN BLOCKED - the reviewer found only fixes outside the declared scope: {paths}; fix prd.json before retrying",
   "advisor.networkRetry": "  {id}: {src} died on a network error — retrying in {s}s ({n}/{max})",
 
   // wizard.ts
@@ -185,6 +192,7 @@ const en = {
   "wizard.action.createNew": "Create a new PRD (chat with the planner)",
   "wizard.action.selectExisting": "Select an existing PRD (*.json)",
   "wizard.model.recommended": "(recommended)",
+  "run.log.scopePlan": "  {id}: PLAN BLOCKED - reviewer findings require paths outside the declared scope: {paths}",
   "wizard.header.studio": "studio",
   "wizard.header.setup": "setup {n}/3",
 
@@ -410,6 +418,8 @@ const ptBr: Record<MsgKey, string> = {
   "loop.err.browserMissing": "❌ O verify de uma task usa '{tool}', mas ele não está no PATH. Instale: {cmd}",
   "loop.err.browserBroken": "❌ '{tool}' está no PATH mas não executa (ex.: shim quebrado do Volta). Reinstale: {cmd}",
   "loop.err.noPrd": "nenhum PRD em {path}",
+  "loop.err.scopeMissing":
+    "recusando iniciar: o prefixo de scope da task executavel nao existe: {items}. O scope precisa de um diretorio pai existente; corrija o prd.json ou rode o prerequisito primeiro.",
   "loop.err.noTask": "task {id} não existe",
   "loop.err.invalidPrd": "PRD inválido em {path}:",
   "loop.err.invalidPrdHint": "corrija no studio: ralphrun init --prd {path}",
@@ -484,6 +494,7 @@ const ptBr: Record<MsgKey, string> = {
   "loop.log.retry": "  {id} falhou ({s}s) — tentativa {n}",
   "loop.log.planInvalidated": "  {id}: plano descartado depois do review travar — a próxima tentativa vai replanejar",
   "loop.log.stopBlocked": "parando em task bloqueada",
+  "loop.log.blockedRepeated": "BLOQUEADA {id} ({s}s) - assinatura de falha repetida: {reason}",
   "loop.log.stopWorkspace": "parando a execução — essa falha é do workspace, não da task, então toda task restante pagaria pela mesma",
   "loop.log.cost": "  {id}: custo {cost} (total da execução {total})",
   "loop.log.stopBudget": "parando por teto de custo — gastou {spent} do teto de ${max}",
@@ -500,6 +511,8 @@ const ptBr: Record<MsgKey, string> = {
   "loop.reason.reviewStalled": "loop de review travou",
   "loop.reason.reviewExhausted": "review não aprovado",
   "loop.reason.policyBlock": "review_blocked_policy=block",
+  "loop.reason.repeatedFailure": "mesma falha da tentativa anterior ({signature})",
+  "loop.reason.planInvalid": "Problema no PLAN: o reviewer exige caminhos fora do scope declarado ({paths}); corrija o prd.json antes de tentar novamente",
   "loop.reason.policyNeedsVerify": "review_blocked_policy=accept, mas nenhum comando verify rodou ou ele não passou",
   "run.log.native": "  {id}: NATIVE {cli} {model} + advisor {advisorModel}",
   "run.log.cross": "  {id}: CROSS executor {executor}",
@@ -551,6 +564,9 @@ const ptBr: Record<MsgKey, string> = {
   "wizard.action.createNew": "Criar um novo PRD (conversar com o planner)",
   "wizard.action.selectExisting": "Selecionar um PRD existente (*.json)",
   "wizard.model.recommended": "(recomendado)",
+  "run.log.scopePlan": "  {id}: PLAN BLOQUEADO - findings do reviewer exigem caminhos fora do scope declarado: {paths}",
+  "advisor.reviewScopeFiltered": "  {id}: {n} finding(s) do reviewer fora do scope declarado foram filtrados: {paths}",
+  "advisor.reviewScopePlan": "  {id}: PLAN BLOQUEADO - o reviewer encontrou apenas correcoes fora do scope declarado: {paths}; corrija o prd.json antes de tentar novamente",
   "wizard.header.studio": "studio",
   "wizard.header.setup": "setup {n}/3",
 

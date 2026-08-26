@@ -201,6 +201,16 @@ describe("reviewPrompt", () => {
     expect(reviewPrompt(task, prd, "STD", "the diff")).not.toContain("## Verification");
   });
 
+  it("gives the reviewer the hard scope contract and plan escape rule", () => {
+    const scoped = { ...task, scope: ["src/modules/auth/**", "src/app.ts"] };
+    const out = reviewPrompt(scoped, prd, "STD", "the diff").replace(/\s+/g, " ");
+    expect(out).toContain("Declared scope:");
+    expect(out).toContain("- src/modules/auth/**");
+    expect(out).toContain("fix the executor can make WITHIN");
+    expect(out).toContain("problem with the PLAN");
+    expect(out).toContain("outside it");
+  });
+
   // The reviewer used to judge a diff without knowing whether anything ran on it,
   // so it asked for changes the failing output already explained.
   it("shows the verify command, the verdict, and the output tail", () => {

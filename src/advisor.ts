@@ -1,6 +1,7 @@
 // advisor.ts — CROSS-mode advisor: guidance before, review after
 
 import { createInterface } from "node:readline";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { buildCmd, promptViaStdin } from "./adapters.js";
 import { agentDef, type AgentDef } from "./agents.js";
@@ -11,6 +12,7 @@ import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
 import {
   advisorPrompt,
+  formatReviewFindings,
   parseReview,
   reviewPrompt,
   type ReviewContext,
@@ -19,6 +21,7 @@ import {
   type VerificationEvidence,
 } from "./prompts.js";
 import { captureDiff } from "./git.js";
+import { pathsOutsideScope } from "./prdload.js";
 import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
 
@@ -86,6 +89,8 @@ export interface AdvisorReviewResult {
   findings?: ReviewFinding[];
   /** No actionable verdict arrived; retry the reviewer before asking the executor to change code. */
   reviewRetryable?: boolean;
+  /** The reviewer found only fixes the task's plan forbids. */
+  scopePlanIssuePaths?: string[];
   commit?: ReviewCommit;
   /**
    * A durable fact for the architecture notes, when the reviewer judged this
@@ -353,10 +358,87 @@ export async function advisorReview(
     line: parsed.approved ? "APPROVE" : compactLine(parsed.changes || out),
     lineSource: "review",
   });
-  return { ...parsed, diff, ...(!parsed.approved && !parsed.changes ? { reviewRetryable: true } : {}) };
+  const withDiff = { ...parsed, diff, ...(!parsed.approved && !parsed.changes ? { reviewRetryable: true } : {}) };
+  const findings = withDiff.findings ?? [];
+  const filtered = filterReviewFindings(findings, task.scope ?? [], workspace);
+  if (filtered.dropped.length > 0) {
+    const paths = filtered.dropped
+      .map((finding) => locationRepoPath(finding.location, workspace))
+      .filter((path): path is string => !!path);
+    log(
+      progress,
+      t("advisor.reviewScopeFiltered", {
+        id: task.id,
+        n: filtered.dropped.length,
+        paths: [...new Set(paths)].join(", "),
+      }),
+    );
+  }
+  if (filtered.planIssuePaths.length > 0) {
+    log(progress, t("advisor.reviewScopePlan", { id: task.id, paths: filtered.planIssuePaths.join(", ") }));
+  }
+  return {
+    ...withDiff,
+    ...(findings.length > 0
+      ? {
+          findings: filtered.findings,
+          // parseReview derives changes from structured findings. Re-derive it
+          // after filtering so the executor cannot be told to implement the
+          // very out-of-scope fix the gate would later reject.
+          changes: parsed.approved ? "" : formatReviewFindings(filtered.findings),
+        }
+      : {}),
+    ...(filtered.planIssuePaths.length > 0 ? { scopePlanIssuePaths: filtered.planIssuePaths } : {}),
+  };
 }
 
 function compactLine(value: string, max = 500): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1).trimEnd() + "…";
+}
+
+/**
+ * A location is evidence only when it names a file inside this checkout. A
+ * missing/odd location stays attached to the finding: filtering it would turn
+ * "we cannot prove this is outside scope" into a silent loss of a blocker.
+ */
+function locationRepoPath(location: string | undefined, workspace: string): string | undefined {
+  if (!location || location.includes("\0")) return undefined;
+  const match = location.trim().match(/^(.+?):\d+(?::\d+)?$/);
+  if (!match) return undefined;
+  const candidate = match[1].trim();
+  if (!candidate || candidate.includes("\0")) return undefined;
+  const root = resolve(workspace);
+  const absolute = isAbsolute(candidate) ? resolve(candidate) : resolve(root, candidate);
+  const repoPath = relative(root, absolute).replace(/\\/g, "/");
+  if (!repoPath || repoPath === ".." || repoPath.startsWith("../") || isAbsolute(repoPath)) return undefined;
+  return repoPath;
+}
+
+function filterReviewFindings(
+  findings: ReviewFinding[],
+  scope: string[],
+  workspace: string,
+): { findings: ReviewFinding[]; dropped: ReviewFinding[]; planIssuePaths: string[] } {
+  // Empty scope means unrestricted here just as it does in the objective gate;
+  // calling the matcher anyway would make a legacy task pay for a reviewer-only
+  // policy that the actual merge gate does not enforce.
+  if (scope.length === 0) return { findings, dropped: [], planIssuePaths: [] };
+  const dropped: ReviewFinding[] = [];
+  const kept = findings.filter((finding) => {
+    const path = locationRepoPath(finding.location, workspace);
+    // No location, malformed location, or a path outside this checkout is not
+    // proof of an escape. Keep it so a genuine blocker cannot disappear merely
+    // because the reviewer supplied weak evidence.
+    if (!path || pathsOutsideScope([path], scope).length === 0) return true;
+    dropped.push(finding);
+    return false;
+  });
+  const droppedBlocking = dropped.filter((f) => f.severity === "blocker" || f.severity === "major");
+  const keptBlocking = kept.filter((f) => f.severity === "blocker" || f.severity === "major");
+  const planIssuePaths =
+    droppedBlocking.length > 0 && keptBlocking.length === 0
+      ? [...new Set(droppedBlocking.map((f) => locationRepoPath(f.location, workspace)).filter((p): p is string => !!p))]
+      : [];
+  return { findings: kept, dropped, planIssuePaths };
 }

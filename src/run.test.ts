@@ -92,9 +92,31 @@ describe("runTask NATIVE", () => {
     const result = await runTask(task, prd, cfg(), "/ws", "/prog");
     expect(result.ok).toBe(false);
   });
+
+  it("returns a stable structural signature for a failed verification", async () => {
+    mVerify.mockResolvedValue({ passed: false, output: "expected route, received 404" });
+    const result = await runTask(task, prd, cfg(), "/ws", "/prog");
+    expect(result).toMatchObject({ ok: false, reason: "failed" });
+    expect(result.failureSignature).toContain("verify:expected route, received 404");
+    expect(result.failureSignature).not.toContain("PROMPT");
+  });
 });
 
 describe("runTask CROSS", () => {
+  it("blocks a reviewer-only scope problem as a plan failure without a fix round", async () => {
+    mReview.mockResolvedValue({
+      approved: false,
+      changes: "",
+      diff: "D",
+      findings: [],
+      scopePlanIssuePaths: ["src/app.ts"],
+    });
+    const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");
+    expect(result).toMatchObject({ ok: false, reason: "plan_invalid", planIssuePaths: ["src/app.ts"] });
+    expect(mExec).toHaveBeenCalledTimes(1);
+    expect(mReview).toHaveBeenCalledTimes(1);
+  });
+
   it("round 1 PASS with advice injected", async () => {
     // not native: advisor cli grok
     const result = await runTask(task, prd, cfg({ advisor: { cli: "grok", model: "g" } }), "/ws", "/prog");

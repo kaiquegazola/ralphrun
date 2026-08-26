@@ -12,7 +12,7 @@
 // downstream re-checks any of it.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { supportsNativeAdvisor } from "./agents.js";
@@ -23,8 +23,8 @@ import { git } from "./git.js";
 import { t } from "./i18n.js";
 import { log, setReporter } from "./log.js";
 import { invalidatePlan } from "./plan-cache.js";
-import { sessionRunnableIds, type PRD } from "./prd.js";
-import { loadPrdFile, type NormalizePrdOptions } from "./prdload.js";
+import { sessionRunnableIds, type PRD, type Task } from "./prd.js";
+import { literalScopeDirectoryPrefix, loadPrdFile, type NormalizePrdOptions } from "./prdload.js";
 import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
 import { type CostTally } from "./stream.js";
 import { emit, type RunEvent } from "./tui/events.js";
@@ -80,6 +80,54 @@ export interface RunSetup {
 
 export function runMode(cfg: Config): "NATIVE" | "CROSS" {
   return supportsNativeAdvisor(cfg.executor.cli, cfg.advisor?.cli) ? "NATIVE" : "CROSS";
+}
+
+export function missingScopePrefixes(tasks: Task[], workspace: string): string[] {
+  const root = resolve(workspace);
+  const seen = new Set<string>();
+  const problems: string[] = [];
+  for (const task of tasks) {
+    for (const pattern of task.scope ?? []) {
+      const prefix = literalScopeDirectoryPrefix(pattern);
+      if (!prefix) continue;
+      const absolute = resolve(root, prefix);
+      const relativePath = relative(root, absolute);
+      // A repo-relative scope is the contract this check can prove. Do not turn
+      // a malformed/outside path into a filesystem claim here; the existing
+      // scope gate will keep such work from landing and report the actual path.
+      if (!relativePath || relativePath === ".." || relativePath.startsWith(".." + requirePathSeparator())) continue;
+      // Walk the static prefix so the record names the FIRST missing directory
+      // (`src/db/`), not a deeper child (`src/db/schema/`) that is absent only
+      // because the typo already broke its ancestor. The final leaf of a `/**`
+      // scope is excluded by literalScopeDirectoryPrefix and may be created.
+      let missing: string | undefined;
+      let checked = "";
+      for (const part of prefix.split("/")) {
+        checked = checked ? `${checked}/${part}` : part;
+        const candidate = resolve(root, checked);
+        if (!existsSync(candidate)) {
+          missing = relative(root, candidate).replace(/\\/g, "/");
+          break;
+        }
+      }
+      if (!missing) continue;
+      const key = `${task.id}\0${prefix}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      problems.push(`${task.id}: ${missing}/ (from ${pattern})`);
+    }
+  }
+  return problems;
+}
+
+function requirePathSeparator(): string {
+  return process.platform === "win32" ? "\\" : "/";
+}
+
+function runnableTasksAtBoot(prd: PRD, targetId?: string): Task[] {
+  if (targetId) return prd.tasks.filter((task) => task.id === targetId);
+  const done = new Set(prd.tasks.filter((task) => task.status === "done").map((task) => task.id));
+  return prd.tasks.filter((task) => task.status === "todo" && task.deps.every((dep) => done.has(dep)));
 }
 
 /**
@@ -219,6 +267,18 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
         adv = cfg.advisor ? `${cfg.advisor.cli}:${cfg.advisor.model}` : "none";
       }
     }
+  }
+
+  // A missing scope parent is a plan typo that would otherwise cost an entire
+  // executor/reviewer attempt before the objective gate discards the work. The
+  // refusal is limited to tasks that can start now: a later task may depend on
+  // an earlier task creating that parent, and an absent leaf itself is allowed.
+  const scopeProblems = missingScopePrefixes(runnableTasksAtBoot(prd0, opts.task), workspace);
+  if (scopeProblems.length > 0) {
+    const message = t("loop.err.scopeMissing", { items: scopeProblems.join(", ") });
+    log(progress, message);
+    console.error(message);
+    process.exit(1);
   }
 
   // The initial menu can replace an unavailable default agent. Once the user

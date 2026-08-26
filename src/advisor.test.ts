@@ -9,6 +9,7 @@ vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
 vi.mock("./cursor-sdk.js", () => ({ runCursorSdkText: vi.fn(async () => "ADVICE") }));
 vi.mock("./prompts.js", () => ({
   advisorPrompt: vi.fn(() => "ap"),
+  formatReviewFindings: vi.fn((findings: { id: string }[]) => findings.map((f) => f.id).join(",")),
   reviewPrompt: vi.fn(() => "rp"),
   parseReview: vi.fn(() => ({ approved: false, changes: "do x" })),
 }));
@@ -169,6 +170,59 @@ describe("getAdvice", () => {
 });
 
 describe("advisorReview", () => {
+  it("filters resolvable out-of-scope findings but keeps findings without proof of a path", async () => {
+    const workspace = mkdtempSync("ralphrun-review-");
+    const scoped = { ...task, scope: ["src/modules/auth/**"] } as Task;
+    diffMock.mockReturnValue("some diff");
+    vi.mocked(parseReview).mockReturnValueOnce({
+      approved: false,
+      changes: "raw",
+      findings: [
+        { id: "OUT", severity: "major", location: "src/i18n.ts:10", problem: "outside", fix: "edit it" },
+        { id: "UNKNOWN", severity: "blocker", problem: "no location", fix: "inspect it" },
+        { id: "IN", severity: "major", location: "src/modules/auth/controller.ts:8", problem: "inside", fix: "fix it" },
+      ],
+    });
+    const p = advisorReview(scoped, prd, advis, cfg, workspace, "prog", "std");
+    mockChild.stdout.end("CHANGES\n");
+    finishSpawn(0);
+
+    await expect(p).resolves.toMatchObject({ findings: [{ id: "UNKNOWN" }, { id: "IN" }], changes: "UNKNOWN,IN" });
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("filtered 1 reviewer finding"));
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("src/i18n.ts"));
+  });
+
+  it("turns an all-blocking out-of-scope review into a visible plan issue", async () => {
+    const workspace = mkdtempSync("ralphrun-review-");
+    const scoped = { ...task, scope: ["src/modules/auth/**"] } as Task;
+    diffMock.mockReturnValue("some diff");
+    vi.mocked(parseReview).mockReturnValueOnce({
+      approved: false,
+      changes: "raw",
+      findings: [{ id: "R1", severity: "blocker", location: "src/app.ts:10", problem: "mount route", fix: "edit app" }],
+    });
+    const p = advisorReview(scoped, prd, advis, cfg, workspace, "prog", "std");
+    mockChild.stdout.end("CHANGES\n");
+    finishSpawn(0);
+
+    await expect(p).resolves.toMatchObject({ scopePlanIssuePaths: ["src/app.ts"], findings: [] });
+    expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("PLAN BLOCKED"));
+  });
+
+  it("does not inspect or filter findings when scope is empty", async () => {
+    diffMock.mockReturnValue("some diff");
+    vi.mocked(parseReview).mockReturnValueOnce({
+      approved: false,
+      changes: "raw",
+      findings: [{ id: "R1", severity: "major", location: "src/app.ts:10", problem: "x", fix: "y" }],
+    });
+    const p = advisorReview(task, prd, advis, cfg, "workspace-does-not-exist", "prog", "std");
+    mockChild.stdout.end("CHANGES\n");
+    finishSpawn(0);
+    await expect(p).resolves.toMatchObject({ findings: [{ id: "R1" }] });
+    expect(log).not.toHaveBeenCalledWith("prog", expect.stringContaining("filtered"));
+  });
+
   // Whether a task can be satisfied with no change at all is a judgement about
   // that task, so it goes to the reviewer like any other verdict — the loop
   // neither approves it (done with nothing written) nor rejects it (blocking

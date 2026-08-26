@@ -67,6 +67,10 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     trackers,
     pendingReviewFeedback: new Map(),
     pendingHandoff: new Map(),
+    // Repeat detection is intentionally scoped to this run: retries already
+    // persisted in prd.json are an attempt count, while a failure signature is
+    // evidence about the immediately preceding attempt in this workspace.
+    failureSignatures: new Map(),
     // The worktree as it stood when each task STARTED. Two consumers: the review
     // diffs against it, and the commit stages only what moved since it. Keyed by
     // task so a retry still measures from the task own start, not the retry own.

@@ -165,6 +165,27 @@ export function pathsOutsideScope(paths: string[], scope: string[]): string[] {
   });
 }
 
+/**
+ * The directory a scope pattern needs BEFORE this task can create anything
+ * underneath it. A literal file checks its parent; a `**` suffix checks the
+ * directory before the suffix's literal leaf, because that leaf is exactly
+ * what the task may be creating. A wildcard filename still checks its parent.
+ *
+ * This is deliberately a prefix check, not a glob expansion: an absent leaf
+ * is a valid task target, while an absent parent is the typo that makes the
+ * scope gate discard a perfectly good implementation after the agent paid for
+ * it. The caller resolves the returned repo-relative path against the workspace.
+ */
+export function literalScopeDirectoryPrefix(pattern: string): string {
+  const normalized = pattern.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized) return "";
+  const parts = normalized.split("/").filter(Boolean);
+  const wildcardAt = parts.findIndex((part) => /[*?\[\]]/.test(part));
+  if (wildcardAt === -1) return parts.slice(0, -1).join("/");
+  if (parts[wildcardAt] === "**") return parts.slice(0, Math.max(0, wildcardAt - 1)).join("/");
+  return parts.slice(0, wildcardAt).join("/");
+}
+
 /** the heading the run writes under, so a human can see which half is theirs */
 export const LEARNED_HEADING = "## Learned during runs";
 // The notes go into EVERY later prompt, so this section is a standing tax on the

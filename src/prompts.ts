@@ -505,6 +505,15 @@ that cannot work here and the reason why. If you are unsure, write no note.
 
 Task ${task.id} — ${task.title}: ${task.description}
 
+Declared scope:
+${task.scope?.length ? task.scope.map((path) => `- ${path}`).join("\n") : "(empty — unrestricted)"}
+
+Scope is a hard plan contract. Every finding must describe a fix the executor can make WITHIN
+the declared scope. If the only correct fix requires touching a path outside it, that is a
+problem with the PLAN, not work for this task: report the plan problem with the path involved
+instead of asking the executor to edit outside scope. Do not manufacture a finding whose fix
+the scope gate will reject.
+
 Acceptance:
 ${task.acceptance.map((a) => "- " + a).join("\n")}
 ${standardsBlock(standards)}${verificationBlock(task, verification)}${reviewContextBlock(context)}

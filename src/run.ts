@@ -26,7 +26,7 @@ import { captureReviewBase } from "./git.js";
 import { advisorPlanKey, routeAdvisorPlan } from "./plan-cache.js";
 import { addCost, type CostTally } from "./stream.js";
 
-export type RunTaskFailureReason = "failed" | "review_exhausted" | "review_stalled";
+export type RunTaskFailureReason = "failed" | "review_exhausted" | "review_stalled" | "plan_invalid";
 export const MAX_REVIEW_CYCLES = ABSOLUTE_REVIEW_CYCLES;
 
 export interface RunTaskResult {
@@ -34,6 +34,10 @@ export interface RunTaskResult {
   reason?: RunTaskFailureReason;
   reviewChanges?: string;
   reviewFindings?: ReviewFinding[];
+  /** A scope mismatch the reviewer proved belongs to the plan, not the task. */
+  planIssuePaths?: string[];
+  /** Stable structural account used by taskrun to stop repeated attempts. */
+  failureSignature?: string;
   /** Conventional Commit metadata proposed by the reviewer on APPROVE. */
   commit?: ReviewCommit;
   verificationPassed?: boolean;
@@ -110,8 +114,15 @@ export async function runTask(
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
     const ok = await execute(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal, runtimeEnv);
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
-    const passed = ok && (await verify(task, signal)).passed;
-    return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
+    const verification = await verify(task, signal);
+    const passed = ok && verification.passed;
+    return {
+      ok: passed,
+      reason: passed ? undefined : "failed",
+      ...(passed ? {} : { failureSignature: attemptFailureSignature("failed", ok, verification.passed, verification.output) }),
+      cost,
+      handoff: lastHandoff,
+    };
   }
 
   // CROSS: planner up front, then a unified fix loop — tests + review feed the
@@ -203,7 +214,17 @@ export async function runTask(
       previousVerification: rnd > 1 ? { passed: previousVerificationPassed, output: previousVerificationOutput } : undefined,
       previousDiff,
     };
-    const { approved, changes, diff = "", note, commit, verify: proposedVerify, findings = [], reviewRetryable = false } =
+    const {
+      approved,
+      changes,
+      diff = "",
+      note,
+      commit,
+      verify: proposedVerify,
+      findings = [],
+      reviewRetryable = false,
+      scopePlanIssuePaths,
+    } =
       reviewOn && advis
         ? await advisorReview(
             task,
@@ -223,6 +244,22 @@ export async function runTask(
     if (changes.trim()) lastReviewChanges = changes;
     lastReviewFindings = findings;
     emit({ taskId: task.id, gates: { exec: ok, tests: testOk, review: approved } });
+    if (scopePlanIssuePaths?.length) {
+      // The reviewer was filtered before this point, so none of its forbidden
+      // fixes can enter the executor prompt. Blocking here records the remaining
+      // truth: the task is not failing on its code; prd.json asks it to reach a
+      // path the plan did not grant it.
+      log(progress, t("run.log.scopePlan", { id: task.id, paths: scopePlanIssuePaths.join(", ") }));
+      return {
+        ok: false,
+        reason: "plan_invalid",
+        planIssuePaths: scopePlanIssuePaths,
+        reviewFindings: findings,
+        cost,
+        handoff: lastHandoff,
+        failureSignature: `plan-scope|${scopePlanIssuePaths.map(normalizeSignal).sort().join(",")}`,
+      };
+    }
     // A reviewer may identify a contract defect even when the old command exits
     // 0 (for example, it never loaded the required environment). The replacement
     // is safe because isSafeVerifyReplacement independently constrains it to an
@@ -315,6 +352,15 @@ export async function runTask(
       reason: failureReason === "review_stalled" ? "review_stalled" : "review_exhausted",
       reviewChanges: lastReviewChanges,
       reviewFindings: lastReviewFindings,
+      failureSignature: attemptFailureSignature(
+        failureReason === "review_stalled" ? "review_stalled" : "review_exhausted",
+        ok,
+        lastVerificationPassed,
+        previousVerificationOutput,
+        lastApproved,
+        lastReviewChanges,
+        lastReviewFindings,
+      ),
       // The ONLY thing that can override a refusing reviewer, so it has to mean
       // "something judged this and said yes". runVerify answers `passed: true`
       // for a task with no verify command — correct there, since nothing is
@@ -333,8 +379,15 @@ export async function runTask(
   // with review off the loop above breaks on the abort with lastApproved
   // vacuously true, so the skip lands here — straight into a gate that would
   // otherwise run the suite for its full 600s after the user abandoned the task.
-  const passed = ok && (await verify(task, signal)).passed;
-  return { ok: passed, reason: passed ? undefined : "failed", cost, handoff: lastHandoff };
+  const verification = await verify(task, signal);
+  const passed = ok && verification.passed;
+  return {
+    ok: passed,
+    reason: passed ? undefined : "failed",
+    ...(passed ? {} : { failureSignature: attemptFailureSignature("failed", ok, verification.passed, verification.output) }),
+    cost,
+    handoff: lastHandoff,
+  };
 }
 
 function injectReviewRetryFeedback(prompt: string, feedback?: string): string {
@@ -396,4 +449,24 @@ function executionReportSignal(handoff: string): string {
 
 function normalizeSignal(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function attemptFailureSignature(
+  reason: RunTaskFailureReason,
+  execOk: boolean,
+  testOk: boolean,
+  testOut: string,
+  approved = false,
+  changes = "",
+  findings: ReviewFinding[] = [],
+): string {
+  return [
+    reason,
+    `exec:${execOk ? 1 : 0}`,
+    `tests:${testOk ? 1 : 0}`,
+    `review:${approved ? 1 : 0}`,
+    `verify:${normalizeSignal(testOut.slice(-3000))}`,
+    `changes:${normalizeSignal(changes)}`,
+    "findings:" + findings.map((f) => [f.id, f.severity, f.criterion ?? "", f.location ?? "", f.problem, f.fix].map(normalizeSignal).join("|")).join("\n"),
+  ].join("\n");
 }

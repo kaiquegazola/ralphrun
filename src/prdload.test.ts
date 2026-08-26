@@ -13,7 +13,16 @@ vi.mock("node:fs", () => ({
 }));
 
 import { readFileSync } from "node:fs";
-import { appendLearnedNote, loadPrdFile, normalizePrd, overlappingScopePairs, pathsOutsideScope, type ScopedTask, validatePrd } from "./prdload.js";
+import {
+  appendLearnedNote,
+  literalScopeDirectoryPrefix,
+  loadPrdFile,
+  normalizePrd,
+  overlappingScopePairs,
+  pathsOutsideScope,
+  type ScopedTask,
+  validatePrd,
+} from "./prdload.js";
 
 const mRead = vi.mocked(readFileSync);
 
@@ -350,6 +359,20 @@ describe("pathsOutsideScope", () => {
 
   it("matches a directory scope and a ./-prefixed path the same way globs do", () => {
     expect(pathsOutsideScope(["./src/a.ts", "docs/x.md"], ["src/"])).toEqual(["docs/x.md"]);
+  });
+});
+
+describe("literalScopeDirectoryPrefix", () => {
+  it("checks the existing parent of a literal file", () => {
+    expect(literalScopeDirectoryPrefix("apps/api/src/db/schema/users.ts")).toBe("apps/api/src/db/schema");
+  });
+
+  it("lets a recursive scope create its literal leaf", () => {
+    expect(literalScopeDirectoryPrefix("apps/api/src/modules/auth/**")).toBe("apps/api/src/modules");
+  });
+
+  it("keeps the parent for a wildcard filename", () => {
+    expect(literalScopeDirectoryPrefix("src/database/schema/*.ts")).toBe("src/database/schema");
   });
 });
 

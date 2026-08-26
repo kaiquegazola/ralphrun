@@ -57,6 +57,8 @@ export interface TaskRunnerCtx {
    * back — without this it re-derives the dead ends the last one paid for.
    */
   pendingHandoff: Map<string, string>;
+  /** Last settled failure per task; a second identical one is a hard block. */
+  failureSignatures: Map<string, string>;
   /** the worktree as it stood when each task STARTED, kept across its retries */
   taskBaselines: Map<string, string | null>;
   taskCost: Map<string, CostTally>;
@@ -87,6 +89,31 @@ type LandResult = "ok" | "conflict" | "dirty" | "uncommitted";
 function landBlockReason(landed: LandResult): string {
   if (landed === "uncommitted") return t("loop.reason.commitRefused");
   return landed === "dirty" ? t("loop.reason.mergeDirty") : t("loop.reason.mergeConflict");
+}
+
+function normalizeFailurePart(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function attemptFailureSignature(result: RunTaskResult, escaped: string[], landed: LandResult): string | undefined {
+  if (escaped.length > 0) return `scope-escape|${[...escaped].map(normalizeFailurePart).sort().join(",")}`;
+  if (landed === "conflict") return "merge-conflict";
+  if (landed !== "ok") return undefined; // dirty/uncommitted is already a workspace hard block
+  if (result.ok) return undefined;
+  if (result.failureSignature) return result.failureSignature;
+  return [
+    result.reason ?? "failed",
+    result.reviewChanges ?? "",
+    ...(result.reviewFindings ?? []).map((f) => [f.id, f.severity, f.location ?? "", f.problem, f.fix].join("|")),
+  ].map(normalizeFailurePart).join("|");
+}
+
+function repeatedFailureReason(signature: string): string {
+  // The signature is machine-stable but can contain test output or review text;
+  // keep the progress record useful without allowing an agent response to bury
+  // the rest of the unattended run's evidence.
+  const compact = normalizeFailurePart(signature);
+  return t("loop.reason.repeatedFailure", { signature: compact.length <= 700 ? compact : compact.slice(0, 699) + "…" });
 }
 
 /**
@@ -551,7 +578,12 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         result = await runTask(...runTaskArgs);
       } catch (e) {
         log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
-        result = { ok: false, reason: "failed", cost: { usd: 0, unknown: true } };
+        result = {
+          ok: false,
+          reason: "failed",
+          failureSignature: `crashed|${normalizeFailurePart(e instanceof Error ? e.message : String(e))}`,
+          cost: { usd: 0, unknown: true },
+        };
       }
       const taskStopMs = performance.now();
       if (ctx.tui) tracker.setPaused(ctx.tui.control.isPaused(), taskStopMs);
@@ -595,10 +627,11 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       //
       // An EMPTY scope declares nothing and so cannot escape, which is what
       // keeps every backlog written before `scope` existed running as before.
+      let escaped: string[] = [];
       const declaredScope = task.scope ?? [];
       if (!skipped && result.ok && declaredScope.length > 0) {
         const moved = taskChangedPaths(taskWorkspace, taskBaselines.get(task.id), runnerControlPaths) ?? [];
-        const escaped = pathsOutsideScope(moved, declaredScope);
+        escaped = pathsOutsideScope(moved, declaredScope);
         if (escaped.length > 0) {
           const sample = escaped.slice(0, 3).join(", ") + (escaped.length > 3 ? ", …" : "");
           log(progress, t("loop.log.scopeEscape", { id: task.id, n: escaped.length, paths: sample }));
@@ -667,6 +700,40 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       // commits cannot be cherry-picked back must never be recorded as done
       // with nothing in the main workspace to show for it. No-op serially.
       const landed = !skipped && result.ok ? landWorktreeWork(result.commit) : "ok";
+      const failureSignature = !skipped ? attemptFailureSignature(result, escaped, landed) : undefined;
+      const repeated =
+        failureSignature !== undefined && ctx.failureSignatures.get(task.id) === failureSignature;
+      if (failureSignature) ctx.failureSignatures.set(task.id, failureSignature);
+
+      if (!skipped && result.reason === "plan_invalid") {
+        taskBaselines.delete(task.id);
+        freshTask.status = "blocked";
+        const paths = result.planIssuePaths?.join(", ") || "(see review log)";
+        const reason = t("loop.reason.planInvalid", { paths });
+        log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
+        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        persist();
+        if (opts.task || ctx.cfg.stop_on_blocked) {
+          done();
+          return "stop";
+        }
+        return "next";
+      }
+
+      if (!skipped && repeated) {
+        taskBaselines.delete(task.id);
+        freshTask.retries += 1;
+        freshTask.status = "blocked";
+        const reason = repeatedFailureReason(failureSignature!);
+        log(progress, t("loop.log.blockedRepeated", { id: task.id, s: elapsed, reason }));
+        emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+        persist();
+        if (opts.task || ctx.cfg.stop_on_blocked) {
+          done();
+          return "stop";
+        }
+        return "next";
+      }
 
       if (skipped) {
         taskBaselines.delete(task.id);

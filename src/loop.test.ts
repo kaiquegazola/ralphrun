@@ -294,6 +294,40 @@ afterEach(() => {
 });
 
 describe("runLoop preflight", () => {
+  it("refuses a runnable task whose scope has a missing literal parent", async () => {
+    mRead.mockReturnValue(
+      prdWith([
+        {
+          ...TASK,
+          scope: ["apps/api/src/modules/auth/**", "apps/api/src/db/schema/users.ts"],
+        },
+      ]),
+    );
+    mExists.mockImplementation((pth) => {
+      const p = String(pth).replace(/\\/g, "/");
+      if (p.endsWith("progress.md") || p.endsWith("prd.json") || p.endsWith("/.git")) return true;
+      return !p.includes("apps/api/src/db");
+    });
+
+    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("apps/api/src/db/"));
+    expect(mRunTask).not.toHaveBeenCalled();
+  });
+
+  it("allows a recursive scope to create its missing leaf directory", async () => {
+    fastTimers();
+    mRead.mockReturnValue(prdWith([{ ...TASK, scope: ["apps/api/src/modules/auth/**"] }]));
+    mExists.mockImplementation((pth) => {
+      const p = String(pth).replace(/\\/g, "/");
+      if (p.endsWith("progress.md") || p.endsWith("prd.json") || p.endsWith("/.git")) return true;
+      return !p.endsWith("/apps/api/src/modules/auth");
+    });
+
+    await runLoop({ prd: "prd.json" });
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining("scope"));
+    expect(mRunTask).toHaveBeenCalled();
+  });
+
   it("exits when PRD missing", async () => {
     prdExists = false;
     await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
@@ -649,6 +683,42 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("stopping on blocked"));
     expect(mSetReporter).toHaveBeenCalledWith(null);
     expect(mGit).not.toHaveBeenCalled(); // no init: commit_per_task && review_after both false
+  });
+
+  it("blocks after the second attempt with an identical failure signature", async () => {
+    fastTimers();
+    livePrdRaw();
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
+    mRunTask
+      .mockResolvedValueOnce({ ok: false, reason: "failed", failureSignature: "scope-escape|src/i18n.ts", cost: NO_COST })
+      .mockResolvedValueOnce({ ok: false, reason: "failed", failureSignature: "scope-escape|src/i18n.ts", cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask).toHaveBeenCalledTimes(2);
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "blocked", retries: 2 });
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("repeated failure signature"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("scope-escape|src/i18n.ts"));
+  });
+
+  it("keeps trying when consecutive failure signatures show different progress", async () => {
+    fastTimers();
+    livePrdRaw();
+    mNextTask.mockReset();
+    mNextTask.mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValueOnce(TASK as never).mockReturnValue(null);
+    mRunTask
+      .mockResolvedValueOnce({ ok: false, reason: "failed", failureSignature: "verify|missing auth", cost: NO_COST })
+      .mockResolvedValueOnce({ ok: false, reason: "failed", failureSignature: "verify|missing users", cost: NO_COST })
+      .mockResolvedValueOnce({ ok: true, cost: NO_COST });
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mRunTask).toHaveBeenCalledTimes(3);
+    const writes = mWrite.mock.calls.map((c) => String(c[1])).filter((s) => s.trim().startsWith("{"));
+    expect(JSON.parse(writes[writes.length - 1]).tasks[0]).toMatchObject({ status: "done", retries: 2 });
+    expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("repeated failure signature"));
   });
 
   it("review failure blocks immediately without consuming task retries", async () => {

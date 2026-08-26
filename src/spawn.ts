@@ -27,7 +27,7 @@
 // can outlive any of this. See the grace timers in executor.ts / advisor.ts.
 
 import crossSpawn from "cross-spawn";
-import { spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { spawn as nativeSpawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import type { Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
@@ -39,9 +39,33 @@ const live = new Set<ChildProcess>();
 /** children we know lead their own process group (POSIX detached) */
 const ownGroup = new WeakSet<ChildProcess>();
 
+/**
+ * Which spawn a call gets, and it is not a preference.
+ *
+ * cross-spawn earns its place for a BARE command (see the header): a cli
+ * installed via npm is a `foo.cmd` shim that node cannot execute without a
+ * shell, and cross-spawn resolves the real file. Under `shell: true` none of
+ * that applies — the shell does the resolving — and cross-spawn stops being
+ * free: it skips its own parser, leaving `parsed.file` undefined, and its
+ * Windows ENOENT hook then reads EVERY exit code 1 as "the command did not
+ * exist" and emits a synthetic `spawn <the whole command line> ENOENT` error.
+ *
+ * Exit 1 is what a failing test suite returns, so on Windows that turned every
+ * ordinary `verify` failure into a crash — and a crash settles from the ERROR
+ * event, which arrives BEFORE close, so the command output was discarded and
+ * the executor was handed no reason for the failure it had to fix. Measured:
+ * exit 0 and exit 2 come back clean, exit 1 alone is rewritten.
+ *
+ * POSIX is unaffected either way — cross-spawn is a passthrough there — so
+ * this narrows to the platform that had the bug.
+ */
+function launch(cmd: string, args: string[], opts: SpawnOptions): ChildProcess {
+  return opts.shell ? nativeSpawn(cmd, args, opts) : crossSpawn(cmd, args, opts);
+}
+
 export function spawn(cmd: string, args: string[], opts: SpawnOptions): PipedChild {
   const detached = process.platform !== "win32";
-  const proc = crossSpawn(cmd, args, { ...opts, detached }) as PipedChild;
+  const proc = launch(cmd, args, { ...opts, detached }) as PipedChild;
   if (detached) ownGroup.add(proc);
   live.add(proc);
   const drop = (): void => {

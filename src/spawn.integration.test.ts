@@ -18,6 +18,56 @@ import { killAllChildren, killTree, spawn } from "./spawn.js";
 
 const posix = process.platform !== "win32";
 
+// A shell command that FAILS is not a command that is missing, and telling
+// them apart is the whole value of the verify gate: exit 1 is what a failing
+// test suite returns, and its output is the feedback the executor needs.
+//
+// cross-spawn under `shell: true` used to rewrite exactly exit code 1 into a
+// synthetic `spawn <command> ENOENT` error, and because the error event lands
+// BEFORE close, verify.ts settled on it and threw the output away. Real
+// processes on purpose: the rewrite lives in cross-spawn's own exit hook, so
+// nothing mocked can observe it.
+describe("a shell command that exits non-zero is a failure, not a spawn error", () => {
+  /** run through the real spawn() and report whether an error event ever fired */
+  function run(cmd: string): Promise<{ code: number | null; error: string | null; out: string }> {
+    return new Promise((resolve) => {
+      const proc = spawn(cmd, [], { shell: true, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      let error: string | null = null;
+      proc.stdout.on("data", (c: Buffer) => (out += c.toString()));
+      proc.stderr.on("data", (c: Buffer) => (out += c.toString()));
+      proc.on("error", (e) => (error = e.message));
+      // settle on close, never on error: the point is to observe BOTH, and the
+      // old behaviour emitted the error first and closed anyway
+      proc.on("close", (code) => setTimeout(() => resolve({ code, error, out }), 50));
+    });
+  }
+
+  const exit = (n: number): string => (posix ? `exit ${n}` : `cmd /c exit ${n}`);
+
+  it("reports exit 1 as exit 1, with no error event", async () => {
+    const r = await run(exit(1));
+    expect(r.error).toBeNull();
+    expect(r.code).toBe(1);
+  });
+
+  it("keeps the output of a chained command that fails", async () => {
+    // the tail is the feedback assembleFeedback hands the next attempt; losing
+    // it is what left the executor with nothing to act on
+    const r = await run(`echo ralphrun-marker && ${exit(1)}`);
+    expect(r.error).toBeNull();
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("ralphrun-marker");
+  });
+
+  it("still reports the other exit codes untouched", async () => {
+    // 0 and 2 were never rewritten — this pins that the fix did not trade one
+    // special case for another
+    expect(await run(exit(0)).then((r) => [r.code, r.error])).toEqual([0, null]);
+    expect(await run(exit(2)).then((r) => [r.code, r.error])).toEqual([2, null]);
+  });
+});
+
 function groupAlive(pid: number | undefined): boolean {
   if (pid === undefined) return false;
   try {

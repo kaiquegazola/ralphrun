@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 // aliased: per-task loop vars below are named `t` and would shadow t()
 import { t as msg } from "./i18n.js";
 import type { PRD, ResourceAccess, TaskResources } from "./prd.js";
+import { isRequiredHost } from "./host.js";
 
 const STATUSES = new Set(["todo", "doing", "done", "blocked"]);
 const RESOURCE_ACCESS = new Set<ResourceAccess>(["isolated", "read", "write", "reset"]);
@@ -339,6 +340,7 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
       if (!Array.isArray(t.scope)) errors.push(msg("prd.err.scope", { i }));
       else if (t.scope.some((s) => typeof s !== "string")) errors.push(msg("prd.err.scopeItem", { i }));
     }
+    if (t.required_host !== undefined && !isRequiredHost(t.required_host)) errors.push(msg("prd.err.requiredHost", { i }));
     if (t.parallel !== undefined && t.parallel !== "safe" && t.parallel !== "exclusive")
       errors.push(msg("prd.err.parallel", { i }));
     if (t.resources !== undefined) {
@@ -413,6 +415,7 @@ function seedSafe(obj: object): PRD {
         else delete t.resources;
       }
     }
+    if (t.required_host !== undefined && !isRequiredHost(t.required_host)) delete t.required_host;
     if (t.plan !== undefined && typeof t.plan !== "string") delete t.plan;
     if (t.planKey !== undefined && typeof t.planKey !== "string") delete t.planKey;
   }

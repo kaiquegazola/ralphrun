@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { brainGlobalBlock, brainPromptBlock } from "./brain.js";
 import { browserGuidance, taskUsesBrowser } from "./browser.js";
 import type { PRD, Task } from "./prd.js";
+import { hostRequirementLabel } from "./host.js";
 
 /**
  * How an executor reports "I cannot do this safely" so the loop hears it.
@@ -67,6 +68,15 @@ ${commandGuidance}
 Before relying on an optional command-line tool, check that it exists and switch to an available platform-compatible equivalent if it does not. Do not retry the same unavailable command unchanged.`;
 }
 
+function taskHostRequirementBlock(task: Task): string {
+  if (task.required_host) {
+    return `## Task host requirement
+This task must run on one of these host platforms: ${hostRequirementLabel(task.required_host)}.
+Do not substitute another operating system; if the current host is incompatible, report the constraint instead of pretending to verify it.`;
+  }
+  return `## Task host requirement
+No dedicated host platform is declared for this task. Keep the implementation and verification portable unless the acceptance criteria explicitly require a platform-specific path.`;
+}
 function architectureContextBlock(prd: PRD, workspace?: string, canReadFiles = true): string {
   const brain = brainPromptBlock(workspace);
   if (!brain) return "## Architecture notes (respect these across the whole project)\n" + prd.architecture_notes;
@@ -85,6 +95,7 @@ ${hostEnvironmentBlock()}
 ## Stack
 ${prd.stack}
 ${architectureContextBlock(prd, workspace)}
+${taskHostRequirementBlock(task)}
 ${standardsBlock(standards)}
 # YOUR TASK: ${task.id} — ${task.title}
 ${task.description}
@@ -149,6 +160,7 @@ ${hostEnvironmentBlock()}
 Project: ${prd.project}
 Stack: ${prd.stack}
 ${architectureContextBlock(prd, workspace, false)}
+${taskHostRequirementBlock(task)}
 ${standardsBlock(standards)}
 Task ${task.id} — ${task.title}: ${task.description}
 Acceptance: ${task.acceptance.join("; ")}
@@ -192,6 +204,7 @@ ${existing ? `\nAlready-written fields (keep their intent; you may refine wordin
 Project: ${prd.project}
 Stack: ${prd.stack}
 ${architectureContextBlock(prd, workspace, false)}
+${taskHostRequirementBlock(task)}
 ${hostEnvironmentBlock()}
 
 Task to expand:
@@ -509,6 +522,8 @@ Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.
 
 ${architectureContextBlock(prd, workspace)}
+
+${taskHostRequirementBlock(task)}
 
 Reply with EXACTLY one of:
   VERDICT: APPROVE

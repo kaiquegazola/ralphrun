@@ -76,6 +76,12 @@ describe("buildPrompt", () => {
     expect(out).toContain("Before relying on an optional command-line tool");
   });
 
+  it("includes the task host requirement when one is declared", () => {
+    const hostTask: Task = { ...task, required_host: "darwin" };
+    const out = buildPrompt(hostTask, { ...prd, tasks: [hostTask] });
+    expect(out).toContain("This task must run on one of these host platforms: darwin");
+  });
+
   it("includes standards block when standards present", () => {
     const out = buildPrompt(task, prd, "STD");
     expect(out).toContain("Project standards");
@@ -155,6 +161,13 @@ describe("advisorPrompt", () => {
     expect(advisorPrompt(task, prd)).toContain("Concurrency preflight");
     expect(advisorPrompt(task, prd)).toContain("Treat missing isolation evidence as unsafe");
     expect(advisorPrompt(task, prd)).toContain("## Host environment");
+  });
+
+  it("includes the task host requirement", () => {
+    const hostTask: Task = { ...task, required_host: ["linux", "darwin"] };
+    expect(advisorPrompt(hostTask, { ...prd, tasks: [hostTask] })).toContain(
+      "This task must run on one of these host platforms: linux, darwin",
+    );
   });
 });
 

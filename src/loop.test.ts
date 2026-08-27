@@ -102,6 +102,7 @@ import {
   worktreeLoss,
 } from "./worktree.js";
 import { runTask } from "./run.js";
+import { expandSkeletonTask } from "./expand.js";
 import { runVerifyCommand } from "./verify.js";
 import { advisorPlanKey } from "./plan-cache.js";
 import { mount } from "./tui/mount.js";
@@ -149,6 +150,7 @@ const mReleaseLock = vi.mocked(releaseRunLock);
 const mTasksInstalling = vi.mocked(tasksInstallingDeps);
 const mSetupInstalls = vi.mocked(verifyInstallsDeps);
 const mRunTask = vi.mocked(runTask);
+const mExpandSkeletonTask = vi.mocked(expandSkeletonTask);
 const mVerifyCmd = vi.mocked(runVerifyCommand);
 const mAdvisorPlanKey = vi.mocked(advisorPlanKey);
 const mMount = vi.mocked(mount);
@@ -600,6 +602,24 @@ describe("runLoop dry-run", () => {
 });
 
 describe("runLoop real run (non-TTY fallback)", () => {
+  it("blocks an incompatible task before worktree, expansion, advisor, or executor", async () => {
+    fastTimers();
+    const requiredHost = process.platform === "win32" ? "darwin" : "win32";
+    const hostTask = { ...TASK, required_host: requiredHost };
+    mRead.mockReturnValue(prdWith([hostTask]));
+    mNextTask.mockReset();
+    mNextTask.mockReturnValue(hostTask as never);
+    mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true, stop_on_blocked: true }));
+    mHeadCommit.mockReturnValue("base");
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(mCreateWorktree).not.toHaveBeenCalled();
+    expect(mExpandSkeletonTask).not.toHaveBeenCalled();
+    expect(mRunTask).not.toHaveBeenCalled();
+    expect(mWrite).toHaveBeenLastCalledWith(expect.stringContaining("prd.json"), expect.stringContaining('"status": "blocked"'));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining(`required_host=${requiredHost}`));
+  });
   it("done → commit; inits git; writes missing progress; no TUI; overrides", async () => {
     fastTimers();
     gitExists = false; // trigger git init

@@ -41,7 +41,7 @@ Requires Node >= 20.
 
 | File | Role |
 |---|---|
-| `prd.json` | The backlog — tasks with `deps`, `acceptance`, `scope`, `verify` command. The source of truth for the plan. |
+| `prd.json` | The backlog — tasks with `deps`, `acceptance`, `scope`, `verify`, and optional `required_host`. The source of truth for the plan. |
 | `.ralphrun/brain/` | Local prompt context: `global.md` mirrors `architecture_notes`, while `INDEX.md` points agents to optional topic files. |
 | `ralph.config.json` | Executor + advisor (`cli:model`), limits, timeouts. Auto-loaded next to the PRD. |
 | `progress.md` | Append-only run log (auto-created next to the PRD) with `[HH:MM:SS]` timestamps. |
@@ -381,6 +381,13 @@ tail -f ralph.out
   Integration tasks whose `verify` runs the whole suite are the fix, and they
   come from the plan. Do not raise this knob far before your backlog has them.
 
+- **`required_host` is a host gate.** Set it to a Node `process.platform` id such as
+  `win32`, `darwin`, or `linux` only when the task's implementation or verify really
+  needs that operating system. It may also be a non-empty list when any listed host
+  is valid. On an incompatible host the task is marked `blocked` before worktree
+  creation, advisor/expansion, or executor launch; dependent tasks are not treated as
+  runnable in the session. Leave it absent for portable tasks and for integration or
+  release gates that need evidence from multiple platforms.
 - **`scope` is a GATE at runtime.** A task that edits paths its declared `scope`
   does not cover **fails** — it invalidated the proof its wave was scheduled on,
   so the merge is no longer known to be safe. In worktree mode the cell is

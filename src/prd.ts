@@ -1,3 +1,5 @@
+import { hostMismatch, type RequiredHost } from "./host.js";
+
 // prd.ts — backlog types, next task picker (recovery/normalize live in prdload.ts)
 
 export type TaskStatus = "todo" | "doing" | "done" | "blocked";
@@ -28,6 +30,8 @@ export interface Task {
   // of an LLM judgement call. An empty scope declares nothing and so gates
   // nothing (nor does a workspace with no git baseline to diff against).
   scope?: string[];
+  /** Host OS required by this task; omit for portable or cross-platform work. */
+  required_host?: RequiredHost;
   /** Explicit concurrency contract. Missing means conservative serial execution. */
   parallel?: "safe" | "exclusive";
   /** External resources the task's verify or implementation may touch. */
@@ -79,7 +83,7 @@ export function findTask(prd: PRD, id: string): Task | null {
 export function sessionRunnableIds(prd: PRD, canPromoteBlocked: boolean): Set<string> {
   const done = new Set(prd.tasks.filter((t) => t.status === "done").map((t) => t.id));
   const canStart = (t: Task): boolean =>
-    (t.status === "todo" || (canPromoteBlocked && t.status === "blocked")) && t.deps.every((d) => done.has(d));
+    (t.status === "todo" || (canPromoteBlocked && t.status === "blocked")) && !hostMismatch(t.required_host) && t.deps.every((d) => done.has(d));
   const willRun = new Set<string>();
   let changed = true;
   while (changed) {

@@ -82,6 +82,12 @@ describe("sessionRunnableIds", () => {
     expect(sessionRunnableIds(p, false)).toEqual(new Set(["C"])); // B can never run this session
   });
 
+  it("excludes a host-incompatible task and its dependents", () => {
+    const incompatibleHost = process.platform === "win32" ? "darwin" : "win32";
+    const p = prd([t({ id: "A", required_host: incompatibleHost }), t({ id: "B", deps: ["A"] }), t({ id: "C" })]);
+    expect(sessionRunnableIds(p, true)).toEqual(new Set(["C"]));
+  });
+
   it("INCLUDES that chain on a TTY, where the blocked dep can be promoted", () => {
     const p = prd([t({ id: "A", status: "blocked" }), t({ id: "B", deps: ["A"] }), t({ id: "C" })]);
     expect(sessionRunnableIds(p, true)).toEqual(new Set(["A", "B", "C"]));

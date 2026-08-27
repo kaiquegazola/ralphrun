@@ -336,6 +336,7 @@ const en = {
   "prd.err.scopeItem": "task[{i}].scope items must be strings",
   "prd.err.parallel": "task[{i}].parallel must be safe or exclusive",
   "prd.err.resources": "task[{i}].resources must be an object",
+  "prd.err.requiredHost": "task[{i}].required_host must be a supported host platform or a non-empty array of them",
   "prd.err.resourceAccess": "task[{i}].resources.{key} must be isolated, read, write, or reset",
   "prd.err.resourceList": "task[{i}].resources.{key} must be an array of strings",
   "prd.err.scopeOverlap":
@@ -701,6 +702,7 @@ const ptBr: Record<MsgKey, string> = {
   "prd.err.scopeItem": "task[{i}].scope precisa conter apenas strings",
   "prd.err.parallel": "task[{i}].parallel precisa ser safe ou exclusive",
   "prd.err.resources": "task[{i}].resources precisa ser um objeto",
+  "prd.err.requiredHost": "task[{i}].required_host precisa ser uma plataforma suportada ou um array nÃ£o vazio delas",
   "prd.err.resourceAccess": "task[{i}].resources.{key} precisa ser isolated, read, write ou reset",
   "prd.err.resourceList": "task[{i}].resources.{key} precisa ser um array de strings",
   "prd.err.scopeOverlap":

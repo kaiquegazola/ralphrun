@@ -449,3 +449,18 @@ describe("loadPrdFile skeleton intake", () => {
     if (r.ok) expect(r.prd.tasks[0].description).toBe("");
   });
 });
+describe("validatePrd host requirements", () => {
+  it("accepts supported host requirements", () => {
+    expect(validatePrd(prd({ tasks: [task({ required_host: "win32" })] })).ok).toBe(true);
+    expect(validatePrd(prd({ tasks: [task({ required_host: ["darwin", "linux"] })] })).ok).toBe(true);
+  });
+
+  it("rejects empty or unknown host requirements", () => {
+    const empty = validatePrd(prd({ tasks: [task({ required_host: [] })] }));
+    const unknown = validatePrd(prd({ tasks: [task({ required_host: "macos" })] }));
+    expect(empty.ok).toBe(false);
+    expect(unknown.ok).toBe(false);
+    expect(empty.errors.join(" ")).toContain("required_host");
+    expect(unknown.errors.join(" ")).toContain("required_host");
+  });
+});

@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { agentDef } from "./agents.js";
 import { BRAIN_DIRECTORY, syncBrain } from "./brain.js";
+import { hostMismatch } from "./host.js";
 import { type Config } from "./config.js";
 import { BROWSER_INSTALL_HINT, BROWSER_UPDATE_HINT, browserStatusAsync, taskUsesBrowser, type BrowserStatus } from "./browser.js";
 import { applyTaskPatch, expandSkeletonTask, isSkeletonTask, type TaskPatch } from "./expand.js";
@@ -278,6 +279,8 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       }
       return "next";
     };
+    const hostBlock = hostMismatch(task.required_host);
+    if (hostBlock) return blockPreRun(hostBlock);
     // Abort triage shared by every pre-run await (cell setup, advisor expansion,
     // browser probe): quit / skip / pure teardown each get exactly the treatment
     // the post-runTask path would have given them.
@@ -937,15 +940,19 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
    */
   const pickWave = (prd: PRD): Task[] => {
     const ready = readyTasks(prd);
-    const cap = Math.min(ctx.cfg.max_parallel_tasks ?? 1, ready.length);
+    const hostReady = ready.filter((tk) => !hostMismatch(tk.required_host));
+    // Keep an incompatible task alone so runOneTask can persist a clear blocked
+    // status; never let it consume a slot in a wave with executable siblings.
+    const candidates = hostReady.length > 0 ? hostReady : ready;
+    const cap = Math.min(ctx.cfg.max_parallel_tasks ?? 1, candidates.length);
     // No repo (or no commit yet) means no worktrees, and a wave without them
     // would put N executors in one checkout — the thing config load refuses.
-    if (cap <= 1 || !headCommit(workspace)) return ready.slice(0, 1);
+    if (cap <= 1 || !headCommit(workspace)) return candidates.slice(0, 1);
     if (agentDef(ctx.cfg.executor.cli)?.sdk) {
-      return ready.slice(0, 1);
+      return candidates.slice(0, 1);
     }
     const wave: Task[] = [];
-    for (const tk of ready) {
+    for (const tk of candidates) {
       if (wave.length >= cap) break;
       if (!tk.scope?.length || !taskCanRunInWave(tk)) {
         if (wave.length === 0) {

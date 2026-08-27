@@ -16,6 +16,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { supportsNativeAdvisor } from "./agents.js";
+import { hostMismatch } from "./host.js";
 import { anyTaskUsesBrowser, browserStatus, BROWSER_INSTALL_HINT, BROWSER_TOOL, BROWSER_UPDATE_HINT } from "./browser.js";
 import { loadConfig, parseAgent, type AgentSpec, type Config, type ReviewBlockedPolicy } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
@@ -125,9 +126,9 @@ function requirePathSeparator(): string {
 }
 
 function runnableTasksAtBoot(prd: PRD, targetId?: string): Task[] {
-  if (targetId) return prd.tasks.filter((task) => task.id === targetId);
+  if (targetId) return prd.tasks.filter((task) => task.id === targetId && !hostMismatch(task.required_host));
   const done = new Set(prd.tasks.filter((task) => task.status === "done").map((task) => task.id));
-  return prd.tasks.filter((task) => task.status === "todo" && task.deps.every((dep) => done.has(dep)));
+  return prd.tasks.filter((task) => task.status === "todo" && task.deps.every((dep) => done.has(dep)) && !hostMismatch(task.required_host));
 }
 
 /**
@@ -364,7 +365,7 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
     // browser task genuinely runs, never for one transitively gated by a task
     // that can't complete this session.
     const willRun = opts.task ? new Set([opts.task]) : sessionRunnableIds(prd0, !!process.stdout.isTTY);
-    const browserScope = prd0.tasks.filter((x) => willRun.has(x.id));
+    const browserScope = prd0.tasks.filter((x) => willRun.has(x.id) && !hostMismatch(x.required_host));
     if (anyTaskUsesBrowser(browserScope)) {
       const status = browserStatus();
       if (status === "missing") {

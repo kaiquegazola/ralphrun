@@ -18,6 +18,7 @@ import { killTree, releasePipes, spawn, writePrompt } from "../../spawn.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
 import { normalizePrd } from "../../prdload.js";
+import { hostEnvironmentBlock } from "../../prompts.js";
 import type { ChatMessage, PlannerResult } from "./prdController.js";
 import { validatePrd } from "./validatePrd.js";
 
@@ -158,7 +159,7 @@ const REQUIRED_OUTPUT =
   "Reply with FIRST a ONE-LINE summary, THEN a blank line, THEN the FULL updated PRD as a single json fenced block.";
 
 function buildPrompt(args: PlannerTurnArgs): string {
-  const parts: string[] = [PREAMBLE];
+  const parts: string[] = [PREAMBLE, hostEnvironmentBlock()];
   parts.push("Current PRD:\n" + (args.currentPrd ? JSON.stringify(args.currentPrd, null, 2) : "none yet"));
   if (args.currentPrd) {
     // the studio shows tasks numbered 1..N — let "task 15" resolve to an id

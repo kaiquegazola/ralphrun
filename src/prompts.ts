@@ -34,8 +34,42 @@ function standardsBlock(standards: string): string {
     : "";
 }
 
+/**
+ * Give every agent the host facts that affect how it explores and verifies the
+ * workspace. Keep this generated from the runner instead of relying on the
+ * project PRD: the same task can run on Windows, macOS or Linux.
+ */
+export function hostEnvironmentBlock(platform: NodeJS.Platform = process.platform): string {
+  const osName: Record<string, string> = {
+    aix: "AIX",
+    android: "Android",
+    darwin: "macOS",
+    freebsd: "FreeBSD",
+    haiku: "Haiku",
+    linux: "Linux",
+    openbsd: "OpenBSD",
+    sunos: "SunOS",
+    win32: "Windows",
+  };
+  const windows = platform === "win32";
+  const pathGuidance = windows
+    ? "Use Windows paths (drive letters and backslashes are valid); do not assume POSIX paths."
+    : "Use paths native to this host; do not assume Windows drive-letter paths.";
+  const commandGuidance = windows
+    ? "Use commands compatible with the available Windows shell; do not assume bash, sh, GNU utilities, or POSIX syntax."
+    : "Use commands compatible with the available host shell; do not assume tools are installed without checking.";
+
+  return `## Host environment
+Operating system: ${osName[platform] ?? platform} (${platform})
+${pathGuidance}
+${commandGuidance}
+Before relying on an optional command-line tool, check that it exists and switch to an available platform-compatible equivalent if it does not. Do not retry the same unavailable command unchanged.`;
+}
+
 export function buildPrompt(task: Task, prd: PRD, standards = ""): string {
   return `You are building ONE task of a larger MVP, autonomously.
+
+${hostEnvironmentBlock()}
 
 # Project: ${prd.project}
 ## Stack
@@ -101,6 +135,8 @@ Work in the current directory. Begin.${taskUsesBrowser(task) ? "\n" + browserGui
 export function advisorPrompt(task: Task, prd: PRD, standards = ""): string {
   return `You are a senior ADVISOR. Do NOT write code or use tools — reply with guidance text ONLY.
 
+${hostEnvironmentBlock()}
+
 Project: ${prd.project}
 Stack: ${prd.stack}
 Architecture notes: ${prd.architecture_notes}
@@ -147,6 +183,7 @@ ${existing ? `\nAlready-written fields (keep their intent; you may refine wordin
 Project: ${prd.project}
 Stack: ${prd.stack}
 Architecture notes: ${prd.architecture_notes}
+${hostEnvironmentBlock()}
 
 Task to expand:
 ${JSON.stringify({ id: task.id, title: task.title, deps: task.deps, retries: task.retries }, null, 2)}
@@ -455,6 +492,8 @@ export function reviewPrompt(
   context?: ReviewContext,
 ): string {
   return `${canRun ? runningPosture(task) : READING_POSTURE}
+
+${hostEnvironmentBlock()}
 
 Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.

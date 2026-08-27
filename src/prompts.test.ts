@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import {
   BLOCKED_MARKER,
+  hostEnvironmentBlock,
   readStandards,
   buildPrompt,
   advisorPrompt,
@@ -68,6 +69,13 @@ describe("readStandards", () => {
 });
 
 describe("buildPrompt", () => {
+  it("includes the generated host environment guidance", () => {
+    const out = buildPrompt(task, prd);
+    expect(out).toContain("## Host environment");
+    expect(out).toContain(`Operating system: ${process.platform === "win32" ? "Windows" : process.platform} (${process.platform})`);
+    expect(out).toContain("Before relying on an optional command-line tool");
+  });
+
   it("includes standards block when standards present", () => {
     const out = buildPrompt(task, prd, "STD");
     expect(out).toContain("Project standards");
@@ -146,6 +154,23 @@ describe("advisorPrompt", () => {
     expect(advisorPrompt(task, prd)).toContain("a1; a2");
     expect(advisorPrompt(task, prd)).toContain("Concurrency preflight");
     expect(advisorPrompt(task, prd)).toContain("Treat missing isolation evidence as unsafe");
+    expect(advisorPrompt(task, prd)).toContain("## Host environment");
+  });
+});
+
+describe("hostEnvironmentBlock", () => {
+  it("gives Windows-specific command and path guidance", () => {
+    const out = hostEnvironmentBlock("win32");
+    expect(out).toContain("Operating system: Windows (win32)");
+    expect(out).toContain("drive letters and backslashes");
+    expect(out).toContain("do not assume bash, sh, GNU utilities, or POSIX syntax");
+  });
+
+  it("does not prescribe Windows paths on Unix hosts", () => {
+    const out = hostEnvironmentBlock("linux");
+    expect(out).toContain("Operating system: Linux (linux)");
+    expect(out).toContain("do not assume Windows drive-letter paths");
+    expect(out).not.toContain("do not assume bash, sh, GNU utilities, or POSIX syntax");
   });
 });
 
@@ -159,6 +184,10 @@ describe("injectAdvice", () => {
 });
 
 describe("reviewPrompt", () => {
+  it("includes the generated host environment guidance", () => {
+    expect(reviewPrompt(task, prd, "", "the diff")).toContain("## Host environment");
+  });
+
   it("includes diff and acceptance", () => {
     const out = reviewPrompt(task, prd, "STD", "the diff");
     expect(out).toContain("## Diff");

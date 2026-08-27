@@ -153,6 +153,7 @@ it("injects current PRD json, chat history, and attachment contents into the pro
   expect(prompt).toContain("you: make it faster"); // history mapped
   expect(prompt).toContain("## Attached reference: notes.md");
   expect(prompt).toContain("SECRET-CONTENT");
+  expect(prompt).toContain("## Host environment");
 });
 
 it("instructs the planner to use context-aware verify quality gates", async () => {

@@ -516,27 +516,28 @@ describe("runTask CROSS", () => {
   });
 });
 
-// mount.ts promises the skip/quit control reaches "the verify command", but the
-// in-loop verify is only ONE of the three call sites. NATIVE has no loop at all,
-// and with review off the abort break falls straight through to the tail verify
-// — both would otherwise sit out the full 600s cap on a task the user abandoned.
-describe("the skip/quit signal reaches every verify, not just the in-loop one", () => {
-  it("NATIVE hands it to its only verify", async () => {
+// A user abort is cancellation, so no verify should start after the executor
+// has been stopped. This is especially important for the native path and for
+// the old cross-mode tail verify, both of which used to wait out the full cap.
+describe("an abort stops verification", () => {
+  it("NATIVE does not verify after an abort", async () => {
     const ac = new AbortController();
+    mExec.mockImplementation(async () => {
+      ac.abort("quit");
+      return false;
+    });
     await runTask(task, prd, cfg(), "/ws", "/prog", ac.signal);
-    expect(mVerify).toHaveBeenCalledWith(task, "/ws", "/prog", ac.signal);
+    expect(mVerify).not.toHaveBeenCalled();
   });
 
-  it("the CROSS tail verify hands it over too, on the abort that lands there", async () => {
+  it("the CROSS path does not open a tail verify after abort", async () => {
     const ac = new AbortController();
     mExec.mockImplementation(async () => {
       ac.abort();
       return true;
     });
-    // review off → lastApproved is vacuously true, so the aborted loop exits
-    // past the never-approved return and into the tail verify
     await runTask(task, prd, cfg({ advisor: null }), "/ws", "/prog", ac.signal);
-    expect(mVerify).toHaveBeenCalledExactlyOnceWith(task, "/ws", "/prog", ac.signal);
+    expect(mVerify).not.toHaveBeenCalled();
   });
 });
 

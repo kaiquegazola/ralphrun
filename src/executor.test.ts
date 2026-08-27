@@ -354,6 +354,17 @@ it("abort mid-run kills, resolves false, and a later close is a no-op", async ()
   expect(await p).toBe(false);
 });
 
+it("labels a quit abort separately from a manual skip", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const ac = new AbortController();
+  const p = runExecutor(execu, "prompt", cfg(), "ws", "prog", task, [], ac.signal);
+  ac.abort("quit");
+  expect(await p).toBe(false);
+  expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("interrupted by quit"));
+  expect(log).not.toHaveBeenCalledWith("prog", expect.stringContaining("skipped by user"));
+});
+
 it("emits a heartbeat once the idle window elapses", async () => {
   vi.useFakeTimers();
   try {

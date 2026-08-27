@@ -228,7 +228,7 @@ export function runExecutor(
       grace.unref?.();
     };
     const onAbort = (): void => {
-      log(progress, t("exec.skipped", { tag, cli: execu.cli }));
+      log(progress, t(signal?.reason === "quit" ? "exec.quit" : "exec.skipped", { tag, cli: execu.cli }));
       killTree(proc);
       releasePipes(proc, merged, rl);
       finish(false);

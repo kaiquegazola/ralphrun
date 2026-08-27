@@ -113,6 +113,7 @@ export async function runTask(
     emit({ taskId: task.id, subphase: "executing", attempt });
     const advisorArgs = nativeAdvisorArgs(execu.cli, advis.model);
     const ok = await execute(execu, prompt, cfg, workspace, progress, task, advisorArgs, signal, onCost, onFinal, runtimeEnv);
+    if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
     emit({ taskId: task.id, subphase: "verifying", gates: { exec: ok } });
     const verification = await verify(task, signal);
     const passed = ok && verification.passed;
@@ -167,6 +168,7 @@ export async function runTask(
   log(progress, t("run.log.cross", { id: task.id, executor: `${execu.cli}:${execu.model}` }));
   emit({ taskId: task.id, subphase: "executing", attempt });
   let ok = await execute(execu, execPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal, runtimeEnv);
+  if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
   const reviewOn = !!advis && cfg.review_after;
   // Diff every review against the index tree that existed before this task.
   // This works even before the first commit and excludes pre-existing changes.
@@ -196,6 +198,7 @@ export async function runTask(
     if (signal?.aborted) break;
     emit({ taskId: task.id, subphase: "verifying", round: { n: rnd, max: maxReviewCycles } });
     const { passed: testOk, output: testOut } = await verify(task, signal);
+    if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
     lastVerificationPassed = testOk;
     emit({ taskId: task.id, subphase: "reviewing" });
     // The verify verdict goes WITH the diff: these two gates judge the same
@@ -240,6 +243,7 @@ export async function runTask(
             reviewContext,
           )
         : { approved: true, changes: "", diff: "", verify: undefined };
+    if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
     lastApproved = approved;
     if (changes.trim()) lastReviewChanges = changes;
     lastReviewFindings = findings;
@@ -343,6 +347,11 @@ export async function runTask(
     emit({ taskId: task.id, subphase: "fixing" });
     ok = await execute(execu, fixPrompt, cfg, workspace, progress, task, [], signal, onCost, onFinal, runtimeEnv);
   }
+
+  // An abort is cancellation, not a failed review. Do not emit exhausted or
+  // never-approved messages for a task the user stopped while a child phase
+  // was settling; taskrun will apply the quit/skip policy to the task status.
+  if (signal?.aborted) return { ok: false, reason: "failed", cost, handoff: lastHandoff };
 
   log(progress, t("run.log.exhausted", { id: task.id }));
   if (!lastApproved) {

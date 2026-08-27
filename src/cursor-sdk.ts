@@ -528,7 +528,7 @@ export async function runCursorSdkExecutor(
     // only from its abort listener and stays silent when the signal was already
     // aborted. There is one code path here, and the asymmetry bought nothing.
     if (out.status === "aborted") {
-      log(progress, t("exec.skipped", { tag, cli: execu.cli }));
+      log(progress, t(signal?.reason === "quit" ? "exec.quit" : "exec.skipped", { tag, cli: execu.cli }));
       return false;
     }
     if (out.status === "timeout") {

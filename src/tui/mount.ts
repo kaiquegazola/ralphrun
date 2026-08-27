@@ -66,7 +66,10 @@ export function mount(
       // verify or a 900s review it had already killed the executor for.
       // Deliberately coarse: it kills the WHOLE wave, because the dashboard has
       // no per-task selection to aim a skip at.
-      if (state.skipRequested || state.quit) for (const ac of acs.values()) ac.abort();
+      if (state.skipRequested || state.quit) {
+        const reason = state.quit ? "quit" : "skip";
+        for (const ac of acs.values()) ac.abort(reason);
+      }
       for (const cb of subs) cb();
     },
   };

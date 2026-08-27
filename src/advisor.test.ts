@@ -256,7 +256,7 @@ describe("advisorReview", () => {
     finishSpawn(0);
     await p;
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("already satisfied"));
-    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "   ", undefined, false, context);
+    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "   ", undefined, false, context, "ws");
   });
 
   // The verify verdict is evidence about the same attempt as the diff, so it has
@@ -269,7 +269,7 @@ describe("advisorReview", () => {
     mockChild.stdout.end("CHANGES: x\n");
     finishSpawn(0);
     await p;
-    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification, false, undefined);
+    expect(reviewPrompt).toHaveBeenCalledWith(task, prd, "std", "some diff", verification, false, undefined, "ws");
   });
 
   it("delegates to parseReview on success", async () => {
@@ -560,7 +560,7 @@ describe("advisorReview", () => {
     mockChild.stdout.end("CHANGES: x\n");
     finishSpawn(0);
     await p;
-    expect(diffMock).toHaveBeenCalledWith("ws", "base-commit");
+    expect(diffMock).toHaveBeenCalledWith("ws", "base-commit", [".ralphrun/brain"]);
   });
 
   // A reviewer that never answered has judged nothing, so it cannot approve.

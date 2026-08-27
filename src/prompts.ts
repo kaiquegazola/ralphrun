@@ -1,6 +1,7 @@
 // prompts.ts — the text prompts injected into executor + advisor
 
 import { existsSync, readFileSync } from "node:fs";
+import { brainGlobalBlock, brainPromptBlock } from "./brain.js";
 import { browserGuidance, taskUsesBrowser } from "./browser.js";
 import type { PRD, Task } from "./prd.js";
 
@@ -66,7 +67,16 @@ ${commandGuidance}
 Before relying on an optional command-line tool, check that it exists and switch to an available platform-compatible equivalent if it does not. Do not retry the same unavailable command unchanged.`;
 }
 
-export function buildPrompt(task: Task, prd: PRD, standards = ""): string {
+function architectureContextBlock(prd: PRD, workspace?: string, canReadFiles = true): string {
+  const brain = brainPromptBlock(workspace);
+  if (!brain) return "## Architecture notes (respect these across the whole project)\n" + prd.architecture_notes;
+  if (canReadFiles) {
+    return brain + "\n\n## Architecture notes\nThe complete architecture notes are in .ralphrun/brain/global.md; read that file before relying on project-wide details.";
+  }
+  const global = brainGlobalBlock(workspace);
+  return global ? "## Project knowledge\n" + global : "## Architecture notes (respect these across the whole project)\n" + prd.architecture_notes;
+}
+export function buildPrompt(task: Task, prd: PRD, standards = "", workspace?: string): string {
   return `You are building ONE task of a larger MVP, autonomously.
 
 ${hostEnvironmentBlock()}
@@ -74,8 +84,7 @@ ${hostEnvironmentBlock()}
 # Project: ${prd.project}
 ## Stack
 ${prd.stack}
-## Architecture notes (respect these across the whole project)
-${prd.architecture_notes}
+${architectureContextBlock(prd, workspace)}
 ${standardsBlock(standards)}
 # YOUR TASK: ${task.id} — ${task.title}
 ${task.description}
@@ -132,14 +141,14 @@ Rules:
 Work in the current directory. Begin.${taskUsesBrowser(task) ? "\n" + browserGuidance() : ""}`;
 }
 
-export function advisorPrompt(task: Task, prd: PRD, standards = ""): string {
+export function advisorPrompt(task: Task, prd: PRD, standards = "", workspace?: string): string {
   return `You are a senior ADVISOR. Do NOT write code or use tools — reply with guidance text ONLY.
 
 ${hostEnvironmentBlock()}
 
 Project: ${prd.project}
 Stack: ${prd.stack}
-Architecture notes: ${prd.architecture_notes}
+${architectureContextBlock(prd, workspace, false)}
 ${standardsBlock(standards)}
 Task ${task.id} — ${task.title}: ${task.description}
 Acceptance: ${task.acceptance.join("; ")}
@@ -158,7 +167,7 @@ the concurrency/resource assessment, and the failure modes to avoid. Max ~14 lin
 
 // expand.ts companion: a SKELETON task (staged authoring left it without
 // details) becomes a full executable spec right before the loop runs it.
-export function taskExpandPrompt(task: Task, prd: PRD): string {
+export function taskExpandPrompt(task: Task, prd: PRD, workspace?: string): string {
   const neighbors = prd.tasks
     .filter((x) => x.id !== task.id && (x.deps.includes(task.id) || task.deps.includes(x.id)))
     .map((x) => `${x.id}: ${x.title} [scope: ${(x.scope ?? []).join(", ") || "—"}]`)
@@ -182,7 +191,7 @@ Do not invent or change scope, parallel, or resources: those stay with the plann
 ${existing ? `\nAlready-written fields (keep their intent; you may refine wording, never drop or contradict them):\n${existing}\n` : ""}
 Project: ${prd.project}
 Stack: ${prd.stack}
-Architecture notes: ${prd.architecture_notes}
+${architectureContextBlock(prd, workspace, false)}
 ${hostEnvironmentBlock()}
 
 Task to expand:
@@ -490,6 +499,7 @@ export function reviewPrompt(
   /** the reviewer may run commands — see runningPosture */
   canRun = false,
   context?: ReviewContext,
+  workspace?: string,
 ): string {
   return `${canRun ? runningPosture(task) : READING_POSTURE}
 
@@ -497,6 +507,8 @@ ${hostEnvironmentBlock()}
 
 Below is a task and the diff an executor produced for it.
 Judge whether the diff meets the acceptance AND the project standards.
+
+${architectureContextBlock(prd, workspace)}
 
 Reply with EXACTLY one of:
   VERDICT: APPROVE

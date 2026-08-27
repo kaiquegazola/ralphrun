@@ -18,6 +18,7 @@ import { killTree, releasePipes, spawn, writePrompt } from "../../spawn.js";
 import { t } from "../../i18n.js";
 import type { PRD } from "../../prd.js";
 import { normalizePrd } from "../../prdload.js";
+import { brainPromptBlock, syncBrain } from "../../brain.js";
 import { hostEnvironmentBlock } from "../../prompts.js";
 import type { ChatMessage, PlannerResult } from "./prdController.js";
 import { validatePrd } from "./validatePrd.js";
@@ -155,12 +156,26 @@ const PREAMBLE = [
   "never for backend, library, or config tasks.",
 ].join("\n");
 
+const BRAIN_ARCHITECTURE_POINTER = "[stored in .ralphrun/brain/global.md; read it before changing or preserving this field]";
+
 const REQUIRED_OUTPUT =
   "Reply with FIRST a ONE-LINE summary, THEN a blank line, THEN the FULL updated PRD as a single json fenced block.";
 
+function restorePlannerArchitecture(result: PlannerResult, currentPrd: PRD | null): PlannerResult {
+  if (!currentPrd || !result.prd || result.prd.architecture_notes !== BRAIN_ARCHITECTURE_POINTER) return result;
+  return { ...result, prd: { ...result.prd, architecture_notes: currentPrd.architecture_notes } };
+}
 function buildPrompt(args: PlannerTurnArgs): string {
   const parts: string[] = [PREAMBLE, hostEnvironmentBlock()];
-  parts.push("Current PRD:\n" + (args.currentPrd ? JSON.stringify(args.currentPrd, null, 2) : "none yet"));
+  const brain = brainPromptBlock(args.cwd);
+  if (brain) parts.push(brain);
+  if (args.currentPrd) {
+    const currentPrd = brain ? { ...args.currentPrd, architecture_notes: BRAIN_ARCHITECTURE_POINTER } : args.currentPrd;
+    parts.push("Current PRD:\n" + JSON.stringify(currentPrd, null, 2));
+    if (brain) parts.push("The architecture_notes value is intentionally represented by a file pointer above. Read .ralphrun/brain/global.md and put the complete value back in the JSON output unless the user explicitly asks to change it.");
+  } else {
+    parts.push("Current PRD:\nnone yet");
+  }
   if (args.currentPrd) {
     // the studio shows tasks numbered 1..N — let "task 15" resolve to an id
     parts.push(
@@ -245,13 +260,14 @@ async function runPlannerSdkTurn(args: PlannerTurnArgs, prompt: string): Promise
   });
   // an abort is a cancellation, not a failed turn — same empty settle as onAbort
   if (out.status === "aborted") return { summary: "", prd: null, errors: [] };
-  if (out.status === "finished") return withRawDump(parseReply(out.result), out.result, args.cli);
+  if (out.status === "finished") return withRawDump(restorePlannerArchitecture(parseReply(out.result), args.currentPrd), out.result, args.cli);
   return { summary: "", prd: null, errors: [out.error || NO_JSON()] };
 }
 
 export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
   // planner is chat-only: NO auto-approve flags, so a studio turn can never
   // grant the agent permission to write to disk.
+  syncBrain(args.cwd, args.currentPrd?.architecture_notes ?? "");
   const prompt = buildPrompt(args);
   if (agentDef(args.cli)?.sdk) return runPlannerSdkTurn(args, prompt);
   return new Promise((resolve) => {
@@ -319,7 +335,7 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
         else if (killedBy === "ceiling") errors = [t("studio.err.maxed", { mins: MAX_TURN_MS / 60_000 }), ...errors];
         else if (exitCode !== null && exitCode !== 0) errors = [t("studio.err.exited", { code: exitCode }), ...errors];
       }
-      finish(withRawDump({ ...parsed, errors }, full, args.cli));
+      finish(withRawDump(restorePlannerArchitecture({ ...parsed, errors }, args.currentPrd), full, args.cli));
     };
 
     // a surviving grandchild can hold the pipes open, so 'close' may never

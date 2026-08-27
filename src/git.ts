@@ -71,13 +71,13 @@ export function captureReviewBase(workspace: string): string | null {
   });
 }
 
-export function captureDiff(workspace: string, base?: string | null): string {
+export function captureDiff(workspace: string, base?: string | null, ignoredPaths: string[] = []): string {
   if (!existsSync(workspace + "/.git")) return "";
   return withTemporaryIndex(workspace, (index) => {
     stageWorktree(workspace, index);
     const baseArgs = base ? [base] : [];
-    const stat = runWithIndex(workspace, index, ["diff", "--cached", "--stat", ...baseArgs, ...REVIEW_DIFF_PATHSPEC]).stdout;
-    const full = runWithIndex(workspace, index, ["diff", "--cached", ...baseArgs, ...REVIEW_DIFF_PATHSPEC]).stdout;
+    const stat = runWithIndex(workspace, index, ["diff", "--cached", "--stat", ...baseArgs, ...REVIEW_DIFF_PATHSPEC, ...ignoredPathspec(workspace, ignoredPaths)]).stdout;
+    const full = runWithIndex(workspace, index, ["diff", "--cached", ...baseArgs, ...REVIEW_DIFF_PATHSPEC, ...ignoredPathspec(workspace, ignoredPaths)]).stdout;
     const body = stat + "\n\n" + full;
     return body.length <= MAX_REVIEW_DIFF_CHARS ? body : body.slice(0, MAX_REVIEW_DIFF_CHARS) + DIFF_TRUNCATED_NOTE;
   });

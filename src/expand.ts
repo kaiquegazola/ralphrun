@@ -13,6 +13,7 @@ import { lastJsonObject } from "./fence.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import type { PRD, Task } from "./prd.js";
+import { syncBrain } from "./brain.js";
 import { taskExpandPrompt } from "./prompts.js";
 import { runAdvisorCli } from "./advisor.js";
 
@@ -80,7 +81,8 @@ export async function expandSkeletonTask(
   signal?: AbortSignal,
 ): Promise<TaskPatch | null> {
   log(progress, t("expand.log.start", { id: task.id }));
-  const out = await runAdvisorCli(advis, taskExpandPrompt(task, prd), cfg, workspace, task.id, "advisor", signal, progress);
+  syncBrain(workspace, prd.architecture_notes);
+  const out = await runAdvisorCli(advis, taskExpandPrompt(task, prd, workspace), cfg, workspace, task.id, "advisor", signal, progress);
   const patch = parseTaskPatch(lastJsonObject(out ?? ""), task.id);
   if (!patch) {
     log(progress, t("expand.log.failed", { id: task.id }));

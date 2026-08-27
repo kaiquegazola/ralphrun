@@ -21,6 +21,7 @@ import {
   type VerificationEvidence,
 } from "./prompts.js";
 import { captureDiff } from "./git.js";
+import { BRAIN_DIRECTORY } from "./brain.js";
 import { pathsOutsideScope } from "./prdload.js";
 import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
@@ -293,7 +294,7 @@ export async function getAdvice(
   standards: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const prompt = advisorPrompt(task, prd, standards);
+  const prompt = advisorPrompt(task, prd, standards, workspace);
   const advice = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "advisor", signal, progress);
   if (advice === null) {
     log(progress, t("advisor.failed", { id: task.id }));
@@ -321,7 +322,7 @@ export async function advisorReview(
   // used to return approved:true, which is how a task reached `done` with
   // NOTHING having judged it: a dead reviewer, or an answer in neither format,
   // both counted as an approval.
-  const diff = captureDiff(workspace, reviewBase);
+  const diff = captureDiff(workspace, reviewBase, [BRAIN_DIRECTORY]);
   // An empty diff is NOT decided here: whether a task can be satisfied with no
   // change is a judgement about that task, so the reviewer makes it (the prompt
   // says what it is looking at). Only the spawn is unconditional now.
@@ -337,7 +338,7 @@ export async function advisorReview(
   // A round that just got several minutes longer and several times more
   // expensive has to say so in the durable log, not only in the config file.
   if (runs) log(progress, t("advisor.reviewExec", { id: task.id, s: cfg.review_timeout ?? cfg.advisor_timeout }));
-  const prompt = reviewPrompt(task, prd, standards, diff, verification, runs, context);
+  const prompt = reviewPrompt(task, prd, standards, diff, verification, runs, context, workspace);
   const out = await runAdvisorCli(advis, prompt, cfg, workspace, task.id, "review", signal, progress, context?.runtimeEnv);
   if (out === null) {
     // `changes` stays EMPTY on purpose: a reviewer that never answered gives the

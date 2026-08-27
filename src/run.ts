@@ -2,6 +2,7 @@
 // CROSS (planner-before → executor → unified fix loop with verify + review).
 
 import { nativeAdvisorArgs, supportsNativeAdvisor } from "./agents.js";
+import { syncBrain } from "./brain.js";
 import { ABSOLUTE_REVIEW_CYCLES, type Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
@@ -76,8 +77,9 @@ export async function runTask(
   const execu = cfg.executor;
   const advis = cfg.advisor;
   const native = supportsNativeAdvisor(execu.cli, advis?.cli);
+  syncBrain(workspace, prd.architecture_notes);
   const standards = readStandards(workspace);
-  const prompt = injectHandoff(injectReviewRetryFeedback(buildPrompt(task, prd, standards), reviewRetryFeedback), handoff);
+  const prompt = injectHandoff(injectReviewRetryFeedback(buildPrompt(task, prd, standards, workspace), reviewRetryFeedback), handoff);
   // one tally for the whole attempt: the fix rounds below are the same task's
   // money, and a per-round figure would hide what a stubborn task really cost
   const cost: CostTally = { usd: 0, unknown: false };
@@ -131,7 +133,7 @@ export async function runTask(
   let execPrompt = prompt;
   let activeAdvice: string | undefined;
   if (advis) {
-    const currentPlanKey = advisorPlanKey(task, prd, advis, standards);
+    const currentPlanKey = advisorPlanKey(task, prd, advis, standards, workspace);
     if (task.plan && task.planKey === currentPlanKey) {
       activeAdvice = task.plan;
       log(progress, `  ${task.id}› reusing saved plan from PRD`);
@@ -329,7 +331,7 @@ export async function runTask(
       progress,
       t("run.log.fixing", { id: task.id, n: rnd, exec: String(ok), tests: String(testOk), approved: String(approved) }),
     );
-    let fixPrompt = buildPrompt(task, prd, standards);
+    let fixPrompt = buildPrompt(task, prd, standards, workspace);
     if (activeAdvice) fixPrompt = injectAdvice(fixPrompt, activeAdvice);
     fixPrompt = injectReviewContext(
       fixPrompt,

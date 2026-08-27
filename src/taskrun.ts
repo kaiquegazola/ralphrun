@@ -8,8 +8,10 @@
 // read rather than a scope you have to trace.
 
 import { performance } from "node:perf_hooks";
+import { join } from "node:path";
 
 import { agentDef } from "./agents.js";
+import { BRAIN_DIRECTORY, syncBrain } from "./brain.js";
 import { type Config } from "./config.js";
 import { BROWSER_INSTALL_HINT, BROWSER_UPDATE_HINT, browserStatusAsync, taskUsesBrowser, type BrowserStatus } from "./browser.js";
 import { applyTaskPatch, expandSkeletonTask, isSkeletonTask, type TaskPatch } from "./expand.js";
@@ -217,7 +219,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
   const { elapsedTracker, trackers, pendingReviewFeedback, pendingHandoff, taskBaselines, taskCost, runCost, maxCostUsd } = ctx;
   // ralphrun writes these files while a task is executing. They are runner
   // state, not task work, so they must not trip scope or enter task commits.
-  const runnerControlPaths = [prdPath, progress];
+  const runnerControlPaths = [prdPath, progress, BRAIN_DIRECTORY];
 
   /**
    * One task, from START to a settled status in prd.json. "stop" means the whole
@@ -383,6 +385,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         // try/finally, so uncaught it would reject the whole run.
         let patch: TaskPatch | null = null;
         try {
+          syncBrain(taskWorkspace, prd.architecture_notes, workspace);
           patch = await expandSkeletonTask(task, prd, ctx.cfg.advisor, ctx.cfg, taskWorkspace, progress, signal);
         } catch {
           log(progress, t("expand.log.failed", { id: task.id }));
@@ -565,7 +568,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
               currentTask &&
               advisor &&
               controlFileCacheUnchanged &&
-              advisorPlanKey(currentTask, currentPrd, advisor, readStandards(taskWorkspace)) === planKey
+              advisorPlanKey(currentTask, currentPrd, advisor, readStandards(taskWorkspace), taskWorkspace) === planKey
             ) {
               currentTask.status = "doing";
               currentTask.plan = plan;
@@ -575,6 +578,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
           }
         }, handoff];
         runTaskArgs.push(taskRuntimeEnv(ctx.runId, task.id));
+        syncBrain(taskWorkspace, prd.architecture_notes, workspace);
         result = await runTask(...runTaskArgs);
       } catch (e) {
         log(progress, t("loop.log.crashed", { id: task.id, msg: e instanceof Error ? e.message : String(e) }));
@@ -755,7 +759,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         // landWorktreeWork already committed, because there the commit is the
         // only way the work gets out.
         if (ctx.cfg.commit_per_task && !wt) {
-          logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id), result.commit);
+          logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id), result.commit, runnerControlPaths);
         }
         taskBaselines.delete(task.id);
       } else if (landed === "dirty" || landed === "uncommitted") {
@@ -842,7 +846,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
           emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
           persist();
           if (ctx.cfg.commit_per_task && !wt) {
-            logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id));
+            logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id), undefined, runnerControlPaths);
           }
           taskBaselines.delete(task.id);
           if (opts.task) {

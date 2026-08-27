@@ -41,7 +41,8 @@ Requires Node >= 20.
 
 | File | Role |
 |---|---|
-| `prd.json` | The backlog — tasks with `deps`, `acceptance`, `scope`, `verify` command. **The memory.** |
+| `prd.json` | The backlog — tasks with `deps`, `acceptance`, `scope`, `verify` command. The source of truth for the plan. |
+| `.ralphrun/brain/` | Local prompt context: `global.md` mirrors `architecture_notes`, while `INDEX.md` points agents to optional topic files. |
 | `ralph.config.json` | Executor + advisor (`cli:model`), limits, timeouts. Auto-loaded next to the PRD. |
 | `progress.md` | Append-only run log (auto-created next to the PRD) with `[HH:MM:SS]` timestamps. |
 | `CLAUDE.md` / `AGENTS.md` | Project standards, injected into BOTH executor and advisor prompts. |
@@ -793,9 +794,11 @@ need the log in English; the samples below are the `en` rendering.
 
 ## The one rule that makes or breaks it
 
-Fresh context = the executor forgets everything between tasks. All durable state
-must live in `prd.json`, especially `architecture_notes`. Anything not written
-there gets reinvented next task. Keep those notes short and load-bearing.
+Fresh context = the executor forgets everything between tasks. The plan remains
+durable in `prd.json`, especially its short global `architecture_notes` summary.
+The runner mirrors that context into `.ralphrun/brain/global.md` and sends only
+the small `INDEX.md` to agents, so they can open the global file and choose
+topic files relevant to the task. Keep the summary short and load-bearing.
 
 **A run can now write there too — in CROSS mode.** When the reviewer approves a
 task, it may add one line under a `## Learned during runs` heading — but only for

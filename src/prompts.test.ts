@@ -1,9 +1,11 @@
 // prompts.test.ts — cover build/advisor/inject/review/parse + read/standards
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
+import { sep } from "node:path";
 import {
   BLOCKED_MARKER,
   hostEnvironmentBlock,
+  scopeBlock,
   readStandards,
   buildPrompt,
   advisorPrompt,
@@ -72,7 +74,9 @@ describe("buildPrompt", () => {
   it("includes the generated host environment guidance", () => {
     const out = buildPrompt(task, prd);
     expect(out).toContain("## Host environment");
-    expect(out).toContain(`Operating system: ${process.platform === "win32" ? "Windows" : process.platform} (${process.platform})`);
+    // the block renders a display name per platform, not the raw process.platform
+    const osName: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
+    expect(out).toContain(`Operating system: ${osName[process.platform] ?? process.platform} (${process.platform})`);
     expect(out).toContain("Before relying on an optional command-line tool");
   });
 
@@ -184,6 +188,65 @@ describe("hostEnvironmentBlock", () => {
     expect(out).toContain("Operating system: Linux (linux)");
     expect(out).toContain("do not assume Windows drive-letter paths");
     expect(out).not.toContain("do not assume bash, sh, GNU utilities, or POSIX syntax");
+  });
+});
+
+describe("scopeBlock", () => {
+  const scoped: Task = { ...task, scope: ["packages/db/src/schema/auth.ts", "apps/api/tests/auth/**"] };
+  const workspace = sep === "\\" ? "C:\\ws" : "/ws";
+
+  it("names a missing scope directory as the task's to create", () => {
+    vi.mocked(existsSync).mockImplementation((p) => String(p).replace(/\\/g, "/").endsWith("apps/api/tests"));
+    const out = scopeBlock(scoped, workspace);
+    expect(out).toContain("- packages/db/src/schema/auth.ts  (packages/db/src/schema/ does not exist yet — create it)");
+    expect(out).toContain("- apps/api/tests/auth/**");
+    expect(out).not.toContain("apps/api/tests/ does not exist yet — create it");
+  });
+
+  it("marks nothing when every scope directory is already there", () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    expect(scopeBlock(scoped, workspace)).not.toContain("— create it)");
+  });
+
+  // the executor was judged by this gate without ever being shown it
+  it("reaches the executor and the advisor, not just the reviewer", () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    expect(buildPrompt(scoped, prd, "", workspace)).toContain("## Declared scope (a hard plan contract)");
+    expect(advisorPrompt(scoped, prd, "", workspace)).toContain("## Declared scope (a hard plan contract)");
+  });
+
+  it("does not invent a contract for an unscoped task", () => {
+    const out = scopeBlock({ ...task, scope: [] }, "/ws");
+    expect(out).toContain("No scope is declared");
+    expect(out).not.toContain("hard plan contract");
+  });
+
+  it("does not tell the executor to create an out-of-workspace scope", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const out = scopeBlock({ ...task, scope: ["../outside/file.ts"] }, workspace);
+    expect(out).toContain("- ../outside/file.ts");
+    expect(out).not.toContain("does not exist yet — create it");
+  });
+
+  it("does not reinterpret an absolute scope as workspace-relative", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const out = scopeBlock({ ...task, scope: ["/outside/file.ts"] }, workspace);
+    expect(out).toContain("- /outside/file.ts");
+    expect(out).not.toContain("does not exist yet — create it");
+  });
+
+  it("does not reinterpret a drive-relative scope as workspace-relative", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const out = scopeBlock({ ...task, scope: ["C:outside/file.ts"] }, workspace);
+    expect(out).toContain("- C:outside/file.ts");
+    expect(out).not.toContain("does not exist yet — create it");
+  });
+
+  it("keeps advisor scope guidance stable when a directory is missing", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    expect(scopeBlock({ ...task, scope: ["src/new/file.ts"] }, workspace, false)).not.toContain(
+      "src/new/ does not exist yet",
+    );
   });
 });
 

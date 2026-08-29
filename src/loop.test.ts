@@ -296,7 +296,11 @@ afterEach(() => {
 });
 
 describe("runLoop preflight", () => {
-  it("refuses a runnable task whose scope has a missing literal parent", async () => {
+  // A plan is written before the tree exists, so a missing scope directory is
+  // usually the task's own output. Refusing the run stopped every greenfield
+  // plan on its first task; the executor is told to create them instead.
+  it("records a missing literal scope parent and still runs the task", async () => {
+    fastTimers();
     mRead.mockReturnValue(
       prdWith([
         {
@@ -311,9 +315,9 @@ describe("runLoop preflight", () => {
       return !p.includes("apps/api/src/db");
     });
 
-    await expect(runLoop({ prd: "prd.json" })).rejects.toThrow("exit:1");
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("apps/api/src/db/"));
-    expect(mRunTask).not.toHaveBeenCalled();
+    await runLoop({ prd: "prd.json" });
+    expect(mLog).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("apps/api/src/db/"));
+    expect(mRunTask).toHaveBeenCalled();
   });
 
   it("allows a recursive scope to create its missing leaf directory", async () => {

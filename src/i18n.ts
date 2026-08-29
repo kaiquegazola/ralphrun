@@ -57,8 +57,8 @@ const en = {
     "another ralphrun (pid {pid}) is already running in {path}. Two runs in one workspace delete each other's task worktrees mid-edit. Wait for it, or stop it first.",
   "loop.err.lockUnclaimable":
     "could not claim {path} for this run: the lock at {file} can be neither read nor moved, or another run keeps taking it. If no other ralphrun is running here, delete that file and try again.",
-  "loop.err.scopeMissing":
-    "refusing to start: runnable task scope prefix does not exist: {items}. The scope must name an existing parent directory; fix prd.json or run the prerequisite first.",
+  "loop.warn.scopeMissing":
+    "scope directories that do not exist yet: {items}. The tasks that declare them are told to create them; if one is a typo in prd.json instead, it costs that task an attempt.",
   "loop.label.wave": "wave",
   "loop.log.waveVerify": "  verifying the merged result of {n} landed tasks ({ids})",
   "loop.log.waveBroken":
@@ -420,8 +420,8 @@ const ptBr: Record<MsgKey, string> = {
   "loop.err.browserMissing": "❌ O verify de uma task usa '{tool}', mas ele não está no PATH. Instale: {cmd}",
   "loop.err.browserBroken": "❌ '{tool}' está no PATH mas não executa (ex.: shim quebrado do Volta). Reinstale: {cmd}",
   "loop.err.noPrd": "nenhum PRD em {path}",
-  "loop.err.scopeMissing":
-    "recusando iniciar: o prefixo de scope da task executavel nao existe: {items}. O scope precisa de um diretorio pai existente; corrija o prd.json ou rode o prerequisito primeiro.",
+  "loop.warn.scopeMissing":
+    "diretorios de scope que ainda nao existem: {items}. As tasks que os declaram sao instruidas a cria-los; se algum for typo no prd.json, custa uma tentativa daquela task.",
   "loop.err.noTask": "task {id} não existe",
   "loop.err.invalidPrd": "PRD inválido em {path}:",
   "loop.err.invalidPrdHint": "corrija no studio: ralphrun init --prd {path}",

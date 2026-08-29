@@ -12,7 +12,7 @@
 // downstream re-checks any of it.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { supportsNativeAdvisor } from "./agents.js";
@@ -89,6 +89,11 @@ export function missingScopePrefixes(tasks: Task[], workspace: string): string[]
   const problems: string[] = [];
   for (const task of tasks) {
     for (const pattern of task.scope ?? []) {
+      // This preflight only warns about repo-relative directories that the task
+      // may create. Absolute and drive-qualified patterns cannot be accepted by
+      // the relative scope gate, so warning that their stripped prefix is
+      // missing would only disguise an invalid plan as greenfield work.
+      if (isAbsolute(pattern) || /^[A-Za-z]:/.test(pattern) || /^[\\/]/.test(pattern)) continue;
       const prefix = literalScopeDirectoryPrefix(pattern);
       if (!prefix) continue;
       const absolute = resolve(root, prefix);
@@ -270,16 +275,17 @@ export async function startRun(opts: RunOptions, savePRD: (path: string, prd: PR
     }
   }
 
-  // A missing scope parent is a plan typo that would otherwise cost an entire
-  // executor/reviewer attempt before the objective gate discards the work. The
-  // refusal is limited to tasks that can start now: a later task may depend on
-  // an earlier task creating that parent, and an absent leaf itself is allowed.
+  // A scope directory that is not there yet is AMBIGUOUS: in a plan written
+  // before the tree exists it is usually the very thing the task creates, and
+  // only sometimes a typo. Refusing the run treated every one of them as the
+  // typo, which stops a greenfield plan on its first task. So record it and let
+  // it ride: scopeBlock puts the same list in the executor's and the advisor's
+  // prompt, naming those directories as theirs to create. A real typo now costs
+  // one attempt instead of being caught free — the trade that buys every honest
+  // plan its first run.
   const scopeProblems = missingScopePrefixes(runnableTasksAtBoot(prd0, opts.task), workspace);
   if (scopeProblems.length > 0) {
-    const message = t("loop.err.scopeMissing", { items: scopeProblems.join(", ") });
-    log(progress, message);
-    console.error(message);
-    process.exit(1);
+    log(progress, t("loop.warn.scopeMissing", { items: scopeProblems.join(", ") }));
   }
 
   // The initial menu can replace an unavailable default agent. Once the user

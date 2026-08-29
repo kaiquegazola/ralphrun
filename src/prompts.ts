@@ -1,10 +1,12 @@
 // prompts.ts — the text prompts injected into executor + advisor
 
 import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { brainGlobalBlock, brainPromptBlock } from "./brain.js";
 import { browserGuidance, taskUsesBrowser } from "./browser.js";
 import type { PRD, Task } from "./prd.js";
 import { hostRequirementLabel } from "./host.js";
+import { literalScopeDirectoryPrefix } from "./prdload.js";
 
 /**
  * How an executor reports "I cannot do this safely" so the loop hears it.
@@ -86,6 +88,49 @@ function architectureContextBlock(prd: PRD, workspace?: string, canReadFiles = t
   const global = brainGlobalBlock(workspace);
   return global ? "## Project knowledge\n" + global : "## Architecture notes (respect these across the whole project)\n" + prd.architecture_notes;
 }
+
+/**
+ * The scope contract, told to the agent that has to honour it.
+ *
+ * The reviewer has always been given this list; the executor was judged by a
+ * gate it was never shown. Worse, an absent scope directory used to stop the
+ * run outright — but in a plan written before the tree exists, a directory that
+ * is missing is usually the very thing the task creates, not a typo. So name
+ * them and say who owns creating them, instead of guessing which it is.
+ */
+export function scopeBlock(task: Task, workspace?: string, annotateMissing = true): string {
+  const scope = task.scope ?? [];
+  if (scope.length === 0) {
+    return "## Declared scope\nNo scope is declared for this task: keep your edits to the files the acceptance criteria actually require.";
+  }
+  const lines = scope.map((pattern) => {
+    // Keep absolute patterns visibly absolute. `literalScopeDirectoryPrefix`
+    // intentionally works with repo-relative scope syntax and would otherwise
+    // strip the leading separator before resolving the prefix under `workspace`.
+    const absolute = isAbsolute(pattern) || /^[A-Za-z]:/.test(pattern) || /^[\\/]/.test(pattern);
+    const prefix = workspace && annotateMissing && !absolute ? literalScopeDirectoryPrefix(pattern) : "";
+    const root = workspace ? resolve(workspace) : "";
+    const candidate = prefix ? resolve(root, prefix) : "";
+    const fromRoot = prefix ? relative(root, candidate) : "";
+    const insideWorkspace =
+      !!prefix &&
+      !!fromRoot &&
+      !isAbsolute(fromRoot) &&
+      fromRoot !== ".." &&
+      !fromRoot.startsWith("../") &&
+      !fromRoot.startsWith("..\\");
+    const absent = annotateMissing && insideWorkspace && !existsSync(candidate);
+    return absent ? `- ${pattern}  (${prefix}/ does not exist yet — create it)` : `- ${pattern}`;
+  });
+  return `## Declared scope (a hard plan contract)
+${lines.join("\n")}
+
+Every file you add or edit must match one of these patterns; the loop rejects the
+work otherwise. A path marked "does not exist yet" is yours to create — make the
+directories you need. If the task cannot be done without editing a path outside
+this list, that is a problem with the PLAN: report it rather than editing anyway.`;
+}
+
 export function buildPrompt(task: Task, prd: PRD, standards = "", workspace?: string): string {
   return `You are building ONE task of a larger MVP, autonomously.
 
@@ -96,6 +141,7 @@ ${hostEnvironmentBlock()}
 ${prd.stack}
 ${architectureContextBlock(prd, workspace)}
 ${taskHostRequirementBlock(task)}
+${scopeBlock(task, workspace)}
 ${standardsBlock(standards)}
 # YOUR TASK: ${task.id} — ${task.title}
 ${task.description}
@@ -161,6 +207,7 @@ Project: ${prd.project}
 Stack: ${prd.stack}
 ${architectureContextBlock(prd, workspace, false)}
 ${taskHostRequirementBlock(task)}
+${scopeBlock(task, workspace, false)}
 ${standardsBlock(standards)}
 Task ${task.id} — ${task.title}: ${task.description}
 Acceptance: ${task.acceptance.join("; ")}

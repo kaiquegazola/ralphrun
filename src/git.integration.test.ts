@@ -23,7 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { captureReviewBase, commitPaths, headCommit, taskChangedPaths } from "./git.js";
+import { captureReviewBase, commitPaths, headCommit, preserveWorkAsRef, taskChangedPaths } from "./git.js";
 import {
   claimRunLock,
   claimWithoutLink,
@@ -162,6 +162,52 @@ describe("scoped task commits", () => {
     // staged its own rename leaves behind
     expect(commitPaths(ws, ["never-existed.ts"], "T1: title")).toBe(false);
     expect(run("rev-parse", "HEAD").trim()).toBe(before);
+  });
+
+  it("preserves dirty and untracked failed work behind a recoverable ref", () => {
+    write("base.ts", "base\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "base");
+    const parent = run("rev-parse", "HEAD").trim();
+    write("base.ts", "failed edit\n");
+    write("untracked.ts", "failed file\n");
+
+    const saved = preserveWorkAsRef(ws, "refs/ralphrun/run-1/T1/1", parent, "preserve T1");
+
+    expect(saved).toMatchObject({ ref: "refs/ralphrun/run-1/T1/1" });
+    expect(saved?.hash).toBe(run("rev-parse", "refs/ralphrun/run-1/T1/1").trim());
+    expect(run("show", "refs/ralphrun/run-1/T1/1:base.ts")).toBe("failed edit\n");
+    expect(run("show", "refs/ralphrun/run-1/T1/1:untracked.ts")).toBe("failed file\n");
+    expect(run("rev-parse", "HEAD").trim()).toBe(parent);
+  });
+
+  it("fills the missing committer identity when only author variables are set", () => {
+    write("base.ts", "base\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "base");
+    const parent = run("rev-parse", "HEAD").trim();
+    write("base.ts", "failed edit\n");
+    const savedEnv = {
+      HOME: process.env.HOME,
+      GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
+      GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
+      GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
+      GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
+    };
+    try {
+      process.env.HOME = join(ws, "no-global-config");
+      process.env.GIT_AUTHOR_NAME = "author only";
+      process.env.GIT_AUTHOR_EMAIL = "author@example.com";
+      delete process.env.GIT_COMMITTER_NAME;
+      delete process.env.GIT_COMMITTER_EMAIL;
+      const saved = preserveWorkAsRef(ws, "refs/ralphrun/run-1/T1/partial", parent, "preserve partial identity");
+      expect(saved?.hash).toBe(run("rev-parse", "refs/ralphrun/run-1/T1/partial").trim());
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 

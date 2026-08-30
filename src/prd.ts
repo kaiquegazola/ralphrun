@@ -13,6 +13,11 @@ export interface TaskResources {
   services?: string[];
 }
 
+export interface ScopeRequest {
+  paths: string[];
+  reason: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -30,6 +35,12 @@ export interface Task {
   // of an LLM judgement call. An empty scope declares nothing and so gates
   // nothing (nor does a workspace with no git baseline to diff against).
   scope?: string[];
+  /** Paths/globs that this task may edit as a shared integration surface. */
+  shared_scope?: string[];
+  /** Paths/globs this task must never edit, even when another scope allows them. */
+  forbidden_scope?: string[];
+  /** Reviewer evidence that the plan needs an explicit scope change. */
+  scope_requests?: ScopeRequest[];
   /** Host OS required by this task; omit for portable or cross-platform work. */
   required_host?: RequiredHost;
   /** Explicit concurrency contract. Missing means conservative serial execution. */

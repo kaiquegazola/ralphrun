@@ -84,6 +84,7 @@ export async function runLoop(opts: RunOptions): Promise<void> {
     // iteration would let a run raise its own budget from the inside.
     maxCostUsd: Math.max(0, cfg.max_cost_usd ?? 0),
     runId: randomUUID(),
+    preservationSequence: 0,
     cfg,
     tui,
     curTaskId: "",

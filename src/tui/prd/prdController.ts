@@ -75,6 +75,19 @@ export function diffTasks(old: PRD | null, next: PRD): string {
   return `+${added} -${removed} ~${changed}`;
 }
 
+function preserveOmittedScopeRequests(previous: PRD | null, next: PRD): PRD {
+  if (!previous) return next;
+  const previousById = new Map(previous.tasks.map((task) => [task.id, task]));
+  return {
+    ...next,
+    tasks: next.tasks.map((task) => {
+      if (task.scope_requests !== undefined) return task;
+      const old = previousById.get(task.id);
+      return old?.scope_requests === undefined ? task : { ...task, scope_requests: old.scope_requests };
+    }),
+  };
+}
+
 export function reducer(state: PrdState, action: PrdAction): PrdState {
   switch (action.type) {
     case "addUserMessage":
@@ -91,7 +104,8 @@ export function reducer(state: PrdState, action: PrdAction): PrdState {
       return { ...state, messages };
     }
     case "applyPlannerResult": {
-      const { summary, prd, errors } = action.result;
+      const { summary, errors } = action.result;
+      const prd = action.result.prd === null ? null : preserveOmittedScopeRequests(state.prd, action.result.prd);
       if (prd !== null) {
         const messages = state.messages.slice();
         messages[messages.length - 1] = { role: "planner", text: `${summary} ${diffTasks(state.prd, prd)}` };

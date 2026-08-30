@@ -34,6 +34,7 @@ vi.mock("./git.js", () => ({
   headCommit: vi.fn(() => null),
   captureReviewBase: vi.fn(() => "base-tree"),
   taskChangedPaths: vi.fn(() => ["src/a.ts"]),
+  preserveWorkAsRef: vi.fn(() => null),
   commitPaths: vi.fn(() => true),
 }));
 // worktree.js is real git plumbing — proven against real repositories in
@@ -1987,6 +1988,22 @@ describe("runLoop parallel waves", () => {
     expect(read().A.status).toBe("done");
     expect(read().B.status).toBe("done");
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("WAVE of 2"));
+  });
+
+  it("serializes tasks that share an integration scope", async () => {
+    const read = livePrd([
+      { ...wtTask("A", ["src/a/**"]), shared_scope: ["src/app.ts"] },
+      { ...wtTask("B", ["src/b/**"]), shared_scope: ["src/app.ts"] },
+    ]);
+    mReadyTasks.mockReset().mockImplementation(((p: { tasks: { status: string }[] }) => p.tasks.filter((x) => x.status === "todo")) as never);
+    const conc = trackConcurrency();
+
+    await runLoop({ prd: "prd.json" });
+
+    expect(conc.peak()).toBe(1);
+    expect(read().A.status).toBe("done");
+    expect(read().B.status).toBe("done");
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("shared"));
   });
   it("blocks a wave task whose worktree_setup fails rather than sharing one checkout", async () => {
     // solo degrades to the main workspace; a wave cannot — N executors in one

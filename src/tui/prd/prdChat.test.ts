@@ -179,6 +179,9 @@ it("instructs the planner to declare deps only for consumed artifacts, and to sc
   expect(prompt).toContain("acceptance item as a CHECKABLE statement");
   expect(prompt).toContain("add an integration task whose verify");
   expect(prompt).toContain("scope[]"); // the field is in the announced json shape
+  expect(prompt).toContain("shared_scope?");
+  expect(prompt).toContain("forbidden_scope?");
+  expect(prompt).toContain("scope_requests?");
   expect(prompt).toContain("required_host?");
   expect(prompt).toContain("only when implementation/verify truly requires that host");
 });

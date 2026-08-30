@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 
 // aliased: per-task loop vars below are named `t` and would shadow t()
 import { t as msg } from "./i18n.js";
-import type { PRD, ResourceAccess, TaskResources } from "./prd.js";
+import type { PRD, ResourceAccess, Task, TaskResources } from "./prd.js";
 import { isRequiredHost } from "./host.js";
 
 const STATUSES = new Set(["todo", "doing", "done", "blocked"]);
@@ -19,7 +19,7 @@ const RESOURCE_ACCESS = new Set<ResourceAccess>(["isolated", "read", "write", "r
 // SAFE coercions only, superset of the old normalizeDraft + recoverAndNormalize:
 // invalid/missing status → enum-coerced (case-insensitive) else "todo"; then
 // "doing" → "todo" (crash recovery — skipped with keepDoing, the planner path);
-// retries non-number → 0; deps/acceptance/scope UNDEFINED → []
+// retries non-number → 0; deps/acceptance/scope fields UNDEFINED → []
 // (wrong TYPE untouched — validation rejects). Returns whether anything changed.
 export interface NormalizePrdOptions {
   keepDoing?: boolean;
@@ -136,9 +136,28 @@ function normGlob(pattern: string): string {
 // "src/db.ts"), and only misses mutual partial wildcards ("src/a*.ts" vs
 // "src/*b.ts", which both match src/ab.ts) — a false NEGATIVE, so the cheap
 // version never refuses a plan that was fine.
-function patternsOverlap(a: string, b: string): boolean {
+export function patternsOverlap(a: string, b: string): boolean {
   if (normGlob(a) === "" || normGlob(b) === "") return false;
   return globToRegExp(a).test(normGlob(b)) || globToRegExp(b).test(normGlob(a));
+}
+
+/**
+ * Runtime scheduling must prefer a false conflict to concurrent edits. The
+ * cheap graph check above intentionally misses two partial globs; when both
+ * sides are patterns, their intersection cannot be proved empty cheaply, so
+ * serialize them instead.
+ */
+export function patternsMayOverlapConservatively(a: string, b: string): boolean {
+  if (patternsOverlap(a, b)) return true;
+  const left = normGlob(a);
+  const right = normGlob(b);
+  if (!/[*?]/.test(left) || !/[*?]/.test(right)) return false;
+  const leftPrefix = left.slice(0, left.search(/[?*]/));
+  const rightPrefix = right.slice(0, right.search(/[?*]/));
+  // Different literal roots prove the patterns disjoint. If one root contains
+  // the other, the wildcard portions may still meet (a*.ts vs *b.ts), so keep
+  // the pair out of a parallel wave.
+  return leftPrefix.startsWith(rightPrefix) || rightPrefix.startsWith(leftPrefix);
 }
 
 /**
@@ -164,6 +183,51 @@ export function pathsOutsideScope(paths: string[], scope: string[]): string[] {
     const norm = p.replace(/^\.\//, "");
     return !allowed.some((re) => re.test(norm));
   });
+}
+
+export interface ScopeContract {
+  owned: string[];
+  shared: string[];
+  forbidden: string[];
+}
+
+export type ScopePathKind = "owned" | "shared" | "forbidden" | "outside";
+
+export interface ClassifiedScopePath {
+  path: string;
+  kind: ScopePathKind;
+}
+
+/** Return the three independent parts of a task's editing contract. */
+export function taskScopeContract(task: Pick<Task, "scope" | "shared_scope" | "forbidden_scope">): ScopeContract {
+  return {
+    owned: task.scope ?? [],
+    shared: task.shared_scope ?? [],
+    forbidden: task.forbidden_scope ?? [],
+  };
+}
+
+function matchesScope(path: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => globToRegExp(pattern).test(path.startsWith("./") ? path.slice(2) : path));
+}
+
+/** Classify changed paths; forbidden is checked before any allowed scope. */
+export function classifyScopePaths(paths: string[], contract: ScopeContract): ClassifiedScopePath[] {
+  const restricted = contract.owned.length > 0 || contract.shared.length > 0;
+  return paths.map((path) => {
+    const normalized = path.startsWith("./") ? path.slice(2) : path;
+    if (matchesScope(normalized, contract.forbidden)) return { path, kind: "forbidden" };
+    if (matchesScope(normalized, contract.owned)) return { path, kind: "owned" };
+    if (matchesScope(normalized, contract.shared)) return { path, kind: "shared" };
+    return { path, kind: restricted ? "outside" : "owned" };
+  });
+}
+
+/** Paths that cannot be landed under the task's contract. */
+export function pathsOutsideScopeContract(paths: string[], contract: ScopeContract): string[] {
+  return classifyScopePaths(paths, contract)
+    .filter(({ kind }) => kind === "outside" || kind === "forbidden")
+    .map(({ path }) => path);
 }
 
 /**
@@ -220,6 +284,8 @@ export interface ScopedTask {
   id: string;
   deps: string[];
   scope: string[];
+  shared_scope?: string[];
+  forbidden_scope?: string[];
 }
 
 // "Overlapping editor scopes forbidden": two tasks the graph does NOT order can
@@ -252,11 +318,16 @@ export function overlappingScopePairs(tasks: ScopedTask[]): { a: string; b: stri
     for (let j = i + 1; j < tasks.length; j++) {
       const a = tasks[i];
       const b = tasks[j];
-      if (a.scope.length === 0 || b.scope.length === 0) continue;
+      if (a.scope.length === 0 && !a.shared_scope?.length) continue;
+      if (b.scope.length === 0 && !b.shared_scope?.length) continue;
       if (orderedBefore(a.id).has(b.id) || orderedBefore(b.id).has(a.id)) continue;
       // one pair, one error: listing every colliding glob buries the fix
-      const pa = a.scope.find((p) => b.scope.some((q) => patternsOverlap(p, q)));
-      if (pa !== undefined) found.push({ a: a.id, b: b.id, pa, pb: b.scope.find((q) => patternsOverlap(pa, q))! });
+      const pairs = [
+        ...a.scope.flatMap((pa) => [...b.scope, ...(b.shared_scope ?? [])].map((pb) => [pa, pb] as const)),
+        ...b.scope.flatMap((pb) => (a.shared_scope ?? []).map((pa) => [pa, pb] as const)),
+      ];
+      const pair = pairs.find(([pa, pb]) => patternsOverlap(pa, pb));
+      if (pair) found.push({ a: a.id, b: b.id, pa: pair[0], pb: pair[1] });
     }
   }
   return found;
@@ -340,6 +411,29 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
       if (!Array.isArray(t.scope)) errors.push(msg("prd.err.scope", { i }));
       else if (t.scope.some((s) => typeof s !== "string")) errors.push(msg("prd.err.scopeItem", { i }));
     }
+    if (t.shared_scope !== undefined) {
+      if (!Array.isArray(t.shared_scope)) errors.push(msg("prd.err.sharedScope", { i }));
+      else if (t.shared_scope.some((s) => typeof s !== "string")) errors.push(msg("prd.err.sharedScopeItem", { i }));
+    }
+    if (t.forbidden_scope !== undefined) {
+      if (!Array.isArray(t.forbidden_scope)) errors.push(msg("prd.err.forbiddenScope", { i }));
+      else if (t.forbidden_scope.some((s) => typeof s !== "string")) errors.push(msg("prd.err.forbiddenScopeItem", { i }));
+    }
+    if (t.scope_requests !== undefined) {
+      if (
+        !Array.isArray(t.scope_requests) ||
+        t.scope_requests.some(
+          (request) =>
+            !request ||
+            typeof request !== "object" ||
+            !Array.isArray((request as Record<string, unknown>).paths) ||
+            ((request as Record<string, unknown>).paths as unknown[]).some((path: unknown) => typeof path !== "string") ||
+            typeof (request as Record<string, unknown>).reason !== "string",
+        )
+      ) {
+        errors.push(msg("prd.err.scopeRequests", { i }));
+      }
+    }
     if (t.required_host !== undefined && !isRequiredHost(t.required_host)) errors.push(msg("prd.err.requiredHost", { i }));
     if (t.parallel !== undefined && t.parallel !== "safe" && t.parallel !== "exclusive")
       errors.push(msg("prd.err.parallel", { i }));
@@ -376,7 +470,13 @@ export function validatePrd(obj: unknown, opts?: ValidatePrdOptions): { ok: bool
     const deps = raw.filter((d): d is string => typeof d === "string" && ids.has(d));
     edges.set(t.id, deps);
     const scope = Array.isArray(t.scope) ? t.scope.filter((s): s is string => typeof s === "string") : [];
-    scoped.push({ id: t.id, deps, scope });
+    const shared_scope = Array.isArray(t.shared_scope)
+      ? t.shared_scope.filter((s): s is string => typeof s === "string")
+      : [];
+    const forbidden_scope = Array.isArray(t.forbidden_scope)
+      ? t.forbidden_scope.filter((s): s is string => typeof s === "string")
+      : [];
+    scoped.push({ id: t.id, deps, scope, shared_scope, forbidden_scope });
   }
   for (const cycle of findDepCycles(edges)) errors.push(msg("prd.err.depCycle", { cycle: cycle.join(" -> ") }));
 
@@ -400,6 +500,22 @@ function seedSafe(obj: object): PRD {
     if (!Array.isArray(t.deps)) t.deps = [];
     if (!Array.isArray(t.acceptance)) t.acceptance = [];
     t.acceptance = (t.acceptance as unknown[]).map(String); // React can't render object children
+    for (const key of ["scope", "shared_scope", "forbidden_scope"] as const) {
+      if (t[key] !== undefined && (!Array.isArray(t[key]) || (t[key] as unknown[]).some((path) => typeof path !== "string"))) {
+        delete t[key];
+      }
+    }
+    if (
+      t.scope_requests !== undefined &&
+      (!Array.isArray(t.scope_requests) ||
+        (t.scope_requests as unknown[]).some((request) => {
+          if (!request || typeof request !== "object" || Array.isArray(request)) return true;
+          const r = request as Record<string, unknown>;
+          return !Array.isArray(r.paths) || r.paths.some((path) => typeof path !== "string") || typeof r.reason !== "string";
+        }))
+    ) {
+      delete t.scope_requests;
+    }
     if (t.verify !== undefined && typeof t.verify !== "string") delete t.verify;
     if (t.parallel !== undefined && t.parallel !== "safe" && t.parallel !== "exclusive") delete t.parallel;
     if (t.resources !== undefined) {

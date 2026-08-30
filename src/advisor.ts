@@ -9,7 +9,7 @@ import type { AgentSpec, Config } from "./config.js";
 import { runCursorSdkText } from "./cursor-sdk.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
-import type { PRD, Task } from "./prd.js";
+import type { PRD, ScopeRequest, Task } from "./prd.js";
 import {
   advisorPrompt,
   formatReviewFindings,
@@ -22,7 +22,7 @@ import {
 } from "./prompts.js";
 import { captureDiff } from "./git.js";
 import { BRAIN_DIRECTORY } from "./brain.js";
-import { pathsOutsideScope } from "./prdload.js";
+import { pathsOutsideScopeContract, taskScopeContract } from "./prdload.js";
 import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
 
@@ -92,6 +92,7 @@ export interface AdvisorReviewResult {
   reviewRetryable?: boolean;
   /** The reviewer found only fixes the task's plan forbids. */
   scopePlanIssuePaths?: string[];
+  scopePlanRequests?: ScopeRequest[];
   commit?: ReviewCommit;
   /**
    * A durable fact for the architecture notes, when the reviewer judged this
@@ -361,7 +362,7 @@ export async function advisorReview(
   });
   const withDiff = { ...parsed, diff, ...(!parsed.approved && !parsed.changes ? { reviewRetryable: true } : {}) };
   const findings = withDiff.findings ?? [];
-  const filtered = filterReviewFindings(findings, task.scope ?? [], workspace);
+  const filtered = filterReviewFindings(findings, taskScopeContract(task), workspace);
   if (filtered.dropped.length > 0) {
     const paths = filtered.dropped
       .map((finding) => locationRepoPath(finding.location, workspace))
@@ -390,6 +391,7 @@ export async function advisorReview(
         }
       : {}),
     ...(filtered.planIssuePaths.length > 0 ? { scopePlanIssuePaths: filtered.planIssuePaths } : {}),
+    ...(filtered.planRequests.length > 0 ? { scopePlanRequests: filtered.planRequests } : {}),
   };
 }
 
@@ -418,28 +420,41 @@ function locationRepoPath(location: string | undefined, workspace: string): stri
 
 function filterReviewFindings(
   findings: ReviewFinding[],
-  scope: string[],
+  contract: ReturnType<typeof taskScopeContract>,
   workspace: string,
-): { findings: ReviewFinding[]; dropped: ReviewFinding[]; planIssuePaths: string[] } {
+): { findings: ReviewFinding[]; dropped: ReviewFinding[]; planIssuePaths: string[]; planRequests: ScopeRequest[] } {
   // Empty scope means unrestricted here just as it does in the objective gate;
   // calling the matcher anyway would make a legacy task pay for a reviewer-only
   // policy that the actual merge gate does not enforce.
-  if (scope.length === 0) return { findings, dropped: [], planIssuePaths: [] };
+  if (contract.owned.length === 0 && contract.shared.length === 0 && contract.forbidden.length === 0) {
+    return { findings, dropped: [], planIssuePaths: [], planRequests: [] };
+  }
   const dropped: ReviewFinding[] = [];
   const kept = findings.filter((finding) => {
     const path = locationRepoPath(finding.location, workspace);
     // No location, malformed location, or a path outside this checkout is not
     // proof of an escape. Keep it so a genuine blocker cannot disappear merely
     // because the reviewer supplied weak evidence.
-    if (!path || pathsOutsideScope([path], scope).length === 0) return true;
+    if (!path || pathsOutsideScopeContract([path], contract).length === 0) return true;
     dropped.push(finding);
     return false;
   });
   const droppedBlocking = dropped.filter((f) => f.severity === "blocker" || f.severity === "major");
-  const keptBlocking = kept.filter((f) => f.severity === "blocker" || f.severity === "major");
   const planIssuePaths =
-    droppedBlocking.length > 0 && keptBlocking.length === 0
+    droppedBlocking.length > 0
       ? [...new Set(droppedBlocking.map((f) => locationRepoPath(f.location, workspace)).filter((p): p is string => !!p))]
       : [];
-  return { findings: kept, dropped, planIssuePaths };
+  const planRequests =
+    planIssuePaths.length > 0
+      ? dropped
+          .filter((finding) => {
+            const path = locationRepoPath(finding.location, workspace);
+            return (finding.severity === "blocker" || finding.severity === "major") && !!path && planIssuePaths.includes(path);
+          })
+          .map((finding) => ({
+            paths: [locationRepoPath(finding.location, workspace)!],
+            reason: finding.id + ": " + finding.problem + " Fix: " + finding.fix,
+          }))
+      : [];
+  return { findings: kept, dropped, planIssuePaths, planRequests };
 }

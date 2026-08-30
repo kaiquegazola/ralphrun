@@ -316,6 +316,20 @@ describe("reviewPrompt", () => {
     expect(out).toContain("outside it");
   });
 
+  it("shows shared and forbidden scope separately", () => {
+    const scoped = {
+      ...task,
+      scope: ["src/feature.ts"],
+      shared_scope: ["src/app.ts"],
+      forbidden_scope: ["progress.md"],
+    };
+    const out = scopeBlock(scoped);
+    expect(out).toContain("Shared scope");
+    expect(out).toContain("- src/app.ts");
+    expect(out).toContain("Forbidden scope");
+    expect(out).toContain("- progress.md");
+  });
+
   // The reviewer used to judge a diff without knowing whether anything ran on it,
   // so it asked for changes the failing output already explained.
   it("shows the verify command, the verdict, and the output tail", () => {

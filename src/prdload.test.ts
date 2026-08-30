@@ -15,11 +15,14 @@ vi.mock("node:fs", () => ({
 import { readFileSync } from "node:fs";
 import {
   appendLearnedNote,
+  classifyScopePaths,
   literalScopeDirectoryPrefix,
   loadPrdFile,
   normalizePrd,
   overlappingScopePairs,
+  patternsMayOverlapConservatively,
   pathsOutsideScope,
+  pathsOutsideScopeContract,
   type ScopedTask,
   validatePrd,
 } from "./prdload.js";
@@ -175,6 +178,50 @@ describe("overlappingScopePairs", () => {
   it("terminates on a cyclic graph", () => {
     expect(overlappingScopePairs([st("A", ["B"], ["x.ts"]), st("B", ["A"], ["x.ts"])])).toEqual([]);
   });
+
+  it("allows two shared integration scopes without declaring a false overlap", () => {
+    expect(
+      overlappingScopePairs([
+        { ...st("A", [], ["src/a.ts"]), shared_scope: ["src/app.ts"] },
+        { ...st("B", [], ["src/b.ts"]), shared_scope: ["src/app.ts"] },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("rejects an owned scope colliding with another task's shared scope", () => {
+    expect(
+      overlappingScopePairs([
+        { ...st("A", [], ["src/app.ts"]), shared_scope: [] },
+        { ...st("B", [], []), shared_scope: ["src/app.ts"] },
+      ]),
+    ).toEqual([{ a: "A", b: "B", pa: "src/app.ts", pb: "src/app.ts" }]);
+  });
+});
+
+it("conservatively treats mutually wildcarding patterns as a possible overlap", () => {
+  expect(patternsMayOverlapConservatively("src/a*.ts", "src/*b.ts")).toBe(true);
+  expect(patternsMayOverlapConservatively("src/*.ts", "test/*.ts")).toBe(false);
+  expect(patternsMayOverlapConservatively("src/*.ts", "src/app.css")).toBe(false);
+});
+
+describe("scope contracts", () => {
+  it("lets shared paths pass while forbidden paths win over owned paths", () => {
+    const result = classifyScopePaths(["src/feature.ts", "src/app.ts", "progress.md"], {
+      owned: ["src/feature.ts"],
+      shared: ["src/app.ts"],
+      forbidden: ["progress.md", "src/app.ts"],
+    });
+    expect(result).toEqual([
+      { path: "src/feature.ts", kind: "owned" },
+      { path: "src/app.ts", kind: "forbidden" },
+      { path: "progress.md", kind: "forbidden" },
+    ]);
+    expect(pathsOutsideScopeContract(["src/feature.ts", "src/app.ts"], {
+      owned: ["src/feature.ts"],
+      shared: ["src/app.ts"],
+      forbidden: ["src/app.ts"],
+    })).toEqual(["src/app.ts"]);
+  });
 });
 
 describe("loadPrdFile", () => {
@@ -230,7 +277,21 @@ describe("loadPrdFile", () => {
         tasks: [
           42,
           null,
-          { id: 1, title: 2, description: 3, deps: "x", acceptance: [1, { a: 1 }], verify: 42, plan: 42, planKey: 42, status: "todo" },
+          {
+            id: 1,
+            title: 2,
+            description: 3,
+            deps: "x",
+            acceptance: [1, { a: 1 }],
+            scope: "src",
+            shared_scope: ["src/app.ts", 2],
+            forbidden_scope: { path: "progress.md" },
+            scope_requests: [{ paths: ["src/app.ts"], reason: 2 }],
+            verify: 42,
+            plan: 42,
+            planKey: 42,
+            status: "todo",
+          },
           { acceptance: "x" },
         ],
       }),
@@ -247,6 +308,10 @@ describe("loadPrdFile", () => {
       expect(p.tasks[0].verify).toBeUndefined();
       expect(p.tasks[0].plan).toBeUndefined();
       expect(p.tasks[0].planKey).toBeUndefined();
+      expect(p.tasks[0].scope).toBeUndefined();
+      expect(p.tasks[0].shared_scope).toBeUndefined();
+      expect(p.tasks[0].forbidden_scope).toBeUndefined();
+      expect(p.tasks[0].scope_requests).toBeUndefined();
       expect(p.tasks[1].acceptance).toEqual([]);
     }
   });

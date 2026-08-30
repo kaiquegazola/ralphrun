@@ -100,7 +100,9 @@ function architectureContextBlock(prd: PRD, workspace?: string, canReadFiles = t
  */
 export function scopeBlock(task: Task, workspace?: string, annotateMissing = true): string {
   const scope = task.scope ?? [];
-  if (scope.length === 0) {
+  const shared = task.shared_scope ?? [];
+  const forbidden = task.forbidden_scope ?? [];
+  if (scope.length === 0 && shared.length === 0 && forbidden.length === 0) {
     return "## Declared scope\nNo scope is declared for this task: keep your edits to the files the acceptance criteria actually require.";
   }
   const lines = scope.map((pattern) => {
@@ -122,13 +124,27 @@ export function scopeBlock(task: Task, workspace?: string, annotateMissing = tru
     const absent = annotateMissing && insideWorkspace && !existsSync(candidate);
     return absent ? `- ${pattern}  (${prefix}/ does not exist yet — create it)` : `- ${pattern}`;
   });
+  const sharedBlock = shared.length ? `\n\n## Shared scope (allowed, serialized with overlapping tasks)
+${shared.map((pattern) => `- ${pattern}`).join("\n")}` : "";
+  const forbiddenBlock = forbidden.length ? `\n\n## Forbidden scope (never edit)
+${forbidden.map((pattern) => `- ${pattern}`).join("\n")}` : "";
+  const contractRule =
+    scope.length > 0 || shared.length > 0
+      ? "Every file you add or edit must match the declared or shared patterns; the loop rejects the work otherwise."
+      : "No positive scope is declared, so edits are unrestricted except for the forbidden patterns below.";
+  const requestsBlock = task.scope_requests?.length
+    ? `\n\n## Pending plan-scope requests
+${task.scope_requests.map((request) => `- ${request.paths.join(", ")}: ${request.reason}`).join("\n")}
+These are evidence from a previous review that the PRD may need repair. Do not widen the
+scope yourself; keep this attempt inside the current contract.`
+    : "";
   return `## Declared scope (a hard plan contract)
-${lines.join("\n")}
+${lines.join("\n")}${sharedBlock}${forbiddenBlock}${requestsBlock}
 
-Every file you add or edit must match one of these patterns; the loop rejects the
-work otherwise. A path marked "does not exist yet" is yours to create — make the
-directories you need. If the task cannot be done without editing a path outside
-this list, that is a problem with the PLAN: report it rather than editing anyway.`;
+${contractRule} Forbidden patterns always win. A path marked "does not exist yet"
+is yours to create — make the directories you need. If the task cannot be done
+without editing a path outside this list, that is a problem with the PLAN: report
+it rather than editing anyway.`;
 }
 
 export function buildPrompt(task: Task, prd: PRD, standards = "", workspace?: string): string {
@@ -208,6 +224,7 @@ Stack: ${prd.stack}
 ${architectureContextBlock(prd, workspace, false)}
 ${taskHostRequirementBlock(task)}
 ${scopeBlock(task, workspace, false)}
+
 ${standardsBlock(standards)}
 Task ${task.id} — ${task.title}: ${task.description}
 Acceptance: ${task.acceptance.join("; ")}
@@ -237,6 +254,9 @@ export function taskExpandPrompt(task: Task, prd: PRD, workspace?: string): stri
     task.description ? `description: ${task.description}` : "",
     task.acceptance?.length ? `acceptance: ${task.acceptance.join("; ")}` : "",
     task.scope?.length ? `scope: ${task.scope.join(", ")}` : "",
+    task.shared_scope?.length ? `shared_scope: ${task.shared_scope.join(", ")}` : "",
+    task.forbidden_scope?.length ? `forbidden_scope: ${task.forbidden_scope.join(", ")}` : "",
+    task.scope_requests?.length ? `scope_requests: ${JSON.stringify(task.scope_requests)}` : "",
     task.parallel ? `parallel: ${task.parallel}` : "",
     task.resources ? `resources: ${JSON.stringify(task.resources)}` : "",
     task.verify ? `verify: ${task.verify}` : "",
@@ -245,8 +265,8 @@ export function taskExpandPrompt(task: Task, prd: PRD, workspace?: string): stri
     .join("\n");
   return `You are expanding ONE task of an existing plan into its full executable spec.
 Do NOT write code — reply with ONLY one fenced json block containing the FULL task object:
-{"id": "...", "title": "...", "status": "todo", "deps": [], "retries": 0, "description": "...", "acceptance": ["..."], "scope": [], "parallel": "safe", "resources": {}, "verify": "..."}
-Do not invent or change scope, parallel, or resources: those stay with the planner and the user. Preserve them when already written.
+{"id": "...", "title": "...", "status": "todo", "deps": [], "retries": 0, "description": "...", "acceptance": ["..."], "scope": [], "shared_scope": [], "forbidden_scope": [], "scope_requests": [], "parallel": "safe", "resources": {}, "verify": "..."}
+Do not invent or change scope, shared_scope, forbidden_scope, scope_requests, parallel, or resources: those stay with the planner and the user. Preserve every existing contract field when already written; never silently drop reviewer scope requests.
 ${existing ? `\nAlready-written fields (keep their intent; you may refine wording, never drop or contradict them):\n${existing}\n` : ""}
 Project: ${prd.project}
 Stack: ${prd.stack}
@@ -618,14 +638,18 @@ that cannot work here and the reason why. If you are unsure, write no note.
 
 Task ${task.id} — ${task.title}: ${task.description}
 
+${scopeBlock(task, workspace, false)}
+
 Declared scope:
-${task.scope?.length ? task.scope.map((path) => `- ${path}`).join("\n") : "(empty — unrestricted)"}
+${task.scope?.length ? task.scope.map((path) => "- " + path).join("\n") : "(empty — unrestricted)"}
+${task.shared_scope?.length ? "Shared scope:\n" + task.shared_scope.map((path) => "- " + path).join("\n") : ""}
+${task.forbidden_scope?.length ? "Forbidden scope:\n" + task.forbidden_scope.map((path) => "- " + path).join("\n") : ""}
 
 Scope is a hard plan contract. Every finding must describe a fix the executor can make WITHIN
-the declared scope. If the only correct fix requires touching a path outside it, that is a
-problem with the PLAN, not work for this task: report the plan problem with the path involved
-instead of asking the executor to edit outside scope. Do not manufacture a finding whose fix
-the scope gate will reject.
+the declared or shared scope. If the only correct fix requires touching a path outside it, that
+is a problem with the PLAN, not work for this task: report the plan problem with the path
+involved instead of asking the executor to edit outside scope. Do not manufacture a finding
+whose fix the scope gate will reject.
 
 Acceptance:
 ${task.acceptance.map((a) => "- " + a).join("\n")}

@@ -6,7 +6,7 @@ import { syncBrain } from "./brain.js";
 import { ABSOLUTE_REVIEW_CYCLES, type Config } from "./config.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
-import type { PRD, Task } from "./prd.js";
+import type { PRD, ScopeRequest, Task } from "./prd.js";
 import {
   buildPrompt,
   formatReviewFindings,
@@ -37,6 +37,8 @@ export interface RunTaskResult {
   reviewFindings?: ReviewFinding[];
   /** A scope mismatch the reviewer proved belongs to the plan, not the task. */
   planIssuePaths?: string[];
+  /** Structured reviewer evidence retained for the next planning/editing pass. */
+  scopePlanRequests?: ScopeRequest[];
   /** Stable structural account used by taskrun to stop repeated attempts. */
   failureSignature?: string;
   /** Conventional Commit metadata proposed by the reviewer on APPROVE. */
@@ -229,6 +231,7 @@ export async function runTask(
       findings = [],
       reviewRetryable = false,
       scopePlanIssuePaths,
+      scopePlanRequests,
     } =
       reviewOn && advis
         ? await advisorReview(
@@ -260,6 +263,7 @@ export async function runTask(
         ok: false,
         reason: "plan_invalid",
         planIssuePaths: scopePlanIssuePaths,
+        scopePlanRequests,
         reviewFindings: findings,
         cost,
         handoff: lastHandoff,

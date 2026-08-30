@@ -55,7 +55,7 @@ export function routeAdvisorPlan(task: Task, threshold: number = DEFAULT_ADVISOR
   const words = description ? description.split(/\s+/).length : 0;
   const acceptance = task.acceptance?.length ?? 0;
   const deps = task.deps?.length ?? 0;
-  const scope = task.scope?.length ?? 0;
+  const scope = (task.scope?.length ?? 0) + (task.shared_scope?.length ?? 0);
   const score = acceptance + deps + scope + Math.ceil(words / 40);
   return {
     plan: score >= threshold,

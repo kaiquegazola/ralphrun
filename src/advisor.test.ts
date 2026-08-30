@@ -205,8 +205,31 @@ describe("advisorReview", () => {
     mockChild.stdout.end("CHANGES\n");
     finishSpawn(0);
 
-    await expect(p).resolves.toMatchObject({ scopePlanIssuePaths: ["src/app.ts"], findings: [] });
+    await expect(p).resolves.toMatchObject({
+      scopePlanIssuePaths: ["src/app.ts"],
+      scopePlanRequests: [{ paths: ["src/app.ts"], reason: expect.stringContaining("mount route") }],
+      findings: [],
+    });
     expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("PLAN BLOCKED"));
+  });
+
+  it("retains an out-of-scope blocker even when an in-scope blocker also exists", async () => {
+    const workspace = mkdtempSync("ralphrun-review-");
+    const scoped = { ...task, scope: ["src/modules/auth/**"] } as Task;
+    diffMock.mockReturnValue("some diff");
+    vi.mocked(parseReview).mockReturnValueOnce({
+      approved: false,
+      changes: "raw",
+      findings: [
+        { id: "OUT", severity: "blocker", location: "src/app.ts:10", problem: "outside", fix: "edit app" },
+        { id: "IN", severity: "blocker", location: "src/modules/auth/controller.ts:8", problem: "inside", fix: "fix it" },
+      ],
+    });
+    const p = advisorReview(scoped, prd, advis, cfg, workspace, "prog", "std");
+    mockChild.stdout.end("CHANGES\n");
+    finishSpawn(0);
+
+    await expect(p).resolves.toMatchObject({ scopePlanIssuePaths: ["src/app.ts"], findings: [{ id: "IN" }] });
   });
 
   it("does not inspect or filter findings when scope is empty", async () => {

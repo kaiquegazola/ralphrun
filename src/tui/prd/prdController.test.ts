@@ -51,6 +51,22 @@ it("applyPlannerResult (valid) replaces prd, pushes undo, writes summary+diff, c
   expect(s.messages[s.messages.length - 1]).toEqual({ role: "planner", text: "drafted +2 -0 ~0" });
 });
 
+it("preserves omitted scope requests when the planner replaces a task", () => {
+  const previous = mkPrd([mkTask("A", { scope_requests: [{ paths: ["src/app.ts"], reason: "needs plan change" }] })]);
+  const replacement = mkPrd([mkTask("A", { description: "updated" })]);
+  const state: PrdState = { ...initialPrdState, prd: previous };
+  const next = reducer(state, { type: "applyPlannerResult", result: { summary: "updated", prd: replacement, errors: [] } });
+  expect(next.prd?.tasks[0].scope_requests).toEqual(previous.tasks[0].scope_requests);
+});
+
+it("allows the planner to explicitly clear scope requests", () => {
+  const previous = mkPrd([mkTask("A", { scope_requests: [{ paths: ["src/app.ts"], reason: "needs plan change" }] })]);
+  const replacement = mkPrd([mkTask("A", { scope_requests: [] })]);
+  const state: PrdState = { ...initialPrdState, prd: previous };
+  const next = reducer(state, { type: "applyPlannerResult", result: { summary: "cleared", prd: replacement, errors: [] } });
+  expect(next.prd?.tasks[0].scope_requests).toEqual([]);
+});
+
 it("applyPlannerResult (invalid) keeps old prd, pushes error bubble, clears attachments", () => {
   let s: PrdState = { ...initialPrdState, prd: VALID, attachments: [{ path: "x" }] };
   s = reducer(s, { type: "applyPlannerResult", result: { summary: "", prd: null, errors: ["bad", "worse"] } });

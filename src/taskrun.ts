@@ -7,6 +7,7 @@
 // is named there instead of captured, so what a task can reach is a list you can
 // read rather than a scope you have to trace.
 
+import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { join } from "node:path";
 
@@ -17,12 +18,18 @@ import { type Config } from "./config.js";
 import { BROWSER_INSTALL_HINT, BROWSER_UPDATE_HINT, browserStatusAsync, taskUsesBrowser, type BrowserStatus } from "./browser.js";
 import { applyTaskPatch, expandSkeletonTask, isSkeletonTask, type TaskPatch } from "./expand.js";
 import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
-import { captureReviewBase, commitPaths, git, headCommit, taskChangedPaths } from "./git.js";
+import { captureReviewBase, commitPaths, git, headCommit, preserveWorkAsRef, taskChangedPaths } from "./git.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
 import { readyTasks, type PRD, type Task } from "./prd.js";
-import { appendLearnedNote, pathsOutsideScope, type NormalizePrdOptions } from "./prdload.js";
+import {
+  appendLearnedNote,
+  pathsOutsideScopeContract,
+  patternsMayOverlapConservatively,
+  taskScopeContract,
+  type NormalizePrdOptions,
+} from "./prdload.js";
 import { formatReviewCommit, formatReviewFindings, readStandards, type ReviewCommit } from "./prompts.js";
 import { assessTaskResources, resourceConflict, taskCanRunInWave, taskRuntimeEnv } from "./resources.js";
 import { runTask, type RunTaskResult } from "./run.js";
@@ -70,6 +77,8 @@ export interface TaskRunnerCtx {
   maxCostUsd: number;
   /** stable ID for this run, used to derive per-task test resources */
   runId: string;
+  /** monotonically unique refs for failed work, including retries with unchanged PRD counters */
+  preservationSequence: number;
 
   /** REPLACED mid-run by the config menu — never destructure these two */
   cfg: Config;
@@ -478,7 +487,14 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     // moved" and passes every escape. Without this clause a run with
     // commit_per_task off and review off has scopes that are documented as
     // enforced and are not checked at all.
-    if (reviewOn || ctx.cfg.commit_per_task || (task.scope?.length ?? 0) > 0) {
+    const scopeContract = taskScopeContract(task);
+    if (
+      reviewOn ||
+      ctx.cfg.commit_per_task ||
+      scopeContract.owned.length > 0 ||
+      scopeContract.shared.length > 0 ||
+      scopeContract.forbidden.length > 0
+    ) {
       if (!taskBaselines.has(task.id)) taskBaselines.set(task.id, captureReviewBase(taskWorkspace));
     }
     if (reviewOn) taskReviewBase = taskBaselines.get(task.id);
@@ -515,6 +531,10 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     // "someone already said, with a sha, what happened to this worktree's work" —
     // so the discard notice below does not repeat a line the merge already wrote.
     let worktreeAccounted = false;
+    // Once a cell exists, every failed attempt is recoverable. Scope and plan
+    // failures are the common cases, but review/executor failures can contain
+    // equally valuable partial work and must not vanish with the directory.
+    let preserveFailedWork = !!wt;
     const landWorktreeWork = (reviewCommit?: ReviewCommit): LandResult => {
       if (!wt) return "ok";
       const committed = logTaskCommit(
@@ -635,11 +655,12 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       // An EMPTY scope declares nothing and so cannot escape, which is what
       // keeps every backlog written before `scope` existed running as before.
       let escaped: string[] = [];
-      const declaredScope = task.scope ?? [];
-      if (!skipped && result.ok && declaredScope.length > 0) {
+      const declaredScope = [...scopeContract.owned, ...scopeContract.shared];
+      if (!skipped && result.ok && (declaredScope.length > 0 || scopeContract.forbidden.length > 0)) {
         const moved = taskChangedPaths(taskWorkspace, taskBaselines.get(task.id), runnerControlPaths) ?? [];
-        escaped = pathsOutsideScope(moved, declaredScope);
+        escaped = pathsOutsideScopeContract(moved, scopeContract);
         if (escaped.length > 0) {
+          preserveFailedWork = true;
           const sample = escaped.slice(0, 3).join(", ") + (escaped.length > 3 ? ", …" : "");
           log(progress, t("loop.log.scopeEscape", { id: task.id, n: escaped.length, paths: sample }));
           pendingReviewFeedback.set(
@@ -682,6 +703,7 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         ct.retries = freshTask.retries;
         ct.plan = freshTask.plan;
         ct.planKey = freshTask.planKey;
+        ct.scope_requests = freshTask.scope_requests;
         if (task.verify !== verifyBeforeRun) ct.verify = task.verify;
         // A project-level field, written inside the same synchronous
         // read-modify-write as the task's own status — the prd.json rule covers
@@ -713,9 +735,18 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       if (failureSignature) ctx.failureSignatures.set(task.id, failureSignature);
 
       if (!skipped && result.reason === "plan_invalid") {
+        preserveFailedWork = true;
         taskBaselines.delete(task.id);
         freshTask.status = "blocked";
         const paths = result.planIssuePaths?.join(", ") || "(see review log)";
+        if (result.scopePlanRequests?.length) {
+          const existing = freshTask.scope_requests ?? [];
+          const known = new Set(existing.map((request) => JSON.stringify(request)));
+          freshTask.scope_requests = [
+            ...existing,
+            ...result.scopePlanRequests.filter((request) => !known.has(JSON.stringify(request))),
+          ];
+        }
         const reason = t("loop.reason.planInvalid", { paths });
         log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
         emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
@@ -914,7 +945,21 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
         // a fresh worktree cut from a newer HEAD, so keeping it would make that
         // attempt stage whatever landed in between as its own work.
         taskBaselines.delete(task.id);
-        if (!worktreeAccounted) {
+        if (!worktreeAccounted && preserveFailedWork) {
+          const safeRun = ctx.runId.replace(/[^A-Za-z0-9._-]+/g, "_");
+          const safeTask = createHash("sha256").update(task.id).digest("hex").slice(0, 16);
+          const attempt = ++ctx.preservationSequence;
+          const ref = "refs/ralphrun/" + safeRun + "/" + safeTask + "/" + attempt;
+          const preserved = preserveWorkAsRef(wt, ref, taskStartCommit, "ralphrun: preserve " + task.id);
+          if (preserved) {
+            log(progress, t("loop.log.worktreePreserved", { id: task.id, ref: preserved.ref, hash: shortHash(preserved.hash) }));
+          }
+          if (!preserved) {
+            const lost = worktreeLoss(wt, taskStartCommit);
+            if (lost.head) log(progress, t("loop.log.worktreeDiscarded", { id: task.id, hash: shortHash(lost.head) }));
+            else if (lost.dirty) log(progress, t("loop.log.worktreeDiscardedDirty", { id: task.id }));
+          }
+        } else if (!worktreeAccounted) {
           const lost = worktreeLoss(wt, taskStartCommit);
           if (lost.head) log(progress, t("loop.log.worktreeDiscarded", { id: task.id, hash: shortHash(lost.head) }));
           else if (lost.dirty) log(progress, t("loop.log.worktreeDiscardedDirty", { id: task.id }));
@@ -954,15 +999,18 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     const wave: Task[] = [];
     for (const tk of candidates) {
       if (wave.length >= cap) break;
-      if (!tk.scope?.length || !taskCanRunInWave(tk)) {
+      const scoped = (tk.scope?.length ?? 0) > 0 || (tk.shared_scope?.length ?? 0) > 0;
+      if (!scoped || !taskCanRunInWave(tk)) {
         if (wave.length === 0) {
-          const reason = !tk.scope?.length ? "no declared file scope" : assessTaskResources(tk).reasons.join(", ");
+          const reason = !scoped ? "no declared file scope" : assessTaskResources(tk).reasons.join(", ");
           log(progress, t("loop.log.parallelSerial", { id: tk.id, reason: reason || "external resource is not isolated" }));
           return [tk];
         }
         continue;
       }
-      const conflict = wave.map((other) => resourceConflict(other, tk)).find(Boolean);
+      const conflict = wave
+        .map((other) => scopeConflict(other, tk) ?? resourceConflict(other, tk))
+        .find(Boolean);
       if (!conflict) wave.push(tk);
       else {
         log(progress, t("loop.log.parallelSerial", { id: tk.id, reason: conflict }));
@@ -971,6 +1019,15 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
     }
     return wave;
   };
+
+  function scopeConflict(a: Task, b: Task): string | undefined {
+    const aPatterns = [...(a.scope ?? []), ...(a.shared_scope ?? [])];
+    const bPatterns = [...(b.scope ?? []), ...(b.shared_scope ?? [])];
+    if (aPatterns.some((pa) => bPatterns.some((pb) => patternsMayOverlapConservatively(pa, pb)))) {
+      return "both tasks claim an overlapping file scope; shared scopes are serialized";
+    }
+    return undefined;
+  }
 
   /**
    * The gate a wave needs and a serial run does not.

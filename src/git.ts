@@ -113,6 +113,52 @@ export function taskChangedPaths(workspace: string, base?: string | null, ignore
   });
 }
 
+export interface PreservedWork {
+  ref: string;
+  hash: string;
+}
+
+/**
+ * Preserve a failed worktree as a reachable commit before its directory is
+ * removed. A private index keeps the operation isolated from the user's index;
+ * commit-tree also bypasses hooks, so preservation cannot be lost to a
+ * repository hook that rejected the task's normal commit.
+ */
+export function preserveWorkAsRef(
+  workspace: string,
+  ref: string,
+  parent?: string | null,
+  message = "ralphrun: preserve failed work",
+): PreservedWork | null {
+  if (!parent || !existsSync(workspace + "/.git")) return null;
+  return withTemporaryIndex(workspace, (index) => {
+    stageWorktree(workspace, index);
+    const treeResult = runWithIndex(workspace, index, ["write-tree"]);
+    if (treeResult.status !== 0) return null;
+    const tree = treeResult.stdout?.trim();
+    const parentTree = gitOut(workspace, "rev-parse", parent + "^{tree}");
+    if (!tree || !parentTree || tree === parentTree) return null;
+    const env = { ...process.env };
+    const configuredName = env.GIT_AUTHOR_NAME || env.GIT_COMMITTER_NAME || gitOut(workspace, "config", "--get", "user.name") || "ralphrun recovery";
+    const configuredEmail = env.GIT_AUTHOR_EMAIL || env.GIT_COMMITTER_EMAIL || gitOut(workspace, "config", "--get", "user.email") || "ralphrun-recovery@localhost";
+    // Git permits author and committer identities to come from different places;
+    // fill each missing variable rather than treating either pair as complete.
+    env.GIT_AUTHOR_NAME ||= configuredName;
+    env.GIT_COMMITTER_NAME ||= configuredName;
+    env.GIT_AUTHOR_EMAIL ||= configuredEmail;
+    env.GIT_COMMITTER_EMAIL ||= configuredEmail;
+    const commit = spawnSync("git", ["commit-tree", tree, "-p", parent], {
+      cwd: workspace,
+      input: message + "\n",
+      encoding: "utf8",
+      env,
+    });
+    const hash = commit.status === 0 ? commit.stdout?.trim() : "";
+    if (!hash || git(workspace, "update-ref", ref, hash) !== 0) return null;
+    return { ref, hash };
+  });
+}
+
 function ignoredPathspec(workspace: string, paths: string[]): string[] {
   return paths
     .map((path) => {

@@ -19,6 +19,7 @@ import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
 import {
   assistantEvent,
+  MAX_RESPONSE_CHARS,
   MAX_TAIL_CHARS,
   MAX_TAIL_LINES,
   reportedCostUsd,
@@ -574,22 +575,47 @@ export async function runCursorSdkText(
   /** the TUI skip/quit control — runCursorSdk cancels the in-flight run on it */
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const out = await runCursorSdk({
-    model: advis.model,
-    prompt,
-    cwd: workspace,
-    timeoutSecs: cfg.advisor_timeout,
-    signal,
-    // chat-only posture, matching buildCmd(..., autoApprove: false) on the CLI path
-    mode: "plan",
-    onEvent: (ev) => {
-      if (!ev.text) return;
-      for (const line of ev.text.split("\n")) emit({ taskId, line, lineSource: source });
-    },
-    ...seams,
-  });
-  // The RESULT is RunResult.result ONLY. The streamed lines go to the pane for
-  // visibility but must never enter the returned string: advisorReview parses it
-  // with parseReview, so a tool summary in there could flip a review verdict.
-  return out.status === "finished" ? out.result.trim() || null : null;
+  const sdkAbort = new AbortController();
+  const relayAbort = (): void => sdkAbort.abort(signal?.reason);
+  if (signal?.aborted) relayAbort();
+  else signal?.addEventListener("abort", relayAbort, { once: true });
+  let streamedChars = 0;
+  let streamTooLarge = false;
+  const emitBoundedText = (text: string): void => {
+    if (streamedChars + text.length > MAX_RESPONSE_CHARS) {
+      streamTooLarge = true;
+      sdkAbort.abort("output-too-large");
+      return;
+    }
+    streamedChars += text.length;
+    for (let start = 0; start <= text.length; ) {
+      const end = text.indexOf("\n", start);
+      const lineEnd = end === -1 ? text.length : end;
+      emit({ taskId, line: text.slice(start, lineEnd), lineSource: source });
+      if (end === -1) return;
+      start = end + 1;
+    }
+  };
+  try {
+    const out = await runCursorSdk({
+      model: advis.model,
+      prompt,
+      cwd: workspace,
+      timeoutSecs: cfg.advisor_timeout,
+      signal: sdkAbort.signal,
+      // chat-only posture, matching buildCmd(..., autoApprove: false) on the CLI path
+      mode: "plan",
+      onEvent: (ev) => {
+        if (!streamTooLarge && ev.text) emitBoundedText(ev.text);
+      },
+      ...seams,
+    });
+    // The RESULT is RunResult.result ONLY. The streamed lines go to the pane for
+    // visibility but must never enter the returned string: advisorReview parses it
+    // with parseReview, so a tool summary in there could flip a review verdict.
+    if (streamTooLarge || out.status !== "finished" || out.result.length > MAX_RESPONSE_CHARS) return null;
+    return out.result.trim() || null;
+  } finally {
+    signal?.removeEventListener("abort", relayAbort);
+  }
 }

@@ -1,11 +1,49 @@
 // stream.test.ts — the event shapes here are copied from a REAL captured run of
 // `claude -p ... --output-format stream-json --verbose`, not invented.
 import { describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
 
-import { addCost, formatCost, mergeCost, parseClaudeStream, reportedCostUsd, type CostTally } from "./stream.js";
+import { addCost, formatCost, mergeCost, parseClaudeStream, readBoundedLines, reportedCostUsd, type CostTally } from "./stream.js";
 
 const assistant = (content: unknown[]): string =>
   JSON.stringify({ type: "assistant", message: { model: "claude-haiku-4-5", role: "assistant", content } });
+
+describe("readBoundedLines", () => {
+  it("rejects a newline-free line before readline-style buffering can grow", () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    let overflowed = false;
+    const reader = readBoundedLines(input, 10, (line) => lines.push(line), () => {
+      overflowed = true;
+    });
+    input.write("x".repeat(11));
+    expect(overflowed).toBe(true);
+    expect(lines).toEqual([]);
+    reader.close();
+  });
+
+  it("decodes split UTF-8 characters and CR/CRLF line endings", async () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    readBoundedLines(input, 100, (line) => lines.push(line), () => { throw new Error("unexpected overflow"); });
+    input.write(Buffer.from("olá\r", "utf8"));
+    input.write(Buffer.from("mundo\r\núltimo", "utf8"));
+    input.end();
+    await new Promise<void>((resolve) => input.once("end", resolve));
+    expect(lines).toEqual(["olá", "mundo", "último"]);
+  });
+
+  it("does not corrupt a multibyte character split across buffers", async () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    readBoundedLines(input, 100, (line) => lines.push(line), () => { throw new Error("unexpected overflow"); });
+    input.write(Buffer.from([0xf0, 0x9f]));
+    input.write(Buffer.from([0x98, 0x80, 0x0a]));
+    input.end();
+    await new Promise<void>((resolve) => input.once("end", resolve));
+    expect(lines).toEqual(["😀"]);
+  });
+});
 
 describe("parseClaudeStream", () => {
   it("surfaces the model's prose as prose (the only thing the blocked marker is read from)", () => {
@@ -293,4 +331,3 @@ describe("cost tallies", () => {
     expect(formatCost({ usd: 0, unknown: true })).toBe("unknown");
   });
 });
-

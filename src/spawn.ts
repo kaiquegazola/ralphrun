@@ -28,7 +28,6 @@
 
 import crossSpawn from "cross-spawn";
 import { spawn as nativeSpawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
-import type { Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
 /** every call site here spawns with stdout+stderr piped, so they are never null */
@@ -160,7 +159,7 @@ export function killTree(proc: ChildProcess): void {
  * streams already ended, so there is nothing to release — and destroying them
  * could drop a final line readline had not emitted yet.
  */
-export function releasePipes(proc: ChildProcess, merged: Writable, rl: Interface): void {
+export function releasePipes(proc: ChildProcess, merged: Writable, rl: { close(): void }): void {
   rl.close();
   proc.stdout?.unpipe(merged);
   proc.stderr?.unpipe(merged);

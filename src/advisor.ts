@@ -1,6 +1,5 @@
 // advisor.ts — CROSS-mode advisor: guidance before, review after
 
-import { createInterface } from "node:readline";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { buildCmd, promptViaStdin } from "./adapters.js";
@@ -25,10 +24,17 @@ import { BRAIN_DIRECTORY } from "./brain.js";
 import { pathsOutsideScopeContract, taskScopeContract } from "./prdload.js";
 import { killTree, spawn, writePrompt } from "./spawn.js";
 import { emit } from "./tui/events.js";
+import { MAX_RESPONSE_CHARS, readBoundedLines } from "./stream.js";
 
 // see executor.ts — a killed child's grandchildren can hold the pipes open, so
 // 'close' may never arrive. Settle on our own after this.
 const KILL_GRACE_MS = 5_000;
+
+// A reviewer/advisor answer is parsed after the child exits, but an answer that
+// grows without bound must not be allowed to grow the parent until then. The
+// answer contract is deliberately small (a short plan or a compact verdict);
+// over-limit output is treated as an unavailable answer and cannot approve.
+export const MAX_ADVISOR_OUTPUT_CHARS = MAX_RESPONSE_CHARS;
 
 // A provider blip — finish_reason: network_error, a reset socket, a 5xx — kills
 // the cli call before it says a word, and every null below reads as "not
@@ -129,11 +135,11 @@ export async function runAdvisorCli(
   runtimeEnv?: NodeJS.ProcessEnv,
 ): Promise<string | null> {
   for (let attempt = 1; ; attempt++) {
-    const { answer, tail } = await runAdvisorCliAttempt(advis, prompt, cfg, workspace, taskId, source, signal, runtimeEnv);
+    const { answer, tail, overflowed } = await runAdvisorCliAttempt(advis, prompt, cfg, workspace, taskId, source, signal, runtimeEnv);
     // An aborted call settled null because the USER skipped it — never a blip,
     // so no wait and no second spawn after the skip. Same for every null whose
     // pipes carry no network marker.
-    if (answer !== null || signal?.aborted || attempt > NETWORK_RETRY_DELAYS_MS.length || !looksLikeNetworkBlip(tail)) {
+    if (answer !== null || overflowed || signal?.aborted || attempt > NETWORK_RETRY_DELAYS_MS.length || !looksLikeNetworkBlip(tail)) {
       return answer;
     }
     if (progress) {
@@ -162,15 +168,19 @@ async function runAdvisorCliAttempt(
   source: "advisor" | "review",
   signal?: AbortSignal,
   runtimeEnv?: NodeJS.ProcessEnv,
-): Promise<{ answer: string | null; tail: string }> {
+): Promise<{ answer: string | null; tail: string; overflowed?: boolean }> {
   // An in-process backend has no command line, and its RunResult IS the stdout
   // the spawn path below accumulates — same contract, same return type. The
   // signal goes with it: a control honoured on the spawn reviewer and not on the
   // sdk one is the same one-backend wiring the handoff already got wrong once.
   // ponytail: KNOWN CEILING — the sdk runner keeps its error text to itself, so
   // its failures never match the markers and never retry.
-  if (agentDef(advis.cli)?.sdk)
-    return { answer: await runCursorSdkText(advis, prompt, cfg, workspace, taskId, source, undefined, signal), tail: "" };
+  if (agentDef(advis.cli)?.sdk) {
+    const answer = await runCursorSdkText(advis, prompt, cfg, workspace, taskId, source, undefined, signal);
+    return answer && answer.length <= MAX_ADVISOR_OUTPUT_CHARS
+      ? { answer, tail: "" }
+      : { answer: null, tail: answer ? `advisor output exceeded ${MAX_ADVISOR_OUTPUT_CHARS} characters` : "" };
+  }
   // autoApprove stays FALSE on both calls — the advisor must not be able to write.
   // The review additionally asks for the cli's read-only tools: the diff it judges
   // is cut at 12k chars and can be empty, and a reviewer with no way to open a file
@@ -218,21 +228,45 @@ async function runAdvisorCliAttempt(
       // enter `out`, or diagnostic noise could corrupt the parsed advice or flip
       // a review verdict.
       let out = "";
+      let outChars = 0;
+      let outputTooLarge = false;
       let tail = ""; // bounded last-4k of both pipes — the network-blip evidence
-      const keep = (chunk: string): void => {
-        out += chunk + "\n";
-        tail = (tail + chunk + "\n").slice(-4000);
+      let outLines: { close(): void };
+      let errLines: { close(): void };
+      const stopForOutputLimit = (): void => {
+        if (outputTooLarge) return;
+        outputTooLarge = true;
+        tail = (tail + `advisor output exceeded ${MAX_ADVISOR_OUTPUT_CHARS} characters\n`).slice(-4000);
+        killTree(proc);
+        outLines.close();
+        errLines.close();
+        proc.stdout?.destroy();
+        proc.stderr?.destroy();
+        grace = setTimeout(() => finish(null), KILL_GRACE_MS);
+        grace.unref?.();
       };
-      const outRl = createInterface({ input: proc.stdout });
-      outRl.on("line", (line) => {
-        keep(line);
+      const keep = (chunk: string): boolean => {
+        const storedLength = (out ? 1 : 0) + chunk.length;
+        // Blank lines do not change `out` while it is empty, but an endless
+        // delimiter stream still has to consume the response budget.
+        const nextLength = outChars + (storedLength || 1);
+        if (nextLength > MAX_ADVISOR_OUTPUT_CHARS) {
+          stopForOutputLimit();
+          return false;
+        }
+        out += (out ? "\n" : "") + chunk;
+        outChars = nextLength;
+        tail = (tail + chunk + "\n").slice(-4000);
+        return true;
+      };
+      outLines = readBoundedLines(proc.stdout, MAX_ADVISOR_OUTPUT_CHARS, (line) => {
+        if (!keep(line)) return;
         emit({ taskId, line, lineSource: source });
-      });
-      const errRl = createInterface({ input: proc.stderr });
-      errRl.on("line", (line) => {
+      }, stopForOutputLimit);
+      errLines = readBoundedLines(proc.stderr, MAX_ADVISOR_OUTPUT_CHARS, (line) => {
         tail = (tail + line + "\n").slice(-4000);
         emit({ taskId, line, lineSource: source });
-      });
+      }, stopForOutputLimit);
 
       let settled = false;
       let grace: NodeJS.Timeout | undefined;
@@ -242,10 +276,10 @@ async function runAdvisorCliAttempt(
         clearTimeout(timeout);
         clearTimeout(grace);
         signal?.removeEventListener("abort", onAbort);
-        outRl.close();
-        errRl.close();
+        outLines.close();
+        errLines.close();
         granted?.cleanup();
-        resolve({ answer: v, tail });
+        resolve({ answer: v, tail, overflowed: outputTooLarge });
       };
 
       // The skip/quit key, on the phase that owns the longest budget in the
@@ -254,8 +288,8 @@ async function runAdvisorCliAttempt(
       // verdict any more, and "no verdict" already means not approved.
       const onAbort = (): void => {
         killTree(proc);
-        outRl.close();
-        errRl.close();
+        outLines.close();
+        errLines.close();
         proc.stdout?.destroy();
         proc.stderr?.destroy();
         finish(null);
@@ -265,22 +299,22 @@ async function runAdvisorCliAttempt(
       const timeout = setTimeout(() => {
         killTree(proc);
         // killed: a survivor must not keep writing into the parsed output
-        outRl.close();
-        errRl.close();
+        outLines.close();
+        errLines.close();
         proc.stdout?.destroy();
         proc.stderr?.destroy();
         grace = setTimeout(() => finish(null), KILL_GRACE_MS);
         grace.unref?.();
       }, timeoutSecs * 1000);
 
-      proc.on("close", () => finish(out.trim() || null));
+      proc.on("close", () => finish(outputTooLarge ? null : out.trim() || null));
       proc.on("error", (e) => {
         tail = (tail + String(e) + "\n").slice(-4000);
         finish(null);
       });
     } catch (e) {
       granted?.cleanup();
-      resolve({ answer: null, tail: String(e) });
+      resolve({ answer: null, tail: String(e), overflowed: false });
     }
   });
 }

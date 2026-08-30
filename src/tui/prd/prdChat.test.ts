@@ -17,7 +17,7 @@ import { promptViaStdin } from "../../adapters.js";
 import { killTree, spawn } from "../../spawn.js";
 import { buildCmd } from "../../adapters.js";
 import { runCursorSdk } from "../../cursor-sdk.js";
-import { runPlannerTurn, type PlannerTurnArgs } from "./prdChat.js";
+import { MAX_PLANNER_OUTPUT_CHARS, runPlannerTurn, type PlannerTurnArgs } from "./prdChat.js";
 import type { PRD } from "../../prd.js";
 
 const spawnMock = spawn as unknown as Mock;
@@ -78,6 +78,53 @@ it("parses a valid reply: summary before fence + fenced json, streams every line
   expect(spawnMock).toHaveBeenCalledWith("mybin", ["a1"], expect.objectContaining({ cwd: "/w" }));
   // planner is chat-only: never spawned with auto-approve (skip-permissions) flags
   expect(buildCmdMock.mock.calls[0][4]).toBe(false);
+});
+
+it("rejects a valid PRD when output overflows after the fenced block", async () => {
+  const { res } = await run(["summary", "```json", VALID_JSON, "```", "x".repeat(MAX_PLANNER_OUTPUT_CHARS + 1)]);
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toContain("200000");
+});
+
+it("kills and rejects a planner answer that exceeds the memory limit", async () => {
+  const { res, onChunk, proc } = await run(["x".repeat(MAX_PLANNER_OUTPUT_CHARS + 1)]);
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toContain("200000");
+  expect(onChunk).toHaveBeenCalledWith(expect.stringContaining("200000"));
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
+});
+
+it("bounds a planner answer that never emits a newline", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const p = runPlannerTurn({
+    cli: "claude",
+    model: "m",
+    cwd: "/w",
+    currentPrd: null,
+    history: [],
+    instruction: "x",
+    attachments: [],
+    onChunk: vi.fn(),
+  });
+  proc.stdout.write("x".repeat(MAX_PLANNER_OUTPUT_CHARS + 1));
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
+  proc.emit("close", 0);
+  const res = await p;
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toContain("200000");
+});
+
+it("bounds a planner answer made only of empty lines", async () => {
+  const proc = makeProc();
+  spawnMock.mockReturnValue(proc);
+  const p = runPlannerTurn({ cli: "claude", model: "m", cwd: "/w", currentPrd: null, history: [], instruction: "x", attachments: [], onChunk: vi.fn() });
+  proc.stdout.write("\n".repeat(MAX_PLANNER_OUTPUT_CHARS + 1));
+  expect(killTreeMock).toHaveBeenCalledWith(proc);
+  proc.emit("close", 0);
+  const res = await p;
+  expect(res.prd).toBeNull();
+  expect(res.errors[0]).toContain("200000");
 });
 
 // NOT spawn's own `signal` option: that only SIGTERMs the direct child, which
@@ -533,6 +580,32 @@ describe("in-process planner", () => {
     expect(spawnMock).not.toHaveBeenCalled();
     expect(buildCmdMock).not.toHaveBeenCalled();
     expect(sdkRun.mock.calls[0][0]).toMatchObject({ model: "composer-2", cwd: "/w", mode: "plan" });
+  });
+
+  it("caps streamed output and aborts the SDK before the result arrives", async () => {
+    let sdkSignal: AbortSignal | undefined;
+    sdkRun.mockImplementation(async (a: { signal: AbortSignal; onEvent: (e: { text: string }) => void }) => {
+      sdkSignal = a.signal;
+      a.onEvent({ text: "x".repeat(MAX_PLANNER_OUTPUT_CHARS + 1) });
+      return { status: "finished", result: "```json\n" + VALID_JSON + "\n```", error: "" };
+    });
+    const res = await turn();
+    expect(res.prd).toBeNull();
+    expect(res.errors[0]).toContain("200000");
+    expect(sdkSignal?.aborted).toBe(true);
+  });
+
+  it("counts empty SDK stream lines toward the output cap", async () => {
+    let sdkSignal: AbortSignal | undefined;
+    sdkRun.mockImplementation(async (a: { signal: AbortSignal; onEvent: (e: { text: string }) => void }) => {
+      sdkSignal = a.signal;
+      a.onEvent({ text: "\n".repeat(MAX_PLANNER_OUTPUT_CHARS + 1) });
+      return { status: "finished", result: "", error: "" };
+    });
+    const res = await turn();
+    expect(res.prd).toBeNull();
+    expect(res.errors[0]).toContain("200000");
+    expect(sdkSignal?.aborted).toBe(true);
   });
 
   it("turns a failed run into a failed TURN, not a rejection", async () => {

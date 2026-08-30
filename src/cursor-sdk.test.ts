@@ -23,6 +23,7 @@ import {
 } from "./cursor-sdk.js";
 import type { AgentSpec, Config } from "./config.js";
 import type { Task } from "./prd.js";
+import { MAX_RESPONSE_CHARS } from "./stream.js";
 
 const logMock = log as unknown as Mock;
 const emitMock = emit as unknown as Mock;
@@ -831,6 +832,12 @@ describe("runCursorSdkText", () => {
     expect(await runCursorSdkText(ADVIS, "p", makeCfg(), "ws", "T1", "advisor", { create })).toBe("APPROVE");
   });
 
+  it("rejects an oversized run result", async () => {
+    const run = makeRun([], { status: "finished", result: "x".repeat(MAX_RESPONSE_CHARS + 1) });
+    const create = makeCreate(makeAgent(run));
+    expect(await runCursorSdkText(ADVIS, "p", makeCfg(), "ws", "T1", "review", { create })).toBeNull();
+  });
+
   it("streams to the pane without letting the stream into the answer", async () => {
     const run = makeRun(
       [
@@ -843,6 +850,32 @@ describe("runCursorSdkText", () => {
     const out = await runCursorSdkText(ADVIS, "p", makeCfg(), "ws", "T1", "review", { create });
     expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "→ Read(a.ts)", lineSource: "review" });
     expect(out).toBe("CHANGES: none");
+  });
+
+  it("aborts an oversized streamed advisor response before the run finishes", async () => {
+    const run = makeRun([], FINISHED, {
+      wait: never,
+      stream: async function* () {
+        yield { type: "assistant", message: { content: [{ type: "text", text: "x".repeat(MAX_RESPONSE_CHARS + 1) }] } };
+      },
+    });
+    const agent = makeAgent(run);
+    const create = makeCreate(agent);
+    expect(await runCursorSdkText(ADVIS, "p", makeCfg(), "ws", "T1", "review", { create })).toBeNull();
+    expect(run.cancel).toHaveBeenCalled();
+    expect(agent.close).toHaveBeenCalled();
+    expect(emitMock.mock.calls.every((call) => String(call[0]?.line ?? "").length <= MAX_RESPONSE_CHARS)).toBe(true);
+  });
+
+  it("allows a streamed advisor response exactly at the limit", async () => {
+    const text = "x".repeat(MAX_RESPONSE_CHARS);
+    const run = makeRun([{ type: "assistant", message: { content: [{ type: "text", text }] } }], {
+      status: "finished",
+      result: "APPROVE",
+    });
+    const create = makeCreate(makeAgent(run));
+    expect(await runCursorSdkText(ADVIS, "p", makeCfg(), "ws", "T1", "review", { create })).toBe("APPROVE");
+    expect(run.cancel).not.toHaveBeenCalled();
   });
 
   it("returns null for an empty answer and for a failed run", async () => {

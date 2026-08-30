@@ -44,7 +44,7 @@ import { log } from "./log.js";
 import { captureDiff } from "./git.js";
 import { parseReview, reviewPrompt } from "./prompts.js";
 import { runCursorSdkText } from "./cursor-sdk.js";
-import { getAdvice, advisorReview, NETWORK_RETRY_DELAYS_MS } from "./advisor.js";
+import { getAdvice, advisorReview, MAX_ADVISOR_OUTPUT_CHARS, NETWORK_RETRY_DELAYS_MS } from "./advisor.js";
 import { emit } from "./tui/events.js";
 import type { AgentSpec, Config } from "./config.js";
 import type { PRD, Task } from "./prd.js";
@@ -94,6 +94,49 @@ describe("getAdvice", () => {
   it("returns null when advice is empty (whitespace only)", async () => {
     const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
     mockChild.stdout.end("   \n");
+    finishSpawn(0);
+    expect(await p).toBeNull();
+  });
+
+  it("kills and rejects an advisor answer that exceeds the memory limit", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("x".repeat(MAX_ADVISOR_OUTPUT_CHARS + 1) + "\n");
+    await new Promise((r) => setImmediate(r));
+    expect(killTreeMock).toHaveBeenCalledWith(mockChild);
+    finishSpawn(0);
+    expect(await p).toBeNull();
+  });
+
+  it("bounds an advisor answer that never emits a newline", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.write("x".repeat(MAX_ADVISOR_OUTPUT_CHARS + 1));
+    expect(killTreeMock).toHaveBeenCalledWith(mockChild);
+    finishSpawn(0);
+    expect(await p).toBeNull();
+  });
+
+  it("accepts an advisor answer exactly at the memory limit", async () => {
+    const answer = "x".repeat(MAX_ADVISOR_OUTPUT_CHARS);
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end(answer);
+    await new Promise((r) => setImmediate(r));
+    finishSpawn(0);
+    expect(await p).toBe(answer);
+  });
+
+  it("bounds an advisor stream made only of empty lines", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.write("\n".repeat(MAX_ADVISOR_OUTPUT_CHARS + 1));
+    expect(killTreeMock).toHaveBeenCalledWith(mockChild);
+    finishSpawn(0);
+    expect(await p).toBeNull();
+  });
+
+  it("does not retry overflow even when earlier output resembles a network failure", async () => {
+    const p = getAdvice(task, prd, advis, cfg, "ws", "prog", "std");
+    mockChild.stdout.end("service unavailable\n" + "x".repeat(MAX_ADVISOR_OUTPUT_CHARS + 1) + "\n");
+    await new Promise((r) => setImmediate(r));
+    expect(spawnMock).toHaveBeenCalledTimes(1);
     finishSpawn(0);
     expect(await p).toBeNull();
   });

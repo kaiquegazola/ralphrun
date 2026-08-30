@@ -3,7 +3,6 @@
 // and validate it. Reuses the spawn+readline merge pattern from executor.ts.
 // Parses fail-safe: junk output -> { prd: null, errors } so nothing is written.
 
-import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -20,6 +19,7 @@ import type { PRD } from "../../prd.js";
 import { normalizePrd } from "../../prdload.js";
 import { brainPromptBlock, syncBrain } from "../../brain.js";
 import { hostEnvironmentBlock } from "../../prompts.js";
+import { MAX_RESPONSE_CHARS, readBoundedLines } from "../../stream.js";
 import type { ChatMessage, PlannerResult } from "./prdController.js";
 import { validatePrd } from "./validatePrd.js";
 
@@ -42,6 +42,10 @@ const KILL_GRACE_MS = 5_000;
 const IDLE_STEP_MS = 180_000;
 const IDLE_STEPS = 4; // warn at 3min, 6min, 9min — kill only at 12min of total silence
 const MAX_TURN_MS = 1_800_000;
+// A planner response must fit in the PRD/chat handoff. Keeping an unbounded
+// stream both in `full` and in the live message made a runaway CLI a parent
+// process OOM risk. Over-limit output is an invalid turn, never a partial PRD.
+export const MAX_PLANNER_OUTPUT_CHARS = MAX_RESPONSE_CHARS;
 // errors render in the studio chat pane → localized (function: locale is set after import)
 const NO_JSON = (): string => t("studio.err.noJson");
 
@@ -254,20 +258,55 @@ function parseReply(text: string): PlannerResult {
 // wizard (unsaved PRD and all). Its final answer is what the spawn path
 // accumulates from stdout, so the parse below is identical.
 async function runPlannerSdkTurn(args: PlannerTurnArgs, prompt: string): Promise<PlannerResult> {
-  const out = await runCursorSdk({
-    model: args.model,
-    prompt,
-    cwd: args.cwd,
-    timeoutSecs: MAX_TURN_MS / 1000,
-    mode: "plan", // chat-only, same posture as buildCmd(..., autoApprove: false)
-    signal: args.signal,
-    onEvent: (ev) => {
-      if (ev.text) for (const line of ev.text.split("\n")) args.onChunk(line);
-    },
-  });
+  const sdkAbort = new AbortController();
+  const relayAbort = (): void => sdkAbort.abort(args.signal?.reason);
+  if (args.signal?.aborted) relayAbort();
+  else args.signal?.addEventListener("abort", relayAbort, { once: true });
+  let streamedChars = 0;
+  let streamTooLarge = false;
+  const emitSdkText = (text: string): void => {
+    if (streamedChars + text.length > MAX_PLANNER_OUTPUT_CHARS) {
+      streamTooLarge = true;
+      sdkAbort.abort("output-too-large");
+      return;
+    }
+    streamedChars += text.length;
+    for (let start = 0; start <= text.length; ) {
+      const end = text.indexOf("\n", start);
+      const lineEnd = end === -1 ? text.length : end;
+      args.onChunk(text.slice(start, lineEnd));
+      if (end === -1) return;
+      start = end + 1;
+    }
+  };
+  let out;
+  try {
+    out = await runCursorSdk({
+      model: args.model,
+      prompt,
+      cwd: args.cwd,
+      timeoutSecs: MAX_TURN_MS / 1000,
+      mode: "plan", // chat-only, same posture as buildCmd(..., autoApprove: false)
+      signal: sdkAbort.signal,
+      onEvent: (ev) => {
+        if (!streamTooLarge && ev.text) emitSdkText(ev.text);
+      },
+    });
+  } finally {
+    args.signal?.removeEventListener("abort", relayAbort);
+  }
   // an abort is a cancellation, not a failed turn — same empty settle as onAbort
+  if (args.signal?.aborted) return { summary: "", prd: null, errors: [] };
+  if (streamTooLarge) {
+    return { summary: "", prd: null, errors: [t("studio.err.outputTooLarge", { n: MAX_PLANNER_OUTPUT_CHARS })] };
+  }
   if (out.status === "aborted") return { summary: "", prd: null, errors: [] };
-  if (out.status === "finished") return withRawDump(restorePlannerArchitecture(parseReply(out.result), args.currentPrd), out.result, args.cli);
+  if (out.status === "finished") {
+    if (out.result.length > MAX_PLANNER_OUTPUT_CHARS) {
+      return { summary: "", prd: null, errors: [t("studio.err.outputTooLarge", { n: MAX_PLANNER_OUTPUT_CHARS })] };
+    }
+    return withRawDump(restorePlannerArchitecture(parseReply(out.result), args.currentPrd), out.result, args.cli);
+  }
   return { summary: "", prd: null, errors: [out.error || NO_JSON()] };
 }
 
@@ -292,9 +331,9 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
     const merged = new PassThrough();
     proc.stdout.pipe(merged);
     proc.stderr.pipe(merged);
-    const rl = createInterface({ input: merged });
-
     let full = "";
+    let fullChars = 0;
+    let outputTooLarge = false;
     // Escalating silence ladder (see idleness.ts): warns stream into the chat
     // so the user sees the stall forming; only the last rung kills. Armed at
     // spawn too, so a cli that produces nothing at all dies here instead of at
@@ -305,16 +344,31 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
       warn: (mins) => args.onChunk(t("studio.warn.idle", { mins })),
       fatal: () => killAndSettle("stall"),
     });
-    rl.on("line", (line) => {
+    const stopForOutputLimit = (): void => {
+      if (outputTooLarge) return;
+      outputTooLarge = true;
+      args.onChunk(t("studio.err.outputTooLarge", { n: MAX_PLANNER_OUTPUT_CHARS }));
+      killAndSettle("overflow");
+    };
+    const lines = readBoundedLines(merged, MAX_PLANNER_OUTPUT_CHARS, (line) => {
+      const storedLength = (full ? 1 : 0) + line.length;
+      // Empty lines do not change `full` when it is empty, but an endless stream
+      // of delimiters still needs a finite handoff budget.
+      const nextLength = fullChars + (storedLength || 1);
+      if (nextLength > MAX_PLANNER_OUTPUT_CHARS) {
+        stopForOutputLimit();
+        return;
+      }
       full += (full ? "\n" : "") + line;
+      fullChars = nextLength;
       idle.bump(); // every line is proof of life
       args.onChunk(line);
-    });
+    }, stopForOutputLimit);
     // single-settle guard: close / error / stall / ceiling / abort can race.
     let settled = false;
     let max: NodeJS.Timeout | undefined;
     let grace: NodeJS.Timeout | undefined;
-    let killedBy: "stall" | "ceiling" | null = null;
+    let killedBy: "stall" | "ceiling" | "overflow" | null = null;
     let exitCode: number | null = null;
 
     const clearTimers = (): void => {
@@ -336,22 +390,25 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
     const settleParsed = (): void => {
       const parsed = parseReply(full);
       let errors = parsed.errors;
-      if (parsed.prd === null && errors.length > 0) {
+      if (killedBy === "overflow") {
+        errors = [t("studio.err.outputTooLarge", { n: MAX_PLANNER_OUTPUT_CHARS }), ...errors];
+      } else if (errors.length > 0) {
         const idleMins = (IDLE_STEP_MS * IDLE_STEPS) / 60_000;
         if (killedBy === "stall") errors = [t("studio.err.stalled", { mins: idleMins }), ...errors];
         else if (killedBy === "ceiling") errors = [t("studio.err.maxed", { mins: MAX_TURN_MS / 60_000 }), ...errors];
         else if (exitCode !== null && exitCode !== 0) errors = [t("studio.err.exited", { code: exitCode }), ...errors];
       }
-      finish(withRawDump(restorePlannerArchitecture({ ...parsed, errors }, args.currentPrd), full, args.cli));
+      const safe = killedBy === "overflow" ? { ...parsed, prd: null, errors } : { ...parsed, errors };
+      finish(withRawDump(restorePlannerArchitecture(safe, args.currentPrd), full, args.cli));
     };
 
     // a surviving grandchild can hold the pipes open, so 'close' may never
     // arrive after a kill — settle on our own once the grace elapses.
-    function killAndSettle(reason: "stall" | "ceiling"): void {
+    function killAndSettle(reason: "stall" | "ceiling" | "overflow"): void {
       if (settled) return;
       killedBy = reason;
       killTree(proc);
-      releasePipes(proc, merged, rl); // killed: a survivor must not keep writing
+      releasePipes(proc, merged, lines); // killed: a survivor must not keep writing
       idle.stop();
       grace = setTimeout(settleParsed, KILL_GRACE_MS);
       grace.unref?.();
@@ -361,7 +418,7 @@ export function runPlannerTurn(args: PlannerTurnArgs): Promise<PlannerResult> {
     // reply land on a wizard that has already torn down.
     function onAbort(): void {
       killTree(proc);
-      releasePipes(proc, merged, rl);
+      releasePipes(proc, merged, lines);
       finish({ summary: "", prd: null, errors: [] });
     }
 

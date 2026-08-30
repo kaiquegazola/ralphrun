@@ -14,6 +14,9 @@
 // have actually captured and can test against. A cli with no `stream` entry in
 // the registry keeps the plain-text behaviour.
 
+import type { Readable } from "node:stream";
+import { TextDecoder } from "node:util";
+
 import { t } from "./i18n.js";
 
 /** what a single raw event line means to us */
@@ -99,6 +102,86 @@ export type CostSink = (usd: number | undefined) => void;
 // cycle, and a second copy of the numbers is how the two paths drift apart.
 export const MAX_TAIL_LINES = 20;
 export const MAX_TAIL_CHARS = 2_000;
+export const MAX_RESPONSE_CHARS = 200_000;
+
+export interface BoundedLineReader {
+  close(): void;
+}
+
+/** Split a child stream without letting readline buffer an unbounded line. */
+export function readBoundedLines(
+  input: Readable,
+  maxChars: number,
+  onLine: (line: string) => void,
+  onOverflow: () => void,
+): BoundedLineReader {
+  let pending = "";
+  let closed = false;
+  let skipLf = false;
+  const decoder = new TextDecoder("utf-8");
+
+  const overflow = (): void => {
+    if (closed) return;
+    closed = true;
+    pending = "";
+    input.off("data", onData);
+    input.off("end", onEnd);
+    onOverflow();
+  };
+
+  function processText(text: string): void {
+    let start = 0;
+    if (skipLf) {
+      if (text.startsWith("\n")) start = 1;
+      skipLf = false;
+    }
+    for (let i = start; i < text.length; i++) {
+      const delimiter = text[i];
+      if (delimiter !== "\n" && delimiter !== "\r") continue;
+      const segmentLength = i - start;
+      if (pending.length + segmentLength > maxChars) return overflow();
+      const line = pending + text.slice(start, i);
+      pending = "";
+      onLine(line);
+      if (closed) return;
+      if (delimiter === "\r") {
+        if (text[i + 1] === "\n") i++;
+        else if (i + 1 === text.length) skipLf = true;
+      }
+      start = i + 1;
+    }
+    const rest = text.slice(start);
+    if (pending.length + rest.length > maxChars) return overflow();
+    pending += rest;
+  }
+
+  function onData(chunk: Buffer | string): void {
+    if (closed) return;
+    processText(decoder.decode(typeof chunk === "string" ? Buffer.from(chunk) : chunk, { stream: true }));
+  }
+
+  function onEnd(): void {
+    if (closed) return;
+    processText(decoder.decode());
+    if (closed) return;
+    closed = true;
+    input.off("data", onData);
+    input.off("end", onEnd);
+    if (pending) onLine(pending);
+    pending = "";
+  }
+
+  input.on("data", onData);
+  input.on("end", onEnd);
+  return {
+    close: () => {
+      closed = true;
+      pending = "";
+      input.off("data", onData);
+      input.off("end", onEnd);
+    },
+  };
+}
 
 /** one cli call's outcome; `undefined` means that call reported no cost */
 export function addCost(tally: CostTally, usd: number | undefined): void {

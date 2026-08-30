@@ -299,6 +299,7 @@ const en = {
   "studio.quit.confirmUnsaved": "quit studio? unsaved changes will be lost",
   "studio.err.cantSave": "cannot save: {errors}",
   "studio.err.draftingSave": "cannot save while the planner is thinking — wait for the turn to finish",
+  "studio.err.outputTooLarge": "planner output exceeded the {n}-character safety limit; the turn was discarded",
   "cli.savedRunHint": "saved — run with: ralphrun --prd {path}",
   // PrdApp.tsx — chat role prefixes (≤7 chars: padded into PREFIX_W)
   "studio.role.you": "you",
@@ -674,6 +675,7 @@ const ptBr: Record<MsgKey, string> = {
   "studio.quit.confirmUnsaved": "sair do studio? alterações não salvas serão perdidas",
   "studio.err.cantSave": "não é possível salvar: {errors}",
   "studio.err.draftingSave": "não dá para salvar enquanto o planner está pensando — aguarde a rodada terminar",
+  "studio.err.outputTooLarge": "a saída do planner excedeu o limite de segurança de {n} caracteres; a rodada foi descartada",
   "cli.savedRunHint": "salvo — rode com: ralphrun --prd {path}",
   "studio.role.you": "você",
   "studio.role.planner": "planner",

@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 
 import { agentDef } from "./agents.js";
 import { BRAIN_DIRECTORY, syncBrain } from "./brain.js";
@@ -18,7 +18,7 @@ import { type Config } from "./config.js";
 import { BROWSER_INSTALL_HINT, BROWSER_UPDATE_HINT, browserStatusAsync, taskUsesBrowser, type BrowserStatus } from "./browser.js";
 import { applyTaskPatch, expandSkeletonTask, isSkeletonTask, type TaskPatch } from "./expand.js";
 import { createElapsedTracker, type ElapsedTracker } from "./elapsed.js";
-import { captureReviewBase, commitPaths, git, headCommit, preserveWorkAsRef, taskChangedPaths } from "./git.js";
+import { captureReviewBase, commitAllExcept, commitPaths, git, headCommit, preserveWorkAsRef, taskChangedPaths } from "./git.js";
 import { t } from "./i18n.js";
 import { log } from "./log.js";
 import { advisorPlanKey, invalidatePlan } from "./plan-cache.js";
@@ -205,8 +205,7 @@ function logTaskCommit(
     // different: the executor staged a rename or deletion despite being told not
     // to, so say so — this is the commit that can still swallow unrelated work.
     if (paths) log(progress, t("loop.log.commitUnscoped", { id }));
-    git(workspace, "add", "-A");
-    git(workspace, "commit", "-m", msg);
+    commitAllExcept(workspace, ignoredPaths, msg);
   }
   const after = headCommit(workspace);
   if (after && after !== before) {
@@ -222,6 +221,43 @@ function logTaskCommit(
 
 function shortHash(hash: string): string {
   return hash.slice(0, 12);
+}
+
+/**
+ * The PRD is runner state, not task scope. Keep it out of the task commit so
+ * the task's code and its status have separate, auditable commits; then commit
+ * the status immediately after the task is accepted. A failed scoped stage is
+ * deliberately not widened to `git add -A`, because that could capture the
+ * user's unrelated files.
+ */
+function logPrdCommit(workspace: string, progress: string, prdPath: string, id: string): boolean {
+  const before = headCommit(workspace);
+  const prd = relative(workspace, prdPath).split(sep).join("/");
+  if (!prd || prd === ".." || prd.startsWith("../")) {
+    log(progress, t("loop.log.prdCommitRefused", { id }));
+    return false;
+  }
+  // Another task in the same wave may already have carried this status into a
+  // commit. That is still the desired invariant: no dirty PRD is left behind.
+  if (
+    before &&
+    git(workspace, "diff", "--quiet", "HEAD", "--", prd) === 0 &&
+    // An ignored/untracked PRD has no diff against HEAD either, but still
+    // needs to be staged explicitly for the requested metadata commit.
+    git(workspace, "ls-files", "--error-unmatch", "--", prd) === 0
+  ) return true;
+  if (!commitPaths(workspace, [prd], `chore(prd): ${id} concluida`)) {
+    log(progress, t("loop.log.prdCommitRefused", { id }));
+    return false;
+  }
+  const after = headCommit(workspace);
+  if (after && after !== before) {
+    log(progress, t("loop.log.prdCommitted", { id, hash: shortHash(after) }));
+    return true;
+  }
+  // Keep the same no-HEAD accommodation as logTaskCommit for a freshly
+  // initialized repository. The real commit path will have created HEAD.
+  return before === null && after === null;
 }
 
 export function createTaskRunner(ctx: TaskRunnerCtx) {
@@ -572,6 +608,28 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       return "ok";
     };
 
+    const commitAcceptedTask = (reviewCommit?: ReviewCommit): boolean => {
+      if (!ctx.cfg.commit_per_task) return true;
+      // In a worktree this already happened as the transport into the main
+      // checkout. Serial tasks still need their scoped code commit first.
+      if (!wt) {
+        // Preserve the serial path's existing commit fallback/diagnostics. The
+        // PRD commit below is the new acceptance gate; worktree transport still
+        // has its own fail-closed check in landWorktreeWork.
+        if (!logTaskCommit(
+          workspace,
+          progress,
+          task.id,
+          task.title,
+          ctx.cfg,
+          taskBaselines.get(task.id),
+          reviewCommit,
+          runnerControlPaths,
+        )) return false;
+      }
+      return logPrdCommit(workspace, progress, prdPath, task.id);
+    };
+
     // unknown, not 0: if runTask throws before any executor settles, whatever it
     // already spent was never reported to us
     try {
@@ -783,18 +841,23 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
       } else if (result.ok && landed === "ok") {
         freshTask.status = "done";
         learned = result.note;
-        ctx.accepted += 1;
         log(progress, t("loop.log.done", { id: task.id, s: elapsed }));
         emit({ taskId: task.id, status: "done", elapsedMs });
         persist();
-        // AFTER persist (the commit is meant to carry the task's new status) and
-        // BEFORE the baseline is dropped — the commit needs it to know which paths
-        // are this task's and which were already dirty. In worktree mode
-        // landWorktreeWork already committed, because there the commit is the
-        // only way the work gets out.
-        if (ctx.cfg.commit_per_task && !wt) {
-          logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id), result.commit, runnerControlPaths);
+        // Code and PRD metadata are committed separately. If either commit is
+        // refused, do not leave a green task in a dirty backlog.
+        if (!commitAcceptedTask(result.commit)) {
+          taskBaselines.delete(task.id);
+          freshTask.status = "blocked";
+          const reason = t("loop.reason.prdCommitRefused");
+          log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
+          emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+          persist();
+          done();
+          log(progress, t("loop.log.stopWorkspace"));
+          return "stop";
         }
+        ctx.accepted += 1;
         taskBaselines.delete(task.id);
       } else if (landed === "dirty" || landed === "uncommitted") {
         // A retry cannot help with either: the user's staged/uncommitted edit
@@ -870,7 +933,6 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
             return "next";
           }
           freshTask.status = "done";
-          ctx.accepted += 1; // ctx.accepted change, whoever ctx.accepted it: same denominator as an auto-pass
           log(
             progress,
             ctx.tui && solo
@@ -879,9 +941,19 @@ export function createTaskRunner(ctx: TaskRunnerCtx) {
           );
           emit({ taskId: task.id, status: "done", reason: displayReason, elapsedMs });
           persist();
-          if (ctx.cfg.commit_per_task && !wt) {
-            logTaskCommit(workspace, progress, task.id, task.title, ctx.cfg, taskBaselines.get(task.id), undefined, runnerControlPaths);
+          if (!commitAcceptedTask()) {
+            taskBaselines.delete(task.id);
+            freshTask.status = "blocked";
+            const reason = t("loop.reason.prdCommitRefused");
+            log(progress, t("loop.log.blockedReview", { id: task.id, s: elapsed, reason }));
+            emit({ taskId: task.id, status: "blocked", reason, elapsedMs });
+            persist();
+            done();
+            log(progress, t("loop.log.stopWorkspace"));
+            return "stop";
           }
+          // Count only after both the task and its PRD status are in history.
+          ctx.accepted += 1;
           taskBaselines.delete(task.id);
           if (opts.task) {
             done();

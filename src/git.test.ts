@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { git, captureDiff, captureReviewBase, headCommit, taskChangedPaths, commitPaths } from "./git.js";
+import { git, captureDiff, captureReviewBase, headCommit, taskChangedPaths, commitPaths, commitAllExcept } from "./git.js";
 
 vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 vi.mock("node:fs", () => ({
@@ -254,5 +254,28 @@ describe("git", () => {
     mockSpawn.mockReturnValueOnce({ status: 128 } as any);
     expect(commitPaths("/ws", ["gone.ts"], "T1: title")).toBe(false);
     expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("commitAllExcept stages everything except runner control files", () => {
+    mockSpawn.mockReturnValue({ status: 0 } as any);
+
+    expect(commitAllExcept("/ws", ["/ws/prd.json", "progress.md"], "T1: title")).toBe(true);
+    const pathspecOptions = {
+      cwd: "/ws",
+      input: ".\0:(exclude)prd.json\0:(exclude)progress.md\0",
+      stdio: ["pipe", "ignore", "ignore"],
+    };
+    expect(mockSpawn).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+      pathspecOptions,
+    );
+    expect(mockSpawn).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["commit", "-m", "T1: title", "--pathspec-from-file=-", "--pathspec-file-nul"],
+      pathspecOptions,
+    );
   });
 });

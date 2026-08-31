@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { appendFileSync } from "node:fs";
-import { log, setReporter } from "./log.js";
+import { createRawLog, log, setReporter } from "./log.js";
 
 vi.mock("node:fs", () => ({ appendFileSync: vi.fn() }));
 
@@ -47,6 +47,39 @@ describe("log", () => {
     expect(mockAppend).toHaveBeenCalledOnce();
     expect(rep).not.toHaveBeenCalled();
     expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("can echo a line without persisting it", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    log("p.md", "live only", false, false);
+    expect(mockAppend).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("live only"));
+    spy.mockRestore();
+  });
+
+  it("bounds raw executor output per call and records what was omitted", () => {
+    const raw = createRawLog("p.md", "T1", 52);
+    raw.write("12345");
+    raw.write("67890");
+    raw.write("overflow");
+    raw.finish();
+    raw.finish();
+
+    expect(mockAppend).toHaveBeenCalledTimes(3);
+    expect(mockAppend.mock.calls[0][1]).toContain("T1› 12345");
+    expect(mockAppend.mock.calls[1][1]).toContain("T1› 67890");
+    expect(mockAppend.mock.calls[2][1]).toContain("raw executor output truncated");
+  });
+
+  it("keeps dropped raw lines visible in headless mode", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const raw = createRawLog("p.md", "T1", 52);
+    raw.write("12345");
+    raw.write("overflow");
+    raw.finish();
+    expect(spy.mock.calls.some(([line]) => String(line).includes("overflow"))).toBe(true);
+    expect(mockAppend.mock.calls.some(([, line]) => String(line).includes("overflow"))).toBe(false);
     spy.mockRestore();
   });
 });

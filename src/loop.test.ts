@@ -36,6 +36,7 @@ vi.mock("./git.js", () => ({
   taskChangedPaths: vi.fn(() => ["src/a.ts"]),
   preserveWorkAsRef: vi.fn(() => null),
   commitPaths: vi.fn(() => true),
+  commitAllExcept: vi.fn(() => true),
 }));
 // worktree.js is real git plumbing — proven against real repositories in
 // git.integration.test.ts. Here it is a seam, so the loop's routing (degrade to
@@ -88,7 +89,7 @@ import { loadConfig, parseAgent } from "./config.js";
 import { checkAgent } from "./diagnostics.js";
 import { findTask, nextTask, readyTasks } from "./prd.js";
 import { log, setReporter } from "./log.js";
-import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths } from "./git.js";
+import { git, headCommit, captureReviewBase, taskChangedPaths, commitPaths, commitAllExcept } from "./git.js";
 import {
   claimRunLock,
   createTaskWorktree,
@@ -139,6 +140,7 @@ const mHeadCommit = vi.mocked(headCommit);
 const mCaptureReviewBase = vi.mocked(captureReviewBase);
 const mTaskChangedPaths = vi.mocked(taskChangedPaths);
 const mCommitPaths = vi.mocked(commitPaths);
+const mCommitAllExcept = vi.mocked(commitAllExcept);
 const mCreateWorktree = vi.mocked(createTaskWorktree);
 const mMergeBack = vi.mocked(mergeBackTaskWork);
 const mReapWorktrees = vi.mocked(reapOrphanWorktrees);
@@ -223,6 +225,7 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 
 // existsSync flags
 let prdExists: boolean, progressExists: boolean, gitExists: boolean;
+let commitSequence = 0;
 
 const origTTY = process.stdout.isTTY;
 function setTTY(v: boolean): void {
@@ -262,10 +265,25 @@ beforeEach(() => {
   }) as never);
   mFindTask.mockReturnValue(TASK as never);
   mRunTask.mockResolvedValue({ ok: true, cost: NO_COST });
+  mHeadCommit.mockReset();
   mHeadCommit.mockReturnValue(null);
+  commitSequence = 0;
+  mGit.mockReset();
+  mGit.mockReturnValue(null);
   mCaptureReviewBase.mockReturnValue("base-tree");
   mTaskChangedPaths.mockReturnValue(["src/a.ts"]);
-  mCommitPaths.mockReturnValue(true);
+  // A successful commit advances HEAD for the metadata commit as well. Tests
+  // that model a hook refusal override this implementation explicitly.
+  mCommitPaths.mockReset();
+  mCommitPaths.mockImplementation((_workspace, paths) => {
+    // Only the new metadata commit needs to be represented as a new HEAD in
+    // these loop seams. Task-code commit hash tests configure HEAD explicitly.
+    commitSequence += 1;
+    mHeadCommit.mockReturnValue((paths as string[]).includes("prd.json") ? `prd-committed-${commitSequence}` : `task-committed-${commitSequence}`);
+    return true;
+  });
+  mCommitAllExcept.mockReset();
+  mCommitAllExcept.mockReturnValue(true);
   mCreateWorktree.mockReturnValue("/ws/.ralphrun/worktrees/T1");
   mMergeBack.mockReturnValue({ status: "ok", head: "wt-head" });
   mReapWorktrees.mockReturnValue(0);
@@ -643,6 +661,20 @@ describe("runLoop real run (non-TTY fallback)", () => {
     expect(mSetReporter).toHaveBeenLastCalledWith(null); // cleaned up on exit
   });
 
+  it("blocks a serial task when its code commit is refused before the PRD commit", async () => {
+    fastTimers();
+    mHeadCommit.mockReturnValue("base-sha");
+    mCommitPaths.mockImplementation((_workspace, paths) => !paths.includes("src/a.ts"));
+    mCommitAllExcept.mockReturnValue(true);
+
+    await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable", noReviewAfter: true });
+
+    const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
+    expect(saved.tasks[0].status).toBe("blocked");
+    expect(mCommitPaths).not.toHaveBeenCalledWith(expect.any(String), ["prd.json"], expect.stringContaining("chore(prd)"));
+    expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("PRD status commit"));
+  });
+
   it("done → commit; falls back to default template when commit_message_template is empty", async () => {
     fastTimers();
     mLoadConfig.mockReturnValue(cfg({ commit_message_template: "" })); // Falsy forces fallback
@@ -667,7 +699,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     fastTimers();
     mTaskChangedPaths.mockReturnValue([]);
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable" });
-    expect(mCommitPaths).not.toHaveBeenCalled();
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["prd.json"], expect.stringContaining("chore(prd)"));
     expect(mGit).not.toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.anything());
   });
 
@@ -678,8 +710,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mCommitPaths.mockReturnValue(false);
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable" });
     expect(mLog).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("could not scope"));
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "add", "-A");
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "commit", "-m", expect.stringContaining("T1"));
+    expect(mCommitAllExcept).toHaveBeenCalledWith(expect.any(String), expect.any(Array), expect.stringContaining("T1"));
   });
 
   // no baseline (a repo with no commits yet) is not the executor's fault: fall
@@ -689,7 +720,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
     mTaskChangedPaths.mockReturnValue(null);
     await runLoop({ prd: "prd.json", executor: "claude:sonnet", advisor: "claude:fable" });
     expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("could not scope"));
-    expect(mGit).toHaveBeenCalledWith(expect.any(String), "add", "-A");
+    expect(mCommitAllExcept).toHaveBeenCalledWith(expect.any(String), expect.any(Array), expect.stringContaining("T1"));
   });
 
   it("failing task (runTask throws) → retry (todo); parseAgent null skips override", async () => {
@@ -820,6 +851,8 @@ describe("runLoop real run (non-TTY fallback)", () => {
 
   it("does not report a commit hash when HEAD is unchanged", async () => {
     mHeadCommit.mockReturnValue("same-commit");
+    mGit.mockReturnValue(0);
+    mCommitPaths.mockReset().mockReturnValue(true);
     await runLoop({ prd: "prd.json" });
     expect(mLog).not.toHaveBeenCalledWith(expect.any(String), expect.stringContaining("committed —"));
   });
@@ -1479,6 +1512,8 @@ describe("runLoop real run (non-TTY fallback)", () => {
     // that done writes a task into prd.json with zero lines to show for it.
     mLoadConfig.mockReturnValue(cfg({ worktree_per_task: true }));
     mHeadCommit.mockReturnValue("base-sha"); // before === after: no commit happened
+    mTaskChangedPaths.mockReturnValue(["src/a.ts"]);
+    mCommitPaths.mockReset().mockReturnValue(false);
     mMergeBack.mockReturnValue({ status: "nothing", head: "base-sha" });
 
     await runLoop({ prd: "prd.json" });
@@ -1503,7 +1538,7 @@ describe("runLoop real run (non-TTY fallback)", () => {
 
     const saved = JSON.parse(mWrite.mock.calls.at(-1)![1] as string);
     expect(saved.tasks[0].status).toBe("done");
-    expect(mCommitPaths).not.toHaveBeenCalled();
+    expect(mCommitPaths).toHaveBeenCalledWith(expect.any(String), ["prd.json"], expect.stringContaining("chore(prd)"));
   });
 
   // The conflicting sha is what makes the loser's work recoverable by hand, but
@@ -2451,6 +2486,10 @@ describe("runLoop parallel waves", () => {
     const read = livePrd([wtTask("A", ["src/api/**"])]);
     dispatchOnce();
     mTaskChangedPaths.mockReturnValue(null);
+    mCommitAllExcept.mockImplementation(() => {
+      mHeadCommit.mockReturnValue("task-committed");
+      return true;
+    });
 
     await runLoop({ prd: "prd.json" });
 

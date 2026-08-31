@@ -196,6 +196,18 @@ export function commitPaths(workspace: string, paths: string[], message: string)
   return true;
 }
 
+/**
+ * Fallback for the rare case where a task baseline cannot scope its changes.
+ * It may include unrelated user work by design, but runner-owned control files
+ * must never ride along in the task commit.
+ */
+export function commitAllExcept(workspace: string, excludedPaths: string[], message: string): boolean {
+  const paths = [".", ...ignoredPathspec(workspace, excludedPaths)];
+  if (gitWithPathspec(workspace, paths, "add", "-A") !== 0) return false;
+  gitWithPathspec(workspace, paths, "commit", "-m", message);
+  return true;
+}
+
 function withTemporaryIndex<T>(workspace: string, fn: (index: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "ralphrun-index-"));
   const index = join(dir, "index");

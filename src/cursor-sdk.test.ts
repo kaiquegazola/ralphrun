@@ -2,10 +2,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Mock, MockInstance } from "vitest";
 
-vi.mock("./log.js", () => ({ log: vi.fn() }));
+const logHarness = vi.hoisted(() => ({ log: vi.fn(), rawFinish: vi.fn() }));
+vi.mock("./log.js", () => ({
+  log: logHarness.log,
+  createRawLog: vi.fn((progress: string, tag: string) => ({
+    write: (line: string) => {
+      if (line.trim()) logHarness.log(progress, "  " + tag + "› " + line, false);
+    },
+    finish: logHarness.rawFinish,
+  })),
+}));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
 
-import { log } from "./log.js";
+import { createRawLog, log } from "./log.js";
 import { emit } from "./tui/events.js";
 import {
   cursorSdkEvent,
@@ -27,6 +36,7 @@ import { MAX_RESPONSE_CHARS } from "./stream.js";
 
 const logMock = log as unknown as Mock;
 const emitMock = emit as unknown as Mock;
+const rawLogMock = vi.mocked(createRawLog);
 
 const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
 const never = <T>(): Promise<T> => new Promise<T>(() => {});
@@ -203,6 +213,8 @@ describe("runCursorSdkExecutor — happy path", () => {
     expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "one", lineSource: "executor" });
     expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "two", lineSource: "executor" });
     expect(logMock).toHaveBeenCalledWith("prog", "  T1› one", false);
+    expect(rawLogMock).toHaveBeenCalledWith("prog", "T1");
+    expect(logHarness.rawFinish).toHaveBeenCalledTimes(1);
     expect(logged()).toContain("  T1: cursorsdk finished (0s)");
     expect(agent.close).toHaveBeenCalled();
   });
@@ -521,6 +533,7 @@ describe("runCursorSdkExecutor — deadline, cancel and abort", () => {
       await vi.advanceTimersByTimeAsync(1500);
       expect(await p).toBe(false);
       expect(logged().join("\n")).toContain("TIMEOUT");
+      expect(logHarness.rawFinish).toHaveBeenCalledTimes(1);
       expect(run.cancel).toHaveBeenCalled();
       expect(agent.close).toHaveBeenCalled();
     } finally {
@@ -711,6 +724,7 @@ describe("runCursorSdkExecutor — deadline, cancel and abort", () => {
     expect(run.cancel).toHaveBeenCalled();
     expect(agent.close).toHaveBeenCalled();
     expect(removed).toHaveBeenCalled();
+    expect(logHarness.rawFinish).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -12,7 +12,7 @@ import type { AgentSpec, Config } from "./config.js";
 import { runCursorSdkExecutor } from "./cursor-sdk.js";
 import { startIdleLadder } from "./idleness.js";
 import { t } from "./i18n.js";
-import { log } from "./log.js";
+import { createRawLog, log } from "./log.js";
 import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
 import { killTree, releasePipes, spawn, writePrompt } from "./spawn.js";
@@ -62,6 +62,7 @@ export function runExecutor(
     const hb = cfg.heartbeat_secs ?? 30;
 
     const start = Date.now();
+    const rawLog = createRawLog(progress, task.id);
     let last = start; // last sign of life from the child
     let lastBeat = start; // last "…working" line — throttling only, kept SEPARATE
     //  from `last` so that resetting one to throttle the other cannot make the
@@ -174,7 +175,7 @@ export function runExecutor(
         emit({ taskId: task.id, line, lineSource: "executor" });
         // The raw line is already emitted to the TUI above; keep it in progress.md
         // without routing a duplicate system line back into the live pane.
-        if (line.trim()) log(progress, `  ${tag}› ${line}`, false);
+        rawLog.write(line);
       }
     });
 
@@ -206,6 +207,7 @@ export function runExecutor(
     const finish = (v: boolean): void => {
       if (settled) return;
       settled = true;
+      rawLog.finish();
       clearInterval(hbTimer);
       idle.stop();
       clearTimeout(grace);
@@ -276,6 +278,10 @@ export function runExecutor(
       // don't wait forever for a stream a survivor may be holding open
       drainTimer = setTimeout(() => {
         drained = true;
+        // A grandchild that holds the pipes open must be cut off before the
+        // promise settles. Otherwise readline can still receive late lines
+        // after `finish()` closes the raw writer, silently losing them.
+        releasePipes(proc, merged, rl);
         settleClose();
       }, DRAIN_GRACE_MS);
       drainTimer.unref?.();

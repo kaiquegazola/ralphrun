@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 
 import type { AgentSpec, Config } from "./config.js";
 import { t } from "./i18n.js";
-import { log } from "./log.js";
+import { createRawLog, log } from "./log.js";
 import type { Task } from "./prd.js";
 import { BLOCKED_MARKER } from "./prompts.js";
 import {
@@ -441,6 +441,7 @@ export async function runCursorSdkExecutor(
   // works the same on every backend, and survives a retry — where an agent held
   // across rounds would already be gone.
   const tag = task.id;
+  const rawLog = createRawLog(progress, tag);
   const start = Date.now();
   const hb = cfg.heartbeat_secs ?? 30;
   const timeout = cfg.task_timeout;
@@ -510,7 +511,7 @@ export async function runCursorSdkExecutor(
           emit({ taskId: task.id, line, lineSource: "executor" });
           // already emitted to the TUI above; keep it in progress.md without
           // routing a duplicate system line back into the live pane
-          if (line.trim()) log(progress, `  ${tag}› ${line}`, false);
+          rawLog.write(line);
         }
       },
       ...seams,
@@ -556,6 +557,7 @@ export async function runCursorSdkExecutor(
     log(progress, `  ${tag}: ${execu.cli} finished (${s}s)`);
     return true;
   } finally {
+    rawLog.finish();
     clearInterval(hbTimer);
     // `finally` is this backend's single settle point, so the sink fires exactly
     // once here too — including on the timeout/abort paths that were still billed

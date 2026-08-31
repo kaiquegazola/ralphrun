@@ -5,7 +5,16 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 vi.mock("./adapters.js", () => ({ buildCmd: vi.fn(() => ["mybin", "a1"]), promptViaStdin: vi.fn(() => false) }));
-vi.mock("./log.js", () => ({ log: vi.fn() }));
+const logHarness = vi.hoisted(() => ({ log: vi.fn(), rawFinish: vi.fn() }));
+vi.mock("./log.js", () => ({
+  log: logHarness.log,
+  createRawLog: vi.fn((progress: string, tag: string) => ({
+    write: (line: string) => {
+      if (line.trim()) logHarness.log(progress, "  " + tag + "› " + line, false);
+    },
+    finish: logHarness.rawFinish,
+  })),
+}));
 vi.mock("./tui/events.js", () => ({ emit: vi.fn() }));
 vi.mock("./cursor-sdk.js", () => ({ runCursorSdkExecutor: vi.fn(async () => true) }));
 // releasePipes keeps its REAL implementation (it operates on the fake child's
@@ -18,7 +27,7 @@ vi.mock("./spawn.js", async (importOriginal) => {
 
 import { promptViaStdin } from "./adapters.js";
 import { killTree, releasePipes, spawn } from "./spawn.js";
-import { log } from "./log.js";
+import { createRawLog, log } from "./log.js";
 import { emit } from "./tui/events.js";
 import { runCursorSdkExecutor } from "./cursor-sdk.js";
 import { runExecutor } from "./executor.js";
@@ -29,6 +38,7 @@ const spawnMock = spawn as unknown as Mock;
 const killTreeMock = killTree as unknown as Mock;
 const releasePipesMock = releasePipes as unknown as Mock;
 const emitMock = emit as unknown as Mock;
+const rawLogMock = vi.mocked(createRawLog);
 
 function makeProc() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -141,6 +151,8 @@ it("resolves true on exit 0 and echoes non-blank lines (heartbeat_secs undefined
   closeProc(proc, 0);
   expect(await p).toBe(true);
   expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("hello world"), false);
+  expect(rawLogMock).toHaveBeenCalledWith("prog", "T1");
+  expect(logHarness.rawFinish).toHaveBeenCalledTimes(1);
   expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("exit=0"));
   // structured event: every output line goes to the bus (blank included, unlike log)
   expect(emitMock).toHaveBeenCalledWith({ taskId: "T1", line: "hello world", lineSource: "executor" });
@@ -312,6 +324,7 @@ it("still settles when the output stream never ends (survivor holding the pipe)"
     proc.emit("close", 0); // stdout deliberately left open
     await vi.advanceTimersByTimeAsync(2000); // drain grace elapses
     expect(await p).toBe(true);
+    expect(releasePipesMock).toHaveBeenCalled();
     // the stream draining later must not re-settle the promise
     proc.stdout.end("late tail");
     proc.stderr.end();
@@ -330,6 +343,7 @@ it("reads the marker from stderr too (both streams are merged)", async () => {
   proc.stderr.end("RALPHRUN_BLOCKED: missing a credential I must not fabricate\n");
   closeProc(proc, 0);
   expect(await p).toBe(false);
+  expect(logHarness.rawFinish).toHaveBeenCalledTimes(1);
 });
 
 it("already-aborted signal kills immediately and resolves false", async () => {
@@ -352,6 +366,7 @@ it("abort mid-run kills, resolves false, and a later close is a no-op", async ()
   expect(log).toHaveBeenCalledWith("prog", expect.stringContaining("skipped by user"));
   proc.emit("close", 0); // settled guard: no-op, stays false
   expect(await p).toBe(false);
+  expect(logHarness.rawFinish).toHaveBeenCalledTimes(1);
 });
 
 it("labels a quit abort separately from a manual skip", async () => {
